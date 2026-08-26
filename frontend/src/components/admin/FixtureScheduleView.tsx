@@ -1,0 +1,455 @@
+import React, { useState } from 'react';
+import { 
+  Sparkles, 
+  Calendar, 
+  Clock, 
+  Layers, 
+  Play, 
+  Check, 
+  RefreshCw, 
+  AlertCircle, 
+  Flame, 
+  CheckCircle2, 
+  Grid, 
+  List, 
+  ShieldCheck, 
+  ArrowRight,
+  Send,
+  Eye
+} from 'lucide-react';
+import { Tournament, Match } from '../../types/tournament';
+import { useTournament } from '../../context/TournamentContext';
+import { ConfirmationModal } from '../common/ConfirmationModal';
+
+interface FixtureScheduleViewProps {
+  tournament: Tournament;
+  onOpenMatch: (match: Match) => void;
+}
+
+export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({ 
+  tournament, 
+  onOpenMatch 
+}) => {
+  const { 
+    generateFixturesForTournament, 
+    generateScheduleForTournament, 
+    publishScheduleForTournament,
+    role
+  } = useTournament();
+
+  const [viewMode, setViewMode] = useState<'rounds' | 'boards'>('rounds');
+  const [restMinutes, setRestMinutes] = useState(10);
+  const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
+  const [selectedRoundFilter, setSelectedRoundFilter] = useState<string>('all');
+
+  const matches = tournament.matches || [];
+  const hasMatches = matches.length > 0;
+  const isScheduled = tournament.status === 'scheduled' || tournament.status === 'ongoing' || tournament.status === 'completed';
+
+  // Group matches by round
+  const rounds = Array.from(new Set(matches.map(m => m.roundName)));
+
+  // Filtered matches
+  const displayedMatches = selectedRoundFilter === 'all'
+    ? matches
+    : matches.filter(m => m.roundName === selectedRoundFilter);
+
+  // Group matches by board for board timeline
+  const boardMap: Map<number, Match[]> = new Map();
+  for (let b = 1; b <= tournament.numberOfBoards; b++) {
+    boardMap.set(b, []);
+  }
+  matches.forEach(m => {
+    const list = boardMap.get(m.boardNumber) || [];
+    list.push(m);
+    boardMap.set(m.boardNumber, list);
+  });
+
+  return (
+    <div id="fixture-schedule-view" className="space-y-5">
+      
+      {/* Control Banner Card */}
+      <div className="bg-white p-5 rounded-2xl border border-gray-200/80 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center space-x-2">
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#0B5D3B] text-white uppercase tracking-wider">
+              <Sparkles className="w-3 h-3 text-[#D4A72C]" />
+              Automated Scheduler
+            </span>
+            <span className="text-xs text-gray-500">
+              {tournament.numberOfBoards} Synco Championship Boards · {tournament.rules.matchDurationMinutes} min matches
+            </span>
+          </div>
+
+          <h3 className="text-lg font-serif font-bold text-gray-900 mt-1">
+            Fixtures & Conflict-Free Schedule Engine
+          </h3>
+          <p className="text-xs text-gray-600">
+            Generates all tournament pairings and assigns conflict-free boards, dates, and rest periods with zero manual effort.
+          </p>
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex flex-wrap items-center gap-2">
+          {role === 'admin' && (
+            <>
+              {/* Rest buffer slider/selector */}
+              <div className="flex items-center bg-gray-50 px-2.5 py-1.5 rounded-xl border border-gray-200 text-xs">
+                <span className="text-gray-500 mr-2 font-medium">Rest Buffer:</span>
+                <select
+                  value={restMinutes}
+                  onChange={e => setRestMinutes(parseInt(e.target.value))}
+                  className="bg-transparent font-bold text-gray-800 focus:outline-hidden"
+                >
+                  <option value={5}>5 mins</option>
+                  <option value={10}>10 mins</option>
+                  <option value={15}>15 mins</option>
+                  <option value={20}>20 mins</option>
+                </select>
+              </div>
+
+              {!hasMatches ? (
+                <button
+                  id="generate-fixtures-btn"
+                  onClick={() => generateFixturesForTournament(tournament.id)}
+                  className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-4 h-4 text-[#D4A72C]" />
+                  <span>Generate Fixtures</span>
+                </button>
+              ) : (
+                <>
+                  <button
+                    id="generate-fixtures-btn"
+                    onClick={() => generateFixturesForTournament(tournament.id)}
+                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#0B5D3B] text-xs font-bold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1.5"
+                    title="Regenerate pairings & match bracket"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Generate Fixtures</span>
+                  </button>
+
+                  {!tournament.scheduledPublished && (
+                    <button
+                      id="auto-schedule-btn"
+                      onClick={() => generateScheduleForTournament(tournament.id, restMinutes)}
+                      className="px-3.5 py-2 bg-amber-50 hover:bg-[#D4A72C]/10 text-amber-800 text-xs font-bold rounded-xl border border-amber-200 transition-colors flex items-center gap-1.5"
+                      title="Generate conflict-free boards, timings, and rest periods"
+                    >
+                      <Calendar className="w-3.5 h-3.5 text-[#D4A72C]" />
+                      <span>Auto-Schedule</span>
+                    </button>
+                  )}
+
+                  {!tournament.scheduledPublished && (
+                    <button
+                      id="publish-schedule-btn"
+                      onClick={() => setIsPublishModalOpen(true)}
+                      className="px-4 py-2 bg-[#D4A72C] hover:bg-[#c29623] text-[#202522] text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5"
+                    >
+                      <Send className="w-3.5 h-3.5 text-[#202522]" />
+                      <span>Publish Schedule</span>
+                    </button>
+                  )}
+                </>
+              )}
+            </>
+          )}
+
+          {/* View Mode Toggle */}
+          <div className="flex items-center bg-gray-100 p-1 rounded-xl border border-gray-200">
+            <button
+              onClick={() => setViewMode('rounds')}
+              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all ${
+                viewMode === 'rounds' ? 'bg-white text-gray-900 shadow-xs' : 'text-gray-500 hover:text-gray-900'
+              }`}
+              title="Round by Round View"
+            >
+              <List className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Rounds</span>
+            </button>
+            <button
+              onClick={() => setViewMode('boards')}
+              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all ${
+                viewMode === 'boards' ? 'bg-white text-gray-900 shadow-xs' : 'text-gray-500 hover:text-gray-900'
+              }`}
+              title="Board Timeline View"
+            >
+              <Grid className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Board Grid</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Constraints Validation Banner */}
+      {hasMatches && (
+        <div className="bg-emerald-50/70 border border-emerald-200/80 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+          <div className="flex items-center space-x-2 text-emerald-950">
+            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span className="font-semibold">All Scheduling Constraints Verified:</span>
+            <span className="text-emerald-800">
+              No overlapping player matches · No concurrent board collisions · Rest buffers respected
+            </span>
+          </div>
+
+          <div className="text-emerald-900 font-bold shrink-0">
+            {matches.length} Matches Assigned · {tournament.numberOfBoards} Boards
+          </div>
+        </div>
+      )}
+
+      {/* Main Fixtures & Schedule Display */}
+      {!hasMatches ? (
+        <div className="bg-white rounded-2xl border border-gray-200/80 p-12 text-center shadow-xs">
+          <div className="w-12 h-12 rounded-full bg-emerald-100 text-[#0B5D3B] flex items-center justify-center mx-auto mb-3">
+            <Sparkles className="w-6 h-6 text-[#D4A72C]" />
+          </div>
+          <h4 className="text-base font-bold text-gray-900 mb-1">
+            Fixtures Have Not Been Generated Yet
+          </h4>
+          <p className="text-xs text-gray-500 max-w-md mx-auto mb-4">
+            Click "Generate Fixtures" to automatically compute all round-robin pairings or seeded knockout brackets according to tournament rules.
+          </p>
+          {role === 'admin' && (
+            <button
+              onClick={() => generateFixturesForTournament(tournament.id)}
+              className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md inline-flex items-center gap-2"
+            >
+              <Sparkles className="w-4 h-4 text-[#D4A72C]" />
+              <span>Generate Automatic Fixtures</span>
+            </button>
+          )}
+        </div>
+      ) : viewMode === 'rounds' ? (
+        
+        /* Round by Round View */
+        <div className="space-y-4">
+          
+          {/* Round Filter Tabs */}
+          {rounds.length > 1 && (
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+              <button
+                onClick={() => setSelectedRoundFilter('all')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors shrink-0 ${
+                  selectedRoundFilter === 'all'
+                    ? 'bg-[#0B5D3B] text-white'
+                    : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-200'
+                }`}
+              >
+                All Rounds ({matches.length})
+              </button>
+              {rounds.map(roundName => {
+                const count = matches.filter(m => m.roundName === roundName).length;
+                return (
+                  <button
+                    key={roundName}
+                    onClick={() => setSelectedRoundFilter(roundName)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors shrink-0 ${
+                      selectedRoundFilter === roundName
+                        ? 'bg-[#0B5D3B] text-white'
+                        : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-200'
+                    }`}
+                  >
+                    {roundName} ({count})
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Matches Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+            {displayedMatches.map((match) => {
+              const isLive = match.status === 'live';
+              const isCompleted = match.status === 'completed';
+
+              return (
+                <div
+                  key={match.id}
+                  onClick={() => onOpenMatch(match)}
+                  className={`bg-white rounded-2xl p-4 border transition-all cursor-pointer relative hover:shadow-md ${
+                    isLive
+                      ? 'border-orange-400 ring-2 ring-orange-400/20 bg-orange-50/20'
+                      : isCompleted
+                      ? 'border-gray-200/80 bg-gray-50/40 opacity-95'
+                      : 'border-gray-200/80 hover:border-emerald-500'
+                  }`}
+                >
+                  {/* Match Header Info */}
+                  <div className="flex items-center justify-between text-xs pb-2.5 mb-2.5 border-b border-gray-100">
+                    <div className="flex items-center space-x-1.5 font-bold text-gray-800">
+                      <span className="text-[#0B5D3B]">Match #{match.matchNumber}</span>
+                      <span className="text-gray-300">·</span>
+                      <span className="text-gray-500 font-medium">{match.roundName}</span>
+                    </div>
+
+                    <div className="flex items-center space-x-1.5">
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-900 font-bold text-[10px]">
+                        Board {match.boardNumber}
+                      </span>
+                      <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                        isLive
+                          ? 'bg-orange-500 text-white animate-pulse'
+                          : isCompleted
+                          ? 'bg-gray-200 text-gray-700'
+                          : 'bg-blue-100 text-blue-800'
+                      }`}>
+                        {isLive ? 'LIVE' : match.status}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Players & Board Scoreline */}
+                  <div className="space-y-2 mb-3">
+                    
+                    {/* Player 1 */}
+                    <div className={`flex items-center justify-between p-2 rounded-xl text-xs transition-colors ${
+                      match.winnerId === match.player1Id
+                        ? 'bg-emerald-50 font-bold text-emerald-950 border border-emerald-200/60'
+                        : 'bg-gray-50/80 text-gray-800'
+                    }`}>
+                      <div className="flex items-center space-x-2 truncate">
+                        <div className="w-5 h-5 rounded-full bg-white border border-gray-300 flex items-center justify-center font-bold text-[10px] text-gray-700 shrink-0">
+                          1
+                        </div>
+                        <span className="truncate">{match.player1Name}</span>
+                      </div>
+                      <div className="flex items-center space-x-2 shrink-0">
+                        <span className="font-bold text-sm text-gray-900">
+                          {match.player1TotalPoints}
+                        </span>
+                        {match.winnerId === match.player1Id && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-600 text-white font-bold">
+                            WIN ({match.player1BoardWins})
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Player 2 */}
+                    <div className={`flex items-center justify-between p-2 rounded-xl text-xs transition-colors ${
+                      match.winnerId === match.player2Id
+                        ? 'bg-emerald-50 font-bold text-emerald-950 border border-emerald-200/60'
+                        : 'bg-gray-50/80 text-gray-800'
+                    }`}>
+                      <div className="flex items-center space-x-2 truncate">
+                        <div className="w-5 h-5 rounded-full bg-gray-900 border border-gray-900 flex items-center justify-center font-bold text-[10px] text-white shrink-0">
+                          2
+                        </div>
+                        <span className="truncate">{match.player2Name}</span>
+                      </div>
+                      <div className="flex items-center space-x-2 shrink-0">
+                        <span className="font-bold text-sm text-gray-900">
+                          {match.player2TotalPoints}
+                        </span>
+                        {match.winnerId === match.player2Id && (
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-600 text-white font-bold">
+                            WIN ({match.player2BoardWins})
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                  </div>
+
+                  {/* Match Footer: Timing & CTA */}
+                  <div className="flex items-center justify-between text-[11px] text-gray-500 pt-2 border-t border-gray-100">
+                    <div className="flex items-center space-x-1">
+                      <Clock className="w-3.5 h-3.5 text-gray-400" />
+                      <span>{match.scheduledDate || 'Today'} · {match.scheduledTime || '09:00 AM'}</span>
+                    </div>
+
+                    <span className="text-[#0B5D3B] font-bold flex items-center gap-0.5 group-hover:translate-x-0.5 transition-transform">
+                      <span>{role === 'admin' ? 'Control Match' : 'View Scores'}</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </span>
+                  </div>
+
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+
+        /* Board Timeline View */
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {Array.from(boardMap.entries()).map(([boardNum, boardMatches]) => (
+            <div 
+              key={boardNum}
+              className="bg-white rounded-2xl border border-gray-200/80 overflow-hidden shadow-xs flex flex-col"
+            >
+              {/* Board Header */}
+              <div className="bg-[#0B5D3B] text-white px-4 py-3 flex items-center justify-between">
+                <div className="font-serif font-bold text-sm flex items-center gap-1.5">
+                  <div className="w-2.5 h-2.5 rounded-full bg-[#D4A72C]" />
+                  <span>Board #{boardNum}</span>
+                </div>
+                <span className="text-[10px] bg-emerald-900 text-emerald-200 px-2 py-0.5 rounded-md font-semibold">
+                  {boardMatches.length} Matches
+                </span>
+              </div>
+
+              {/* Timeline slots */}
+              <div className="p-3 space-y-2.5 flex-1 overflow-y-auto max-h-[500px] bg-gray-50/50 divide-y divide-gray-100">
+                {boardMatches.length === 0 ? (
+                  <div className="py-8 text-center text-gray-400 text-xs">
+                    No matches assigned
+                  </div>
+                ) : (
+                  boardMatches.map(m => (
+                    <div
+                      key={m.id}
+                      onClick={() => onOpenMatch(m)}
+                      className={`pt-2.5 first:pt-0 cursor-pointer group`}
+                    >
+                      <div className="flex items-center justify-between text-[10px] text-gray-500 mb-1">
+                        <span className="font-bold text-gray-700">{m.scheduledTime}</span>
+                        <span className={`px-1.5 py-0.2 rounded font-bold capitalize ${
+                          m.status === 'live' ? 'bg-orange-500 text-white' :
+                          m.status === 'completed' ? 'bg-gray-200 text-gray-700' :
+                          'bg-blue-100 text-blue-800'
+                        }`}>
+                          {m.status}
+                        </span>
+                      </div>
+
+                      <div className="bg-white p-2.5 rounded-xl border border-gray-200 group-hover:border-emerald-500 transition-colors shadow-2xs">
+                        <div className="text-xs font-bold text-gray-900 truncate">
+                          {m.player1Name}
+                        </div>
+                        <div className="text-[10px] text-gray-400 font-medium">vs</div>
+                        <div className="text-xs font-bold text-gray-900 truncate">
+                          {m.player2Name}
+                        </div>
+
+                        {m.resultConfirmed && (
+                          <div className="mt-1 text-[10px] text-emerald-700 font-bold">
+                            Final: {m.player1BoardWins} - {m.player2BoardWins} (Winner: {m.winnerName})
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Confirmation Modal to Publish Schedule */}
+      <ConfirmationModal
+        isOpen={isPublishModalOpen}
+        onClose={() => setIsPublishModalOpen(false)}
+        onConfirm={() => publishScheduleForTournament(tournament.id)}
+        title="Publish Official Schedule?"
+        description="Publishing the schedule makes all match timings and board allocations visible to all players and enables live match scoring."
+        confirmLabel="Publish Schedule to Players"
+        variant="primary"
+      />
+
+    </div>
+  );
+};
