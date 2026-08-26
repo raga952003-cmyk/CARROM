@@ -34,6 +34,43 @@ def _slot_id(value):
     return value
 
 
+def _hydrate_registrations(supabase, reg_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Attach both player profiles to every doubles registration's team.
+
+    A PostgREST join reaches `teams` but not the two `profiles` rows it points
+    at, so the team arrives with player1_id/player2_id and no names. The UI
+    renders `team.player1.name` directly, so the profiles are fetched here in
+    one batched query and grafted on.
+    """
+    if not reg_rows:
+        return []
+
+    team_player_ids = set()
+    for reg in reg_rows:
+        team = reg.get("team")
+        if team:
+            team_player_ids.update(
+                pid for pid in (team.get("player1_id"), team.get("player2_id")) if pid
+            )
+
+    profiles_by_id: Dict[str, Any] = {}
+    if team_player_ids:
+        rows = supabase.table("profiles").select("*").in_(
+            "id", list(team_player_ids)
+        ).execute().data or []
+        profiles_by_id = {p["id"]: p for p in rows}
+
+    hydrated = []
+    for reg in reg_rows:
+        team = reg.get("team")
+        if team:
+            team["player1"] = profiles_by_id.get(team.get("player1_id"))
+            team["player2"] = profiles_by_id.get(team.get("player2_id"))
+        hydrated.append(serialize_registration(reg))
+    return hydrated
+
+
 def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Attach registrations, matches, boards and audit history to tournament rows.
@@ -52,30 +89,9 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> Lis
         "*, player:profiles(*), team:teams(*)"
     ).in_("tournament_id", tournament_ids).execute().data or []
 
-    team_player_ids = set()
-    for reg in reg_rows:
-        team = reg.get("team")
-        if team:
-            team_player_ids.update(
-                pid for pid in (team.get("player1_id"), team.get("player2_id")) if pid
-            )
-
-    profiles_by_id: Dict[str, Any] = {}
-    if team_player_ids:
-        profile_rows = supabase.table("profiles").select("*").in_(
-            "id", list(team_player_ids)
-        ).execute().data or []
-        profiles_by_id = {p["id"]: p for p in profile_rows}
-
     regs_by_tournament: Dict[str, List[Dict[str, Any]]] = {}
-    for reg in reg_rows:
-        team = reg.get("team")
-        if team:
-            team["player1"] = profiles_by_id.get(team.get("player1_id"))
-            team["player2"] = profiles_by_id.get(team.get("player2_id"))
-        regs_by_tournament.setdefault(reg["tournament_id"], []).append(
-            serialize_registration(reg)
-        )
+    for raw, serialized in zip(reg_rows, _hydrate_registrations(supabase, reg_rows)):
+        regs_by_tournament.setdefault(raw["tournament_id"], []).append(serialized)
 
     # --- Matches, boards and score audit trail -----------------------------
     match_rows = supabase.table("matches").select("*").in_(
@@ -253,8 +269,10 @@ async def delete_tournament(id: str, admin = Depends(verify_admin)):
 async def get_tournament_registrations(id: str):
     supabase = get_admin_db()
     try:
-        res = supabase.table("registrations").select("*, player:profiles(*), team:teams(*)").eq("tournament_id", id).execute()
-        return [serialize_registration(r) for r in (res.data or [])]
+        res = supabase.table("registrations").select(
+            "*, player:profiles(*), team:teams(*)"
+        ).eq("tournament_id", id).execute()
+        return _hydrate_registrations(supabase, res.data or [])
     except HTTPException:
         raise
     except Exception as e:

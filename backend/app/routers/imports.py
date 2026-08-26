@@ -1,14 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
+from app.services.sheet_parser import parse_participants
+from app.services.audit_service import record_audit
 from app.routers.tournaments import generate_fixtures, generate_schedule, publish_schedule
+from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import io
+import json
 import uuid
 import secrets
-from typing import List, Dict, Any
+import logging
+
+logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/imports", tags=["imports"])
+
 
 @router.post("/excel")
 async def import_excel_file(
@@ -16,165 +23,269 @@ async def import_excel_file(
     admin = Depends(verify_admin)
 ):
     """
-    Parses uploaded Excel/CSV file and returns validation results.
+    Parse an uploaded Excel/CSV participant sheet and return it for review.
+
+    Nothing is written here: the admin confirms the parsed rows separately
+    (spec 67), so a misread sheet cannot create accounts.
     """
-    filename = file.filename
-    if not (filename.endswith(".xlsx") or filename.endswith(".xls") or filename.endswith(".csv")):
-        raise HTTPException(status_code=400, detail="Unsupported file format. Please upload an Excel or CSV file.")
-    
+    filename = file.filename or ""
+    if not filename.lower().endswith((".xlsx", ".xls", ".csv")):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file format. Upload a .xlsx, .xls or .csv file.",
+        )
+
     try:
         content = await file.read()
-        if filename.endswith(".csv"):
+        if filename.lower().endswith(".csv"):
             df = pd.read_csv(io.BytesIO(content))
         else:
             df = pd.read_excel(io.BytesIO(content))
-
-        # Check required columns
-        # Normalize column headers to lowercase/no space
-        df.columns = [str(c).strip().lower() for c in df.columns]
-        
-        name_col = next((c for c in df.columns if "name" in c), None)
-        if not name_col:
-            raise HTTPException(status_code=400, detail="Sheet must contain a 'Name' column.")
-            
-        club_col = next((c for c in df.columns if "club" in c), None)
-        city_col = next((c for c in df.columns if "city" in c), None)
-        rating_col = next((c for c in df.columns if "rating" in c or "rate" in c), None)
-        seed_col = next((c for c in df.columns if "seed" in c), None)
-        email_col = next((c for c in df.columns if "email" in c or "mail" in c), None)
-        phone_col = next((c for c in df.columns if "phone" in c or "contact" in c), None)
-
-        parsed_players = []
-        validation_errors = []
-
-        for idx, row in df.iterrows():
-            name = str(row[name_col]).strip() if pd.notna(row[name_col]) else ""
-            if not name or name.lower() == "nan":
-                validation_errors.append(f"Row {idx + 1}: Name is missing.")
-                continue
-
-            club = str(row[club_col]).strip() if (club_col and pd.notna(row[club_col])) else "Independent"
-            city = str(row[city_col]).strip() if (city_col and pd.notna(row[city_col])) else "Pune"
-            
-            try:
-                rating = int(row[rating_col]) if (rating_col and pd.notna(row[rating_col])) else 1500
-            except ValueError:
-                rating = 1500
-                validation_errors.append(f"Row {idx + 1} ({name}): Invalid rating format. Defaulted to 1500.")
-
-            try:
-                seed = int(row[seed_col]) if (seed_col and pd.notna(row[seed_col])) else None
-            except ValueError:
-                seed = None
-                validation_errors.append(f"Row {idx + 1} ({name}): Invalid seed format. Ignored.")
-                
-            email = str(row[email_col]).strip() if (email_col and pd.notna(row[email_col])) else None
-            phone = str(row[phone_col]).strip() if (phone_col and pd.notna(row[phone_col])) else None
-
-            parsed_players.append({
-                "name": name,
-                "club": club,
-                "city": city,
-                "rating": rating,
-                "seed": seed,
-                "email": email,
-                "phone": phone,
-                "selected": True
-            })
-
-        return {
-            "fileName": filename,
-            "players": parsed_players,
-            "errors": validation_errors,
-            "status": "success"
-        }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Could not read the file: {str(e)}")
+
+    if df.empty:
+        raise HTTPException(status_code=400, detail="The sheet has no rows.")
+
+    try:
+        entries, errors, meta = parse_participants(df)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse the sheet: {str(e)}")
+
+    if not entries:
+        raise HTTPException(
+            status_code=400,
+            detail="No usable participant rows were found. " + (" ".join(errors[:3]) if errors else ""),
+        )
+
+    return {
+        "fileName": filename,
+        "players": entries,
+        "errors": errors,
+        "status": "success",
+        **meta,
+    }
+
+
+def _find_profile(admin_db, name: str, email: Optional[str],
+                  by_email: Dict[str, Any], by_name: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Match an existing player by email first, falling back to name.
+
+    Email is the reliable key; name matching alone would merge two different
+    people who happen to share a name, so it is only a fallback.
+    """
+    if email and email.lower() in by_email:
+        return by_email[email.lower()]
+    if name and name.lower() in by_name:
+        return by_name[name.lower()]
+    return None
+
+
+def _create_profile(admin_db, name: str, email: Optional[str], club: str, city: str,
+                    rating: int, phone: Optional[str]) -> str:
+    """Create an auth user + profile for an imported participant."""
+    address = email or f"player_{uuid.uuid4().hex[:8]}@carromarena.com"
+    auth_user = admin_db.auth.admin.create_user({
+        "email": address,
+        "password": secrets.token_urlsafe(32),
+        "email_confirm": True,
+        "user_metadata": {
+            "name": name, "role": "player",
+            "club": club, "city": city, "rating": rating,
+        },
+    })
+    user_id = auth_user.user.id
+    admin_db.auth.admin.update_user_by_id(
+        user_id, attributes={"app_metadata": {"role": "player"}}
+    )
+
+    patch = {"club": club, "city": city, "rating": rating}
+    if phone:
+        patch["phone"] = phone
+    admin_db.table("profiles").update(patch).eq("id", user_id).execute()
+    return user_id
+
 
 @router.post("/confirm")
 async def confirm_bulk_import(
     tournamentId: str = Form(...),
     players_json: str = Form(...),
-    admin = Depends(verify_admin)
+    autoGenerate: bool = Form(True),
+    admin = Depends(verify_admin),
 ):
     """
-    Saves players, registers them to the tournament, and auto-schedules fixtures.
-    """
-    import json
-    try:
-        players = json.loads(players_json)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid players JSON payload.")
-    
-    admin_db = get_admin_db()
-    imported_count = 0
-    
-    try:
-        # Load all existing profiles
-        existing_profiles_res = admin_db.table("profiles").select("id, name, email").execute()
-        existing_profiles = {p["name"].lower(): p for p in existing_profiles_res.data}
-        
-        for p in players:
-            if not p.get("selected", True):
-                continue
-                
-            name = p["name"]
-            email = p.get("email") or f"player_{uuid.uuid4().hex[:8]}@carromarena.com"
-            matched_profile = existing_profiles.get(name.lower())
-            
-            if not matched_profile:
-                # Create companion auth user
-                auth_user = admin_db.auth.admin.create_user({
-                    "email": email,
-                    "password": secrets.token_urlsafe(32),
-                    "email_confirm": True,
-                    "user_metadata": {
-                        "name": name,
-                        "role": "player",
-                        "club": p.get("club", "Independent"),
-                        "city": p.get("city", "Pune"),
-                        "rating": p.get("rating", 1500)
-                    }
-                })
-                
-                # Set metadata role
-                admin_db.auth.admin.update_user_by_id(
-                    auth_user.user.id,
-                    attributes={"app_metadata": {"role": "player"}}
-                )
-                
-                # Fetch profiles just in case
-                profile_id = auth_user.user.id
-            else:
-                profile_id = matched_profile["id"]
+    Create the participants and register them, honouring singles vs doubles.
 
-            # Register player to tournament (singles)
-            reg_payload = {
-                "tournament_id": tournamentId,
-                "type": "singles",
-                "player_id": profile_id,
-                "status": "approved",
-                "payment_status": "pending"
-            }
-            # Avoid duplicate registrations
-            check_reg = admin_db.table("registrations").select("id").eq("tournament_id", tournamentId).eq("player_id", profile_id).execute()
-            if not check_reg.data:
-                admin_db.table("registrations").insert(reg_payload).execute()
-                
-            imported_count += 1
-            
-        # Trigger automatic fixture and schedule generation
-        await generate_fixtures(tournamentId, admin)
-        await generate_schedule(tournamentId, restMinutes=10, admin=admin)
-        await publish_schedule(tournamentId, admin)
+    Doubles rows create both players and a team, and register as a doubles
+    entry. Previously every row was registered as `singles` regardless, so a
+    doubles sheet produced singles fixtures between team names.
+    """
+    try:
+        entries = json.loads(players_json)
+        if not isinstance(entries, list):
+            raise ValueError
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid participants payload.")
+
+    admin_db = get_admin_db()
+
+    tournament = admin_db.table("tournaments").select("*").eq("id", tournamentId).execute().data
+    if not tournament:
+        raise HTTPException(status_code=404, detail="Tournament not found.")
+    category = (tournament[0].get("category") or "both").lower()
+
+    try:
+        existing = admin_db.table("profiles").select("id, name, email").execute().data or []
+        by_email = {(p["email"] or "").lower(): p for p in existing if p.get("email")}
+        by_name = {(p["name"] or "").lower(): p for p in existing if p.get("name")}
+
+        singles_added = 0
+        doubles_added = 0
+        skipped: List[str] = []
+
+        for entry in entries:
+            if not entry.get("selected", True):
+                continue
+
+            entry_type = (entry.get("type") or "singles").lower()
+            name = (entry.get("name") or "").strip()
+            if not name:
+                skipped.append("A row had no player name.")
+                continue
+
+            # A doubles entry cannot go into a singles-only event, and vice versa.
+            if entry_type == "doubles" and category == "singles":
+                skipped.append(f"'{name}' is a doubles entry but this tournament is singles only.")
+                continue
+            if entry_type == "singles" and category == "doubles":
+                skipped.append(f"'{name}' is a singles entry but this tournament is doubles only.")
+                continue
+
+            club = entry.get("club") or "Independent"
+            city = entry.get("city") or "Pune"
+            rating = int(entry.get("rating") or 1500)
+
+            matched = _find_profile(admin_db, name, entry.get("email"), by_email, by_name)
+            if matched:
+                player_id = matched["id"]
+            else:
+                player_id = _create_profile(
+                    admin_db, name, entry.get("email"), club, city, rating, entry.get("phone")
+                )
+                by_name[name.lower()] = {"id": player_id, "name": name}
+                if entry.get("email"):
+                    by_email[entry["email"].lower()] = {"id": player_id, "name": name}
+
+            if entry_type == "doubles":
+                partner_name = (entry.get("partnerName") or "").strip()
+                if not partner_name:
+                    skipped.append(f"'{name}' has no partner name, so no team was formed.")
+                    continue
+
+                partner_match = _find_profile(
+                    admin_db, partner_name, entry.get("partnerEmail"), by_email, by_name
+                )
+                if partner_match:
+                    partner_id = partner_match["id"]
+                else:
+                    partner_id = _create_profile(
+                        admin_db, partner_name, entry.get("partnerEmail"),
+                        club, city, rating, entry.get("partnerPhone")
+                    )
+                    by_name[partner_name.lower()] = {"id": partner_id, "name": partner_name}
+                    if entry.get("partnerEmail"):
+                        by_email[entry["partnerEmail"].lower()] = {"id": partner_id, "name": partner_name}
+
+                if partner_id == player_id:
+                    skipped.append(f"'{name}' was paired with themselves.")
+                    continue
+
+                team_name = entry.get("teamName") or f"{name} & {partner_name}"
+                existing_team = admin_db.table("teams").select("id").or_(
+                    f"and(player1_id.eq.{player_id},player2_id.eq.{partner_id}),"
+                    f"and(player1_id.eq.{partner_id},player2_id.eq.{player_id})"
+                ).execute().data
+                if existing_team:
+                    team_id = existing_team[0]["id"]
+                else:
+                    team_id = admin_db.table("teams").insert({
+                        "name": team_name, "player1_id": player_id, "player2_id": partner_id,
+                        "club": club, "city": city, "rating": rating,
+                        "seed": entry.get("seed"),
+                    }).execute().data[0]["id"]
+
+                already = admin_db.table("registrations").select("id").eq(
+                    "tournament_id", tournamentId).eq("team_id", team_id).execute().data
+                if not already:
+                    admin_db.table("registrations").insert({
+                        "tournament_id": tournamentId, "type": "doubles",
+                        "team_id": team_id, "status": "approved", "payment_status": "pending",
+                    }).execute()
+                    doubles_added += 1
+            else:
+                already = admin_db.table("registrations").select("id").eq(
+                    "tournament_id", tournamentId).eq("player_id", player_id).execute().data
+                if not already:
+                    admin_db.table("registrations").insert({
+                        "tournament_id": tournamentId, "type": "singles",
+                        "player_id": player_id, "status": "approved", "payment_status": "pending",
+                    }).execute()
+                    singles_added += 1
+
+        imported = singles_added + doubles_added
+        record_audit(
+            admin_db, actor=admin, action="tournament.import_participants",
+            entity_type="tournament", entity_id=tournamentId,
+            new_state={"singles": singles_added, "doubles": doubles_added},
+            request_context={"skipped": len(skipped), "autoGenerate": autoGenerate},
+        )
+
+        fixtures_built = False
+        fixture_error = None
+        if autoGenerate and imported > 0:
+            try:
+                await generate_fixtures(tournamentId, admin)
+                await generate_schedule(tournamentId, restMinutes=10, admin=admin)
+                await publish_schedule(tournamentId, admin)
+                fixtures_built = True
+            except HTTPException as e:
+                fixture_error = e.detail
+            except Exception as e:
+                fixture_error = str(e)
+
+        parts = []
+        if singles_added:
+            parts.append(f"{singles_added} singles entr{'y' if singles_added == 1 else 'ies'}")
+        if doubles_added:
+            parts.append(f"{doubles_added} doubles team{'' if doubles_added == 1 else 's'}")
+        summary = " and ".join(parts) if parts else "no new entries"
+
+        message = f"Imported {summary}."
+        if skipped:
+            message += f" {len(skipped)} row(s) were skipped."
+        if fixtures_built:
+            message += " Fixtures generated and the schedule published."
+        elif fixture_error:
+            message += f" Fixtures were not generated: {fixture_error}"
 
         return {
-            "status": "success",
-            "message": f"Imported {imported_count} players, created fixtures, and published boards conflict-free schedule successfully."
+            # Only a clean run reports success, so a partial import is visible
+            # instead of being reported as a complete one.
+            "status": "success" if not skipped else "partial",
+            "message": message,
+            "singlesImported": singles_added,
+            "doublesImported": doubles_added,
+            "imported": imported,
+            "skipped": skipped,
+            "fixturesGenerated": fixtures_built,
         }
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Bulk import failed for {tournamentId}: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))

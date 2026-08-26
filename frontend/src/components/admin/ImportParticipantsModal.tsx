@@ -23,11 +23,19 @@ interface ImportParticipantsModalProps {
 }
 
 interface ParsedPlayer {
+  /** 'doubles' rows carry a partner and register as a team. */
+  type: 'singles' | 'doubles';
   name: string;
   club: string;
   city: string;
   rating: number;
   seed: number | null;
+  email?: string | null;
+  phone?: string | null;
+  teamName?: string | null;
+  partnerName?: string | null;
+  partnerEmail?: string | null;
+  partnerPhone?: string | null;
   selected: boolean;
 }
 
@@ -91,14 +99,24 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
         // Use serverless backend Excel parsing
         const response = await tournamentService.uploadExcel(fileObj);
         if (response.status === 'success' && response.players) {
+          // Keep every field the parser returned: dropping partnerName/teamName
+          // here is what previously turned an imported doubles sheet into
+          // singles entries.
           setParsedPlayers(
             response.players.map((p: any) => ({
+              type: p.type === 'doubles' ? 'doubles' : 'singles',
               name: p.name || 'Unnamed Player',
               club: p.club || 'Independent',
               city: p.city || 'Pune',
               rating: p.rating || 1500,
-              seed: p.seed || null,
-              selected: p.selected !== false ? true : false
+              seed: p.seed ?? null,
+              email: p.email ?? null,
+              phone: p.phone ?? null,
+              teamName: p.teamName ?? null,
+              partnerName: p.partnerName ?? null,
+              partnerEmail: p.partnerEmail ?? null,
+              partnerPhone: p.partnerPhone ?? null,
+              selected: p.selected !== false
             }))
           );
           setStep('preview');
@@ -152,6 +170,7 @@ Respond with a JSON object matching this exact structure:
         if (data.players && Array.isArray(data.players)) {
           setParsedPlayers(
             data.players.map((p: any) => ({
+              type: 'singles' as const,
               name: p.name || 'Unnamed Player',
               club: p.club || 'Independent',
               city: p.city || 'Pune',
@@ -172,6 +191,7 @@ Respond with a JSON object matching this exact structure:
       const fallbackList: ParsedPlayer[] = lines.map((line, idx) => {
         const parts = line.split(/[,;\t]/);
         return {
+          type: 'singles' as const,
           name: parts[0]?.trim() || `Player ${idx + 1}`,
           club: parts[1]?.trim() || 'Independent',
           city: parts[2]?.trim() || 'Pune',
@@ -199,8 +219,15 @@ Respond with a JSON object matching this exact structure:
 
     try {
       // Use backend bulk import confirmation transaction (accounts creation + registrations + fixtures + scheduling + publish)
-      const response = await tournamentService.confirmImport(tournament.id, selectedPlayers);
+      const response: any = await tournamentService.confirmImport(tournament.id, selectedPlayers);
       setSuccessMsg(response.message || 'Successfully registered and scheduled players!');
+      // A partial import must not look like a clean one.
+      if (response.skipped && response.skipped.length > 0) {
+        setErrorMsg(
+          `${response.skipped.length} row(s) skipped: ${response.skipped.slice(0, 3).join(' ')}` +
+            (response.skipped.length > 3 ? ' ...' : '')
+        );
+      }
 
       // Close after delay
       setTimeout(() => {
@@ -372,6 +399,27 @@ Respond with a JSON object matching this exact structure:
                             onChange={(e) => handleFieldChange(idx, 'name', e.target.value)}
                             className="w-full p-1 border border-transparent hover:border-gray-200 focus:border-[#0B5D3B] focus:ring-1 rounded bg-transparent font-bold text-gray-800"
                           />
+                          {/* A doubles row registers two people as a team, so both
+                              must be visible before the admin confirms. */}
+                          {player.type === 'doubles' && (
+                            <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                              <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded bg-blue-100 text-blue-700">
+                                Doubles
+                              </span>
+                              <input
+                                type="text"
+                                value={player.partnerName || ''}
+                                onChange={(e) => handleFieldChange(idx, 'partnerName', e.target.value)}
+                                placeholder="Partner name"
+                                className="flex-1 min-w-[7rem] p-1 text-[11px] border border-transparent hover:border-gray-200 focus:border-[#0B5D3B] focus:ring-1 rounded bg-transparent text-gray-700"
+                              />
+                              {player.teamName && (
+                                <span className="text-[10px] text-gray-500 italic truncate max-w-[9rem]">
+                                  {player.teamName}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-2">
                           <input
