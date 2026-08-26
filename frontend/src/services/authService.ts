@@ -24,6 +24,10 @@ export interface LoginData {
 
 export interface AuthResponse {
   access_token: string;
+  /** Used to renew the access token before it expires. */
+  refresh_token?: string | null;
+  expires_at?: number | null;
+  expires_in?: number | null;
   token_type: string;
   user: {
     id: string;
@@ -45,8 +49,9 @@ export const authService = {
   async signUp(data: SignUpData): Promise<AuthResponse> {
     const response = await apiClient.post<AuthResponse>('/auth/signup', data);
     
-    // Store token
-    apiClient.setToken(response.access_token);
+    // Store the whole session, not just the access token, so it can be renewed
+    // before it expires.
+    apiClient.setSession(response);
     
     return response;
   },
@@ -57,8 +62,9 @@ export const authService = {
   async login(data: LoginData): Promise<AuthResponse> {
     const response = await apiClient.post<AuthResponse>('/auth/login', data);
     
-    // Store token
-    apiClient.setToken(response.access_token);
+    // Store the whole session, not just the access token, so it can be renewed
+    // before it expires.
+    apiClient.setSession(response);
     
     return response;
   },
@@ -81,7 +87,16 @@ export const authService = {
    * Check if user is authenticated
    */
   isAuthenticated(): boolean {
-    const token = localStorage.getItem('auth_token');
-    return !!token;
+    return apiClient.hasSession();
+  },
+
+  /** Renew the access token; false means the session cannot be recovered. */
+  async refresh(): Promise<boolean> {
+    return apiClient.refreshSession();
+  },
+
+  /** Seconds until the access token expires, or null when unknown. */
+  secondsUntilExpiry(): number | null {
+    return apiClient.secondsUntilExpiry();
   }
 };

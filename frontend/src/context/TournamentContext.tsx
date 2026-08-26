@@ -5,7 +5,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useRef, ReactNode } from 'react';
-import { apiClient } from '../utils/apiClient';
+import { apiClient, AUTH_EXPIRED_EVENT } from '../utils/apiClient';
 import { authService } from '../services/authService';
 import { tournamentService } from '../services/tournamentService';
 import { subscribeToTournamentData, RealtimeStatus } from '../services/realtimeService';
@@ -28,6 +28,9 @@ interface TournamentContextType {
   isConfigured: boolean;
   /** 'live' when Supabase Realtime is streaming; 'polling' is the degraded fallback. */
   realtimeStatus: RealtimeStatus;
+  /** Set when the session ended on its own, so the sign-in screen can say why. */
+  sessionNotice: string;
+  clearSessionNotice: () => void;
   role: UserRole | null;
   setRole: (role: UserRole | null) => void;
   currentUser: Player | Admin | null;
@@ -120,6 +123,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   const [activeMatch, setActiveMatch] = useState<Match | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>('connecting');
+  /** Explains an involuntary sign-out on the auth screen. */
+  const [sessionNotice, setSessionNotice] = useState<string>('');
 
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
 
@@ -162,10 +167,54 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
           setActiveMatch(freshM);
         }
       }
-    } catch (error) {
-      console.error('Failed to refresh data from Python Backend:', error);
+    } catch (error: any) {
+      // An expired session already triggers a sign-out through
+      // AUTH_EXPIRED_EVENT; logging every polled failure just floods the
+      // console with the same message.
+      const message = error?.message || '';
+      if (!/sign in again|Not authenticated|expired/i.test(message)) {
+        console.error('Failed to refresh data from Python Backend:', error);
+      }
     }
   };
+
+  // A dead session must end the session in the app too. Previously the token
+  // was cleared but isAuthenticated stayed true, so the refresh loop kept
+  // firing against an empty token and produced an unbounded stream of 401s.
+  useEffect(() => {
+    const onExpired = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      setIsAuthenticated(false);
+      setCurrentUserState(null);
+      setRoleState(null);
+      setTournaments([]);
+      setAllPlayers([]);
+      setAllTeams([]);
+      setNotifications([]);
+      setActiveMatch(null);
+      setSessionNotice(typeof detail === 'string' ? detail : 'Your session has expired. Please sign in again.');
+    };
+
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  // Renew the access token shortly before it expires, so an open dashboard
+  // does not die mid-session.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const tick = async () => {
+      const remaining = authService.secondsUntilExpiry();
+      if (remaining !== null && remaining < 120) {
+        await authService.refresh();
+      }
+    };
+
+    tick();
+    const timer = setInterval(tick, 60000);
+    return () => clearInterval(timer);
+  }, [isAuthenticated]);
 
   // Sync auth on mount
   useEffect(() => {
@@ -267,6 +316,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       setCurrentUserState(response.user);
       setRoleState(response.user.role as UserRole);
       setIsAuthenticated(true);
+      setSessionNotice('');
       await refreshData();
       return { success: true };
     } catch (error: any) {
@@ -495,6 +545,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       value={{
         isConfigured: true,
         realtimeStatus,
+        sessionNotice,
+        clearSessionNotice: () => setSessionNotice(''),
         role,
         setRole: setRoleState,
         currentUser,

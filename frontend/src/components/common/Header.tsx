@@ -10,7 +10,8 @@ import {
   ChevronDown,
   CheckCircle2,
   Calendar,
-  Layers
+  Layers,
+  LogOut
 } from 'lucide-react';
 import { useTournament } from '../../context/TournamentContext';
 
@@ -45,7 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center justify-between h-16 sm:h-20">
           
           {/* Logo & Brand Identity */}
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-3 min-w-0">
             <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[#D4A72C] flex items-center justify-center text-[#0B5D3B] font-black text-lg sm:text-xl shadow-md border-2 border-white/20 transform -rotate-3 hover:rotate-0 transition-transform">
               C
             </div>
@@ -136,10 +137,12 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Right Section: Role Switcher, Reset, Notifs, Actions */}
-          <div className="flex items-center space-x-2 sm:space-x-3">
+          {/* shrink-0 + tighter gaps: on a 375px screen this cluster used to
+              push the page wider than the viewport. */}
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
             
             {/* Logged in User Profile */}
-            <div className="flex items-center space-x-2 bg-emerald-950/70 py-1.5 px-3 rounded-xl border border-emerald-800/80 shadow-inner">
+            <div className="flex items-center gap-2 bg-emerald-950/70 py-1.5 px-1.5 sm:px-3 rounded-xl border border-emerald-800/80 shadow-inner shrink-0">
               <div className="w-5 h-5 rounded-full bg-[#D4A72C] text-[#202522] flex items-center justify-center font-bold text-xs shrink-0">
                 {(currentUser?.name || 'U').charAt(0)}
               </div>
@@ -161,9 +164,12 @@ export const Header: React.FC<HeaderProps> = ({
                   signOutUser();
                 }
               }}
-              className="flex items-center px-2.5 py-1.5 bg-red-800/40 hover:bg-red-800/80 text-red-200 hover:text-white rounded-lg border border-red-900/40 text-[11px] font-semibold transition-all"
+              title="Sign out"
+              aria-label="Sign out"
+              className="flex items-center px-2 sm:px-2.5 py-1.5 bg-red-800/40 hover:bg-red-800/80 text-red-200 hover:text-white rounded-lg border border-red-900/40 text-[11px] font-semibold transition-all shrink-0"
             >
-              <span>Sign Out</span>
+              <LogOut className="w-3.5 h-3.5 sm:hidden" />
+              <span className="hidden sm:inline">Sign Out</span>
             </button>
 
             {/* Create Tournament CTA (Admin only) */}
@@ -171,7 +177,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="create-tournament-header-btn"
                 onClick={onOpenCreateModal}
-                className="flex items-center space-x-1.5 bg-[#D4A72C] hover:bg-[#c29623] text-[#202522] px-3 py-1.5 rounded-lg text-xs font-bold shadow-md hover:shadow transition-all transform active:scale-95"
+                className="flex items-center gap-1.5 bg-[#D4A72C] hover:bg-[#c29623] text-[#202522] px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-bold shadow-md hover:shadow transition-all transform active:scale-95 shrink-0"
               >
                 <PlusCircle className="w-3.5 h-3.5 text-[#202522]" />
                 <span className="hidden sm:inline">Create Tournament</span>

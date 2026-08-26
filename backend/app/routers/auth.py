@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.database import get_db, get_admin_db
-from app.models.auth import SignUpSchema, LoginSchema
+from app.models.auth import SignUpSchema, LoginSchema, RefreshSchema
 from app.utils.security import get_user_profile, get_current_user
 from app.utils.serializers import serialize_player
 from typing import Dict, Any
@@ -9,6 +9,25 @@ import logging
 logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+def _session_response(session, profile_data) -> Dict[str, Any]:
+    """
+    Auth response including the refresh token.
+
+    Supabase access tokens expire after about an hour. Returning only the
+    access token left the client with no way to renew, so every session died
+    after an hour and the app then hammered the API with 401s.
+    """
+    return {
+        "access_token": session.access_token,
+        "refresh_token": getattr(session, "refresh_token", None),
+        "expires_at": getattr(session, "expires_at", None),
+        "expires_in": getattr(session, "expires_in", None),
+        "token_type": "bearer",
+        "user": serialize_player(profile_data),
+    }
+
+
 
 @router.post("/signup")
 async def signup(data: SignUpSchema):
@@ -88,11 +107,7 @@ async def signup(data: SignUpSchema):
         }
 
         logger.info("Step 5: Signup workflow complete.")
-        return {
-            "access_token": login_response.session.access_token,
-            "token_type": "bearer",
-            "user": serialize_player(profile_data)
-        }
+        return _session_response(login_response.session, profile_data)
     except Exception as e:
         # Roll the auth user back so a half-finished signup does not leave an
         # orphaned account that blocks the user from retrying with that email.
@@ -149,11 +164,7 @@ async def login(data: LoginSchema):
                 detail=f"Forbidden. You do not have permissions for the role: {data.role}."
             )
 
-        return {
-            "access_token": auth_response.session.access_token,
-            "token_type": "bearer",
-            "user": serialize_player(profile_data)
-        }
+        return _session_response(auth_response.session, profile_data)
     except HTTPException:
         raise
     except Exception as e:
@@ -172,3 +183,42 @@ async def get_me(profile: Dict[str, Any] = Depends(get_current_user)):
         "name": profile.user_metadata.get("name") or "User",
         "role": profile.app_metadata.get("role") or "player"
     }
+
+
+@router.post("/refresh")
+async def refresh_session(data: RefreshSchema):
+    """
+    Exchange a refresh token for a fresh access token.
+
+    Lets a long-lived session survive access-token expiry without forcing the
+    user back to the sign-in screen.
+    """
+    supabase = get_db()
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Database client not configured.")
+
+    try:
+        result = supabase.auth.refresh_session(data.refresh_token)
+    except Exception as e:
+        logger.info(f"Refresh rejected: {str(e)}")
+        raise HTTPException(
+            status_code=401,
+            detail="Your session has expired. Please sign in again.",
+        )
+
+    session = getattr(result, "session", None)
+    user = getattr(result, "user", None)
+    if not session or not session.access_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Your session has expired. Please sign in again.",
+        )
+
+    profile_data = None
+    if user is not None:
+        rows = get_admin_db().table("profiles").select("*").eq("id", user.id).execute().data
+        profile_data = rows[0] if rows else None
+    if profile_data is None:
+        profile_data = {"id": getattr(user, "id", None), "email": getattr(user, "email", None)}
+
+    return _session_response(session, profile_data)

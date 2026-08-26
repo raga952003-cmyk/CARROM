@@ -6,9 +6,26 @@
 const env = (import.meta as any).env || {};
 const API_BASE_URL = env.VITE_API_URL || 'http://localhost:8000/api';
 
+const ACCESS_KEY = 'auth_token';
+const REFRESH_KEY = 'auth_refresh_token';
+const EXPIRY_KEY = 'auth_expires_at';
+
+/**
+ * Raised on the window when the session cannot be recovered.
+ *
+ * The client cannot navigate on its own, so it announces the failure and the
+ * app signs the user out. Without this the token was silently cleared while
+ * the app still believed it was signed in, and the refresh loop then retried
+ * forever against an empty token.
+ */
+export const AUTH_EXPIRED_EVENT = 'carrom:auth-expired';
+
 class ApiClient {
   private baseURL: string;
   private token: string | null = null;
+  private refreshToken: string | null = null;
+  /** In-flight refresh, so concurrent 401s trigger only one renewal. */
+  private refreshInFlight: Promise<boolean> | null = null;
 
   constructor(baseURL: string) {
     this.baseURL = baseURL;
@@ -16,17 +33,87 @@ class ApiClient {
   }
 
   private loadToken() {
-    this.token = localStorage.getItem('auth_token');
+    this.token = localStorage.getItem(ACCESS_KEY);
+    this.refreshToken = localStorage.getItem(REFRESH_KEY);
   }
 
   setToken(token: string) {
     this.token = token;
-    localStorage.setItem('auth_token', token);
+    localStorage.setItem(ACCESS_KEY, token);
+  }
+
+  /** Store the whole session so the access token can be renewed later. */
+  setSession(session: {
+    access_token: string;
+    refresh_token?: string | null;
+    expires_at?: number | null;
+  }) {
+    this.setToken(session.access_token);
+    if (session.refresh_token) {
+      this.refreshToken = session.refresh_token;
+      localStorage.setItem(REFRESH_KEY, session.refresh_token);
+    }
+    if (session.expires_at) {
+      localStorage.setItem(EXPIRY_KEY, String(session.expires_at));
+    }
   }
 
   clearToken() {
     this.token = null;
-    localStorage.removeItem('auth_token');
+    this.refreshToken = null;
+    localStorage.removeItem(ACCESS_KEY);
+    localStorage.removeItem(REFRESH_KEY);
+    localStorage.removeItem(EXPIRY_KEY);
+  }
+
+  hasSession(): boolean {
+    return !!localStorage.getItem(ACCESS_KEY);
+  }
+
+  /** Seconds until the access token expires; null when unknown. */
+  secondsUntilExpiry(): number | null {
+    const raw = localStorage.getItem(EXPIRY_KEY);
+    if (!raw) return null;
+    const expiresAt = Number(raw);
+    if (!Number.isFinite(expiresAt)) return null;
+    return expiresAt - Math.floor(Date.now() / 1000);
+  }
+
+  /**
+   * Renew the access token. Returns false when the session is unrecoverable,
+   * in which case the caller must sign the user out.
+   */
+  async refreshSession(): Promise<boolean> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+
+    const refreshToken = this.refreshToken || localStorage.getItem(REFRESH_KEY);
+    if (!refreshToken) return false;
+
+    this.refreshInFlight = (async () => {
+      try {
+        const response = await fetch(`${this.baseURL}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        if (!response.ok) return false;
+        const session = await response.json();
+        if (!session?.access_token) return false;
+        this.setSession(session);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        this.refreshInFlight = null;
+      }
+    })();
+
+    return this.refreshInFlight;
+  }
+
+  private endSession(detail: string) {
+    this.clearToken();
+    window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail }));
   }
 
   private getHeaders(): HeadersInit {
@@ -44,10 +131,11 @@ class ApiClient {
   async request<T>(
     endpoint: string,
     method: string = 'GET',
-    data?: any
+    data?: any,
+    isRetry: boolean = false
   ): Promise<T> {
     const url = `${this.baseURL}${endpoint}`;
-    
+
     const options: RequestInit = {
       method,
       headers: this.getHeaders(),
@@ -67,8 +155,16 @@ class ApiClient {
         const detail = typeof errorData?.detail === 'string' ? errorData.detail : '';
 
         if (response.status === 401) {
-          this.clearToken();
-          throw new Error(detail || 'Session expired. Please login again.');
+          // One renewal attempt, then replay the original request. Only give
+          // up -- and sign out -- when the refresh itself fails.
+          if (!isRetry && endpoint !== '/auth/refresh' && this.refreshToken) {
+            const renewed = await this.refreshSession();
+            if (renewed) {
+              return this.request<T>(endpoint, method, data, true);
+            }
+          }
+          this.endSession(detail || 'Session expired. Please sign in again.');
+          throw new Error(detail || 'Session expired. Please sign in again.');
         }
         if (response.status === 403) {
           throw new Error(detail || 'Access denied. Insufficient permissions.');

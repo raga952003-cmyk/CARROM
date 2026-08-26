@@ -263,7 +263,7 @@ export const AdminDashboard: React.FC = () => {
             <div className="bg-white rounded-3xl border border-gray-200/80 shadow-xs overflow-hidden">
               
               {/* Workspace Navigation Header */}
-              <div className="px-6 py-5 bg-white border-b border-gray-200/80 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="px-4 sm:px-6 py-4 sm:py-5 bg-white border-b border-gray-200/80 flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">
                 <div>
                   <div className="flex items-center space-x-2">
                     <span className="text-[10px] font-bold text-[#0B5D3B] uppercase tracking-widest">
@@ -334,7 +334,7 @@ export const AdminDashboard: React.FC = () => {
               </div>
 
               {/* Sub-Tabs Navigation */}
-              <div className="px-6 pt-3 bg-gray-50 border-b border-gray-200 flex space-x-2 overflow-x-auto">
+              <div className="px-3 sm:px-6 pt-3 bg-gray-50 border-b border-gray-200 flex space-x-1.5 sm:space-x-2 overflow-x-auto scroll-smooth">
                 {[
                   { id: 'fixtures', label: 'Fixtures & Schedule', icon: Calendar, badge: currentTournament.matches.length },
                   { id: 'registrations', label: 'Registrations', icon: Users, badge: currentTournament.registrations.length },

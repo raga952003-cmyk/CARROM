@@ -19,7 +19,10 @@ import {
 import { useTournament } from '../../context/TournamentContext';
 
 export const AuthPortal: React.FC = () => {
-  const { isConfigured, signInUser, signUpUser, allPlayers } = useTournament();
+  const {
+    isConfigured, signInUser, signUpUser, allPlayers,
+    sessionNotice, clearSessionNotice
+  } = useTournament();
 
   const [activeRole, setActiveRole] = useState<'player' | 'admin'>('player');
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
@@ -191,7 +194,21 @@ export const AuthPortal: React.FC = () => {
             </div>
 
             {/* Notifications alerts */}
-            {errorMsg && (
+            {sessionNotice && !errorMsg && (
+                <div className="mb-3 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-900 flex items-start gap-2">
+                  <span className="font-bold shrink-0">Signed out:</span>
+                  <span className="flex-1">{sessionNotice}</span>
+                  <button
+                    type="button"
+                    onClick={clearSessionNotice}
+                    className="text-amber-700 hover:text-amber-900 font-bold shrink-0"
+                    aria-label="Dismiss"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+              {errorMsg && (
               <div className="p-3 bg-red-50 border border-red-200 text-red-800 text-[11px] font-medium rounded-xl flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-600 shrink-0" />
                 <span>{errorMsg}</span>

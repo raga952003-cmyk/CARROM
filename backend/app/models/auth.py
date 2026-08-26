@@ -15,3 +15,7 @@ class LoginSchema(BaseModel):
     email: EmailStr
     password: str
     role: str = "player"  # "player" or "admin"
+
+
+class RefreshSchema(BaseModel):
+    refresh_token: str
