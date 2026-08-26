@@ -7,7 +7,14 @@ from app.utils.serializers import (
     serialize_registration,
     serialize_match,
 )
-from app.services.fixture_engine import generate_round_robin_fixtures, generate_knockout_bracket, generate_league_knockout_fixtures
+from app.services.fixture_engine import (
+    generate_round_robin_fixtures,
+    generate_knockout_bracket,
+    generate_league_knockout_fixtures,
+    generate_group_stage_fixtures,
+    generate_group_knockout_fixtures,
+    suggest_group_count,
+)
 from app.services.scheduling_engine import generate_conflict_free_schedule
 from app.services.notification_service import fan_out_notification
 from app.services.audit_service import record_audit
@@ -19,7 +26,10 @@ from app.services.state_machine import (
 )
 from typing import List, Dict, Any, Optional
 import uuid
+import logging
 import secrets
+
+logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 
@@ -269,9 +279,10 @@ async def delete_tournament(id: str, admin = Depends(verify_admin)):
 async def get_tournament_registrations(id: str):
     supabase = get_admin_db()
     try:
+        # Ordered so the registrations list does not reshuffle between refreshes.
         res = supabase.table("registrations").select(
             "*, player:profiles(*), team:teams(*)"
-        ).eq("tournament_id", id).execute()
+        ).eq("tournament_id", id).order("registered_at").order("id").execute()
         return _hydrate_registrations(supabase, res.data or [])
     except HTTPException:
         raise
@@ -413,23 +424,73 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
             raise HTTPException(status_code=400, detail="Cannot generate fixtures with fewer than 2 approved participants.")
 
         # Map participants format
-        participants = []
+        # Singles players and doubles teams are separate competitions even
+        # inside one tournament. Pooling them together produced a draw in which
+        # a single player was fixtured against a two-person team.
+        pools: Dict[str, List[Dict[str, Any]]] = {"singles": [], "doubles": []}
         for r in regs:
             if r["type"] == "singles" and r.get("player"):
-                participants.append(r["player"])
+                pools["singles"].append(r["player"])
             elif r["type"] == "doubles" and r.get("team"):
-                participants.append(r["team"])
+                pools["doubles"].append(r["team"])
 
         max_boards = t.get("rules", {}).get("maxBoardsPerMatch", 3)
-
-        # Call engine
         format_type = t.get("format")
-        if format_type == "round_robin":
-            matches = generate_round_robin_fixtures(id, participants, max_boards)
-        elif format_type == "knockout":
-            matches = generate_knockout_bracket(id, participants, max_boards)
-        else: # league_knockout / hybrid
-            matches = generate_league_knockout_fixtures(id, participants, max_boards)
+
+        rules = t.get("rules") or {}
+        # Groups are requested either by the format name, or by setting
+        # groupCount on a league format. The second route works on databases
+        # that predate the group formats being added to the format CHECK.
+        requested_groups = rules.get("groupCount") or rules.get("group_count")
+        wants_groups = bool(requested_groups and int(requested_groups) > 1) or \
+            format_type in ("group_stage", "group_knockout")
+        qualifiers_per_group = int(rules.get("qualifiersPerGroup") or 2)
+
+        def build(pool: List[Dict[str, Any]], prefix: str) -> List[Dict[str, Any]]:
+            group_count = int(requested_groups) if requested_groups else suggest_group_count(len(pool))
+
+            if wants_groups:
+                if format_type in ("knockout",):
+                    # Groups make no sense without a league phase.
+                    return generate_knockout_bracket(id, pool, max_boards, id_prefix=prefix + "ko")
+                if format_type in ("group_knockout", "league_knockout"):
+                    return generate_group_knockout_fixtures(
+                        id, pool, max_boards, group_count=group_count,
+                        qualifiers_per_group=qualifiers_per_group, id_prefix=prefix + "gk")
+                return generate_group_stage_fixtures(
+                    id, pool, max_boards, group_count=group_count, id_prefix=prefix + "gs")
+
+            if format_type == "round_robin":
+                return generate_round_robin_fixtures(id, pool, max_boards, id_prefix=prefix + "rr")
+            if format_type == "knockout":
+                return generate_knockout_bracket(id, pool, max_boards, id_prefix=prefix + "ko")
+            return generate_league_knockout_fixtures(id, pool, max_boards, id_prefix=prefix)
+
+        matches = []
+        per_category: Dict[str, int] = {}
+        for category in ("singles", "doubles"):
+            pool = pools[category]
+            if len(pool) < 2:
+                if len(pool) == 1:
+                    logger.warning(
+                        f"Tournament {id}: only one {category} entrant, no {category} fixtures drawn."
+                    )
+                continue
+            drawn = build(pool, category[0])
+            for m in drawn:
+                m["type"] = category
+            per_category[category] = len(drawn)
+            matches.extend(drawn)
+
+        if not matches:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot generate fixtures: no category has at least 2 approved participants.",
+            )
+
+        # One continuous numbering across both categories.
+        for i, m in enumerate(matches, start=1):
+            m["matchNumber"] = i
 
         # Clear existing matches first (cascade deletes boards)
         admin_db.table("matches").delete().eq("tournament_id", id).execute()
@@ -453,7 +514,10 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
                 "board_number": match["boardNumber"],
                 "status": "scheduled",
                 "max_boards": match["maxBoards"],
-                "target_points": t.get("rules", {}).get("targetScore", 29)
+                "target_points": t.get("rules", {}).get("targetScore", 29),
+                # Carries the group label for group formats and the draw slot
+                # for knockouts; JSONB, so no schema change was needed.
+                "bracket_position": match.get("bracketPosition")
             }
             if "nextMatchId" in match:
                 # Note: We will update bracket linking parent IDs later since they must refer to database UUIDs
@@ -502,7 +566,12 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
             new_state={"status": new_status, "fixtures_generated": True},
             request_context={"format": format_type, "match_count": len(matches)},
         )
-        return {"status": "success", "message": f"Generated {len(matches)} fixtures."}
+        breakdown = ", ".join(f"{n} {c}" for c, n in per_category.items())
+        return {
+            "status": "success",
+            "message": f"Generated {len(matches)} fixtures ({breakdown}).",
+            "byCategory": per_category,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -525,12 +594,34 @@ async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depen
             raise HTTPException(status_code=400, detail="No fixtures generated to schedule.")
 
         # Structure matches for engine input
+        # Resolve every doubles side to the two people on it, so a player who
+        # entered both categories is never scheduled onto two boards at once.
+        team_ids = {
+            m[k] for m in matches for k in ("player1_id", "player2_id")
+            if m.get(k) and m.get("type") == "doubles"
+        }
+        team_members: Dict[str, List[str]] = {}
+        if team_ids:
+            for team in (admin_db.table("teams").select("id, player1_id, player2_id").in_(
+                    "id", list(team_ids)).execute().data or []):
+                team_members[team["id"]] = [
+                    pid for pid in (team.get("player1_id"), team.get("player2_id")) if pid
+                ]
+
         engine_matches = []
         for m in matches:
+            people: List[str] = []
+            for key in ("player1_id", "player2_id"):
+                side = m.get(key)
+                if not side:
+                    continue
+                people.extend(team_members.get(side, [side]))
+
             engine_matches.append({
                 "id": m["id"],
                 "player1Id": m.get("player1_id"),
                 "player2Id": m.get("player2_id"),
+                "participantIds": people,
                 "stage": m["stage"],
                 "roundIndex": m["round_index"],
                 "boardNumber": m["board_number"]

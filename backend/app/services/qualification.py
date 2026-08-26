@@ -16,6 +16,7 @@ import re
 logger = logging.getLogger("uvicorn.error")
 
 RANK_LABEL = re.compile(r"League Rank #(\d+)")
+GROUP_LABEL = re.compile(r"Group ([A-Z]+) #(\d+)")
 
 
 def league_is_complete(matches: List[Dict[str, Any]]) -> Tuple[bool, int, int]:
@@ -55,13 +56,24 @@ def promote_qualifiers(
 
         patch: Dict[str, Any] = {}
         for slot in ("player1", "player2"):
-            label = match.get(f"{slot}_name") or ""
-            found = RANK_LABEL.match(label.strip())
-            if not found:
+            label = (match.get(f"{slot}_name") or "").strip()
+
+            group_hit = GROUP_LABEL.match(label)
+            rank_hit = RANK_LABEL.match(label)
+            if not group_hit and not rank_hit:
                 continue
 
-            rank = int(found.group(1))
-            row = by_rank.get(rank)
+            if group_hit:
+                # "Group B #2" -> second place in group B's table
+                group_name, rank = group_hit.group(1), int(group_hit.group(2))
+                table = [r for r in standings if (r.get("group") or r.get("groupName")) == group_name]
+                table.sort(key=lambda r: r.get("rank", 999))
+                row = table[rank - 1] if len(table) >= rank else None
+            else:
+                group_name = None
+                rank = int(rank_hit.group(1))
+                row = by_rank.get(rank)
+
             if not row:
                 unresolved.append(label)
                 continue
@@ -72,6 +84,7 @@ def promote_qualifiers(
                 "matchNumber": match.get("match_number"),
                 "slot": slot,
                 "rank": rank,
+                "group": group_name,
                 "participantName": row.get("participantName"),
             })
 
@@ -107,8 +120,12 @@ def try_auto_promote(admin_db, tournament_id: str) -> Optional[Dict[str, Any]]:
             return None  # already under way; do not rewrite the bracket
 
         # Nothing to do if no slot is still waiting on a rank label.
+        def waiting(m, slot):
+            label = (m.get(f"{slot}_name") or "").strip()
+            return bool(RANK_LABEL.match(label) or GROUP_LABEL.match(label))
+
         if not any(
-            RANK_LABEL.match((m.get(f"{slot}_name") or "").strip())
+            waiting(m, slot)
             for m in matches if m.get("stage") == "knockout"
             for slot in ("player1", "player2")
         ):

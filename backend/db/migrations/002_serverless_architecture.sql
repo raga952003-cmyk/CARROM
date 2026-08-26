@@ -65,6 +65,19 @@ ALTER TABLE public.tournaments ADD CONSTRAINT tournaments_status_check
     'ongoing'
   ));
 
+-- Group formats (spec 68). They also work without this migration by setting
+-- rules.groupCount on round_robin / league_knockout; these names simply make
+-- the intent explicit.
+ALTER TABLE public.tournaments DROP CONSTRAINT IF EXISTS tournaments_format_check;
+ALTER TABLE public.tournaments ADD CONSTRAINT tournaments_format_check
+  CHECK (format IN (
+    'round_robin',
+    'knockout',
+    'league_knockout',
+    'group_stage',
+    'group_knockout'
+  ));
+
 ALTER TABLE public.matches DROP CONSTRAINT IF EXISTS matches_status_check;
 ALTER TABLE public.matches ADD CONSTRAINT matches_status_check
   CHECK (status IN (

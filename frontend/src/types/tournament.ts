@@ -217,3 +217,26 @@ export interface AutomationMetric {
   icon: string;
   automatedPercent?: number;
 }
+
+/** One points table: a whole category, or one group inside it. */
+export interface StandingsBlock {
+  group?: string;
+  participantCount: number;
+  matchCount: number;
+  standings: StandingsRow[];
+}
+
+/** Points tables for a tournament, split by category and then by group. */
+export interface StandingsCategory extends StandingsBlock {
+  category: 'singles' | 'doubles';
+  groups: StandingsBlock[];
+}
+
+export interface StandingsBreakdown {
+  tournamentId: string;
+  tournamentName?: string;
+  format?: TournamentFormat;
+  participantCount: number;
+  categories: StandingsCategory[];
+  standings: StandingsRow[];
+}

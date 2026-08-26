@@ -20,6 +20,11 @@ class TournamentRulesSchema(BaseCamelModel):
     match_duration_minutes: int = 30
     rest_time_minutes: int = 10
     tiebreaker_rules: List[str] = ["points", "board_difference", "net_score_difference", "head_to_head"]
+    # Group stage (spec 68). groupCount > 1 splits the league phase into
+    # balanced groups; undeclared fields are dropped by the model, so these
+    # have to exist here for the setting to survive tournament creation.
+    group_count: Optional[int] = None
+    qualifiers_per_group: Optional[int] = None
 
 class PosterConfigSchema(BaseCamelModel):
     theme_style: str = "emerald_gold"

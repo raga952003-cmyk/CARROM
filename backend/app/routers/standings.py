@@ -9,7 +9,7 @@ from app.services.qualification import (
 from app.services.audit_service import record_audit
 from app.utils.security import verify_admin
 from app.utils.serializers import camelize
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import logging
 
 logger = logging.getLogger("uvicorn.error")
@@ -35,40 +35,108 @@ def _participants_for(supabase, tournament_id: str) -> List[Dict[str, Any]]:
     return participants
 
 
+def _fallback_participants(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Derive entrants from the fixtures when there are no registration rows."""
+    seen: Dict[str, Dict[str, Any]] = {}
+    for m in matches:
+        for id_key, name_key in (("player1_id", "player1_name"), ("player2_id", "player2_name")):
+            pid = m.get(id_key)
+            if pid and pid not in seen:
+                seen[pid] = {"id": pid, "name": m.get(name_key) or "Unknown"}
+    return list(seen.values())
+
+
 def compute_standings(supabase, tournament_id: str) -> Dict[str, Any]:
+    """
+    Points tables for the tournament, computed per category (spec 74).
+
+    Singles and doubles are separate competitions even within one tournament,
+    so they get separate tables. A combined table would rank a person against
+    a two-person team.
+    """
     tournament = supabase.table("tournaments").select("*").eq(
         "id", tournament_id
     ).execute().data
     if not tournament:
         raise HTTPException(status_code=404, detail="Tournament not found.")
     tournament = tournament[0]
+    rules = tournament.get("rules") or {}
 
     matches = supabase.table("matches").select("*").eq(
         "tournament_id", tournament_id
     ).order("match_number").execute().data or []
 
-    participants = _participants_for(supabase, tournament_id)
+    all_participants = _participants_for(supabase, tournament_id)
+    singles_pool = [p for p in all_participants if not p.get("player1_id")]
+    doubles_pool = [p for p in all_participants if p.get("player1_id")]
 
-    # Fall back to the names carried on the matches when a tournament was seeded
-    # directly (imported fixtures with no registration rows).
-    if not participants and matches:
-        seen: Dict[str, Dict[str, Any]] = {}
-        for m in matches:
-            for id_key, name_key in (("player1_id", "player1_name"), ("player2_id", "player2_name")):
-                pid = m.get(id_key)
-                if pid and pid not in seen:
-                    seen[pid] = {"id": pid, "name": m.get(name_key) or "Unknown"}
-        participants = list(seen.values())
+    def group_of(match: Dict[str, Any]) -> Optional[str]:
+        position = match.get("bracket_position") or {}
+        return position.get("group") if isinstance(position, dict) else None
 
-    rows = calculate_points_table(matches, participants, tournament.get("rules") or {})
+    categories: List[Dict[str, Any]] = []
+    for category, pool in (("singles", singles_pool), ("doubles", doubles_pool)):
+        cat_matches = [m for m in matches if (m.get("type") or "singles") == category]
+        if not cat_matches and not pool:
+            continue
+        if not pool:
+            pool = _fallback_participants(cat_matches)
+
+        labels = sorted({g for g in (group_of(m) for m in cat_matches) if g})
+
+        if labels:
+            # A group stage is several separate mini-leagues. One combined table
+            # would rank entrants who never played each other.
+            group_blocks = []
+            flat: List[Dict[str, Any]] = []
+            for label in labels:
+                group_matches = [m for m in cat_matches if group_of(m) == label]
+                ids = {
+                    pid for m in group_matches
+                    for pid in (m.get("player1_id"), m.get("player2_id")) if pid
+                }
+                group_pool = [p for p in pool if p["id"] in ids] or _fallback_participants(group_matches)
+
+                rows = [camelize(r) for r in calculate_points_table(group_matches, group_pool, rules)]
+                for r in rows:
+                    r["group"] = label
+                group_blocks.append({
+                    "group": label,
+                    "participantCount": len(group_pool),
+                    "matchCount": len(group_matches),
+                    "standings": rows,
+                })
+                flat.extend(rows)
+
+            categories.append({
+                "category": category,
+                "participantCount": len(pool),
+                "matchCount": len(cat_matches),
+                "groups": group_blocks,
+                "standings": flat,
+            })
+        else:
+            rows = calculate_points_table(cat_matches, pool, rules)
+            categories.append({
+                "category": category,
+                "participantCount": len(pool),
+                "matchCount": len(cat_matches),
+                "groups": [],
+                "standings": [camelize(r) for r in rows],
+            })
+
+    # `standings` stays on the response as the primary table so existing callers
+    # keep working; `categories` is the full per-category breakdown.
+    primary = categories[0]["standings"] if categories else []
 
     return {
         "tournamentId": tournament_id,
         "tournamentName": tournament.get("name"),
         "format": tournament.get("format"),
-        "rules": tournament.get("rules") or {},
-        "participantCount": len(participants),
-        "standings": [camelize(r) for r in rows],
+        "rules": rules,
+        "participantCount": len(all_participants),
+        "categories": categories,
+        "standings": primary,
     }
 
 
@@ -96,13 +164,18 @@ async def get_qualified(tournament_id: str, count: int = Query(4, ge=1, le=64)):
     supabase = get_admin_db()
     try:
         result = compute_standings(supabase, tournament_id)
-        top = result["standings"][:count]
-        for row in top:
-            row["isQualified"] = True
+        by_category = []
+        for block in result.get("categories", []):
+            top = block["standings"][:count]
+            for row in top:
+                row["isQualified"] = True
+            by_category.append({"category": block["category"], "qualified": top})
+
         return {
             "tournamentId": tournament_id,
             "qualifyingCount": count,
-            "qualified": top,
+            "categories": by_category,
+            "qualified": by_category[0]["qualified"] if by_category else [],
         }
     except HTTPException:
         raise

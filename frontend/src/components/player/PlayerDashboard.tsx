@@ -22,7 +22,7 @@ import { useTournament } from '../../context/TournamentContext';
 import { RegistrationFormModal } from './RegistrationFormModal';
 import { FixtureScheduleView } from '../admin/FixtureScheduleView';
 import { LiveMatchController } from '../admin/LiveMatchController';
-import { PointsTableView } from '../common/PointsTableView';
+import { StandingsSections } from '../common/StandingsSections';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
 
 export const PlayerDashboard: React.FC = () => {
@@ -469,7 +469,7 @@ export const PlayerDashboard: React.FC = () => {
 
                 {/* Standings Tab */}
                 {activeTab === 'standings' && (
-                  <PointsTableView tournament={currentTournament} />
+                  <StandingsSections tournament={currentTournament} />
                 )}
 
                 {/* Knockout Tab */}

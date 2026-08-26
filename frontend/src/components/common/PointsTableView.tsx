@@ -16,11 +16,15 @@ import { useTournament } from '../../context/TournamentContext';
 interface PointsTableViewProps {
   tournament: Tournament;
   onSelectMatch?: (match: Match) => void;
+  /** Render these rows instead of fetching. Used when a parent has already
+   *  split the standings into per-category / per-group tables. */
+  rows?: StandingsRow[];
 }
 
-export const PointsTableView: React.FC<PointsTableViewProps> = ({ 
+export const PointsTableView: React.FC<PointsTableViewProps> = ({
   tournament,
-  onSelectMatch 
+  onSelectMatch,
+  rows
 }) => {
   const [sortField, setSortField] = useState<keyof StandingsRow>('points');
   const [sortAsc, setSortAsc] = useState<boolean>(false);
@@ -35,11 +39,19 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
   useEffect(() => {
     let cancelled = false;
 
+    // A parent that already split the tables passes them in; only fetch when
+    // this component is being used standalone.
+    if (rows) {
+      setStandings(rows);
+      setStandingsError('');
+      return;
+    }
+
     const load = async () => {
       try {
-        const rows = await fetchStandings(tournament.id);
+        const fetched = await fetchStandings(tournament.id);
         if (!cancelled) {
-          setStandings(rows);
+          setStandings(fetched);
           setStandingsError('');
         }
       } catch (error: any) {
@@ -52,7 +64,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
     load();
     return () => { cancelled = true; };
     // Recompute when confirmed results change, which is what moves the table.
-  }, [tournament.id, tournament.matches.filter(m => m.resultConfirmed).length]);
+  }, [tournament.id, rows, tournament.matches.filter(m => m.resultConfirmed).length]);
 
   const sortedStandings = [...standings].sort((a, b) => {
     if (sortField === 'rank') {

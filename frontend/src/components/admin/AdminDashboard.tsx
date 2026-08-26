@@ -29,7 +29,7 @@ import { PosterGeneratorModal } from './PosterGeneratorModal';
 import { RegistrationManager } from './RegistrationManager';
 import { FixtureScheduleView } from './FixtureScheduleView';
 import { LiveMatchController } from './LiveMatchController';
-import { PointsTableView } from '../common/PointsTableView';
+import { StandingsSections } from '../common/StandingsSections';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
 import { ManagePlayersTab } from './ManagePlayersTab';
 
@@ -388,7 +388,7 @@ export const AdminDashboard: React.FC = () => {
                 )}
 
                 {activeTab === 'standings' && (
-                  <PointsTableView tournament={currentTournament} />
+                  <StandingsSections tournament={currentTournament} />
                 )}
 
                 {activeTab === 'knockout' && (

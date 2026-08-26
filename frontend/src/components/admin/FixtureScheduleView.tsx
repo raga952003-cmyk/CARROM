@@ -42,11 +42,24 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [selectedRoundFilter, setSelectedRoundFilter] = useState<string>('all');
 
-  const matches = tournament.matches || [];
-  const hasMatches = matches.length > 0;
+  const allMatches = tournament.matches || [];
+
+  // Singles and doubles are separate competitions inside one tournament, so
+  // the fixture list is filtered by category before anything else.
+  const categoriesPresent = Array.from(
+    new Set(allMatches.map(m => m.type).filter(Boolean))
+  ) as ('singles' | 'doubles')[];
+  const showCategoryTabs = categoriesPresent.length > 1;
+
+  const [categoryFilter, setCategoryFilter] = React.useState<'all' | 'singles' | 'doubles'>('all');
+
+  const matches = categoryFilter === 'all'
+    ? allMatches
+    : allMatches.filter(m => m.type === categoryFilter);
+  const hasMatches = allMatches.length > 0;
   const isScheduled = tournament.status === 'scheduled' || tournament.status === 'ongoing' || tournament.status === 'completed';
 
-  // Group matches by round
+  // Group matches by round, within the selected category
   const rounds = Array.from(new Set(matches.map(m => m.roundName)));
 
   // Filtered matches
@@ -229,6 +242,35 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           {/* Round Filter Tabs */}
           {rounds.length > 1 && (
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+              {showCategoryTabs && (
+                <div className="w-full flex items-center gap-1.5 mb-2 pb-2 border-b border-gray-200/70">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mr-1">
+                    Category
+                  </span>
+                  {(['all', ...categoriesPresent] as const).map(cat => {
+                    const count = cat === 'all'
+                      ? allMatches.length
+                      : allMatches.filter(m => m.type === cat).length;
+                    const active = categoryFilter === cat;
+                    return (
+                      <button
+                        key={cat}
+                        onClick={() => { setCategoryFilter(cat as any); setSelectedRoundFilter('all'); }}
+                        className={`px-3 py-1 rounded-lg text-[11px] font-bold capitalize transition-colors border ${
+                          active
+                            ? cat === 'doubles'
+                              ? 'bg-blue-600 text-white border-blue-600'
+                              : 'bg-[#0B5D3B] text-white border-[#0B5D3B]'
+                            : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+                        }`}
+                      >
+                        {cat === 'all' ? 'All' : cat} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               <button
                 onClick={() => setSelectedRoundFilter('all')}
                 className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-colors shrink-0 ${

@@ -47,13 +47,18 @@ def generate_conflict_free_schedule(
     current_slot_offset = 0
 
     for match in sorted_matches:
-        p1 = match.get("player1Id")
-        p2 = match.get("player2Id")
+        # For a doubles match player1Id is a *team* id, so scheduling on it
+        # alone would happily put the same person on two boards at once when
+        # they are entered in both categories. participantIds carries the
+        # underlying people when the caller can supply them.
+        people = [pid for pid in (match.get("participantIds") or []) if pid and pid != "TBD"]
+        if not people:
+            people = [pid for pid in (match.get("player1Id"), match.get("player2Id"))
+                      if pid and pid != "TBD"]
 
-        p1_available = participant_next_available.get(p1, 0) if (p1 and p1 != "TBD") else 0
-        p2_available = participant_next_available.get(p2, 0) if (p2 and p2 != "TBD") else 0
-
-        match_earliest = max(current_slot_offset, p1_available, p2_available)
+        match_earliest = max(
+            [current_slot_offset] + [participant_next_available.get(pid, 0) for pid in people]
+        )
 
         # Find a board that is free at or before match_earliest, or find the board that frees up earliest
         chosen_board = 1
@@ -80,9 +85,7 @@ def generate_conflict_free_schedule(
 
         # Update trackers
         board_next_available[chosen_board] = next_available_time_for_board
-        if p1 and p1 != "TBD":
-            participant_next_available[p1] = next_available_time_for_players
-        if p2 and p2 != "TBD":
-            participant_next_available[p2] = next_available_time_for_players
+        for pid in people:
+            participant_next_available[pid] = next_available_time_for_players
 
     return sorted_matches

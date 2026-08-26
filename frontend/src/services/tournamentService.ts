@@ -4,7 +4,7 @@
  */
 
 import { apiClient } from '../utils/apiClient';
-import { Tournament } from '../types/tournament';
+import { Tournament, StandingsBreakdown } from '../types/tournament';
 
 export const tournamentService = {
   /**
@@ -76,9 +76,7 @@ export const tournamentService = {
    * not derive standings itself.
    */
   async getStandings(tournamentId: string) {
-    return apiClient.get<{ standings: any[]; participantCount: number }>(
-      `/standings/${tournamentId}`
-    );
+    return apiClient.get<StandingsBreakdown>(`/standings/${tournamentId}`);
   },
 
   /**

@@ -16,6 +16,7 @@ import {
   Registration,
   TournamentNotification,
   StandingsRow,
+  StandingsBreakdown,
   UserRole,
   Admin,
   BoardScore,
@@ -102,6 +103,8 @@ interface TournamentContextType {
   refreshData: () => Promise<void>;
   /** Points table computed server-side from official results (spec 74). */
   fetchStandings: (tournamentId: string) => Promise<StandingsRow[]>;
+  /** The same tables split by category, and by group where one exists. */
+  fetchStandingsBreakdown: (tournamentId: string) => Promise<StandingsBreakdown>;
 }
 
 const TournamentContext = createContext<TournamentContextType | undefined>(undefined);
@@ -479,6 +482,10 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     return result.standings || [];
   };
 
+  const fetchStandingsBreakdown = async (tournamentId: string): Promise<StandingsBreakdown> => {
+    return tournamentService.getStandings(tournamentId);
+  };
+
   const resetToSampleData = () => {
     alert("Resetting sample data is disabled when connected to the Python API Backend server. Please manage entries through the dashboard interface.");
   };
@@ -530,7 +537,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         addNotification,
         resetToSampleData,
         refreshData,
-        fetchStandings
+        fetchStandings,
+        fetchStandingsBreakdown
       }}
     >
       {children}

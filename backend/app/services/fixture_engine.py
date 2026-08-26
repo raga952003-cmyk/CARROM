@@ -21,7 +21,8 @@ def create_empty_boards(max_boards: int = 3) -> List[Dict[str, Any]]:
 def generate_round_robin_fixtures(
     tournament_id: str,
     participants: List[Dict[str, Any]],
-    max_boards: int = 3
+    max_boards: int = 3,
+    id_prefix: str = "rr",
 ) -> List[Dict[str, Any]]:
     n = len(participants)
     if n < 2:
@@ -57,7 +58,7 @@ def generate_round_robin_fixtures(
             is_doubles = "player1_id" in p1 or "player1" in p1
 
             matches.append({
-                "id": f"m_{tournament_id}_rr_{round_idx + 1}_{match_counter}",
+                "id": f"m_{tournament_id}_{id_prefix}_{round_idx + 1}_{match_counter}",
                 "tournamentId": tournament_id,
                 "matchNumber": match_counter,
                 "roundName": f"League Round {round_idx + 1}",
@@ -256,7 +257,8 @@ def generate_knockout_bracket(
 def generate_league_knockout_fixtures(
     tournament_id: str,
     participants: List[Dict[str, Any]],
-    max_boards: int = 3
+    max_boards: int = 3,
+    id_prefix: str = "lk",
 ) -> List[Dict[str, Any]]:
     """
     Round-robin league followed by a knockout between the league's top finishers.
@@ -267,7 +269,9 @@ def generate_league_knockout_fixtures(
     "qualifier_1", which the database rejected outright because the column is a
     UUID, so this format could never generate fixtures at all.
     """
-    league_matches = generate_round_robin_fixtures(tournament_id, participants, max_boards)
+    league_matches = generate_round_robin_fixtures(
+        tournament_id, participants, max_boards, id_prefix=f"{id_prefix}rr"
+    )
 
     qualifier_count = min(4, max(2, len(participants) // 2))
     # Round down to a power of two so the bracket has no byes of its own.
@@ -281,7 +285,7 @@ def generate_league_knockout_fixtures(
     ]
 
     knockout_matches = generate_knockout_bracket(
-        tournament_id, placeholders, max_boards, id_prefix="lk"
+        tournament_id, placeholders, max_boards, id_prefix=f"{id_prefix}ko"
     )
 
     # Placeholders are not real participants: keep the label, drop the id so the
@@ -300,3 +304,154 @@ def generate_league_knockout_fixtures(
         counter += 1
 
     return league_matches + knockout_matches
+
+
+# ===========================================================================
+# Group stage (spec 68): balanced allocation + round robin within each group
+# ===========================================================================
+
+def suggest_group_count(participant_count: int, target_size: int = 4) -> int:
+    """
+    How many groups to draw for this field.
+
+    Aims for `target_size` per group while keeping every group at 3 or more,
+    since a group of two is just a single match.
+    """
+    if participant_count < 6:
+        return 1
+    groups = max(1, round(participant_count / float(target_size)))
+    while groups > 1 and participant_count / groups < 3:
+        groups -= 1
+    return int(groups)
+
+
+def group_label(index: int) -> str:
+    """0 -> 'A', 25 -> 'Z', 26 -> 'AA'."""
+    label = ""
+    index += 1
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        label = chr(65 + rem) + label
+    return label
+
+
+def allocate_groups(
+    participants: List[Dict[str, Any]],
+    group_count: int,
+) -> List[List[Dict[str, Any]]]:
+    """
+    Balanced (serpentine) group allocation.
+
+    Entrants are ranked, then dealt across the groups in a snake order --
+    A,B,C,C,B,A,A,B,C... -- so each group receives a comparable spread of
+    strength instead of all the top seeds landing together. Group sizes differ
+    by at most one.
+    """
+    if group_count < 1:
+        group_count = 1
+
+    ranked = _seeded_participants(participants)
+    groups: List[List[Dict[str, Any]]] = [[] for _ in range(group_count)]
+
+    for position, participant in enumerate(ranked):
+        row, offset = divmod(position, group_count)
+        # Reverse direction on alternate passes: that is what makes it snake.
+        index = offset if row % 2 == 0 else group_count - 1 - offset
+        groups[index].append(participant)
+
+    return [g for g in groups if g]
+
+
+def generate_group_stage_fixtures(
+    tournament_id: str,
+    participants: List[Dict[str, Any]],
+    max_boards: int = 3,
+    group_count: Optional[int] = None,
+    id_prefix: str = "gs",
+) -> List[Dict[str, Any]]:
+    """
+    Round robin inside each balanced group.
+
+    Every match carries its group in `bracketPosition.group` and in the round
+    name, so standings and the UI can separate the groups without a schema
+    change.
+    """
+    if len(participants) < 2:
+        return []
+
+    count = group_count or suggest_group_count(len(participants))
+    groups = allocate_groups(participants, count)
+
+    matches: List[Dict[str, Any]] = []
+    for gi, members in enumerate(groups):
+        if len(members) < 2:
+            continue
+        label = group_label(gi)
+        drawn = generate_round_robin_fixtures(
+            tournament_id, members, max_boards, id_prefix=f"{id_prefix}{label}"
+        )
+        for m in drawn:
+            m["roundName"] = f"Group {label} · {m['roundName'].replace('League ', '')}"
+            m["bracketPosition"] = {"group": label, "groupIndex": gi,
+                                    "round": m["roundIndex"], "matchIndex": 0}
+            m["groupName"] = label
+        matches.extend(drawn)
+
+    for i, m in enumerate(matches, start=1):
+        m["matchNumber"] = i
+    return matches
+
+
+def generate_group_knockout_fixtures(
+    tournament_id: str,
+    participants: List[Dict[str, Any]],
+    max_boards: int = 3,
+    group_count: Optional[int] = None,
+    qualifiers_per_group: int = 2,
+    id_prefix: str = "gk",
+) -> List[Dict[str, Any]]:
+    """
+    Balanced groups, then a knockout between the qualifiers from each group.
+
+    Knockout slots start empty and are labelled "Group A #1", "Group B #2" and
+    so on. They are filled from the group tables once the group stage finishes
+    (services/qualification.py), which keeps the draw deterministic.
+    """
+    group_matches = generate_group_stage_fixtures(
+        tournament_id, participants, max_boards, group_count, id_prefix=f"{id_prefix}g"
+    )
+    if not group_matches:
+        return []
+
+    labels = sorted({m["groupName"] for m in group_matches})
+
+    # Standard cross-group pairing: winners meet runners-up from another group.
+    placeholders: List[Dict[str, Any]] = []
+    for rank in range(1, qualifiers_per_group + 1):
+        ordered = labels if rank % 2 == 1 else list(reversed(labels))
+        for label in ordered:
+            placeholders.append({
+                "id": f"{QUALIFIER_PREFIX}{label}_{rank}",
+                "name": f"Group {label} #{rank}",
+                "seed": (rank - 1) * len(labels) + labels.index(label) + 1,
+            })
+
+    # Trim to a power of two so the bracket needs no byes of its own.
+    slots = 2
+    while slots * 2 <= len(placeholders):
+        slots *= 2
+    placeholders = placeholders[:slots]
+
+    knockout = generate_knockout_bracket(
+        tournament_id, placeholders, max_boards, id_prefix=f"{id_prefix}ko"
+    )
+    for m in knockout:
+        for side in ("player1", "player2"):
+            if str(m.get(f"{side}Id") or "").startswith(QUALIFIER_PREFIX):
+                m[f"{side}Id"] = None
+
+    counter = 1
+    for m in group_matches + knockout:
+        m["matchNumber"] = counter
+        counter += 1
+    return group_matches + knockout
