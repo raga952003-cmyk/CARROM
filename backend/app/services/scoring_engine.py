@@ -1,6 +1,9 @@
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
+SIDES = ("player1", "player2")
+
+
 def _field(row: Dict[str, Any], camel: str, snake: str, default: Any = None) -> Any:
     """Rows reach these helpers either as camelCase payloads or raw snake_case
     database rows, so look up both spellings."""
@@ -25,7 +28,24 @@ def calculate_board_winner(board: Dict[str, Any]) -> str:
         return "player2"
     return "draw"
 
-def recalculate_match_scores(match: Dict[str, Any], boards: List[Dict[str, Any]]) -> Dict[str, Any]:
+def scoring_mode(rules: Optional[Dict[str, Any]]) -> str:
+    """
+    'classic'         — each side keeps the coins it pocketed (the original engine).
+    'remaining_coins' — only the board winner scores, and scores the coins the
+                        loser still had on the board.
+
+    Tournaments created before the second model existed have no setting and stay
+    on 'classic', so their confirmed results keep the totals they were decided on.
+    """
+    mode = _rule(rules or {}, "scoringMode", "scoring_mode", "classic")
+    return mode if mode in ("classic", "remaining_coins") else "classic"
+
+
+def recalculate_match_scores(
+    match: Dict[str, Any],
+    boards: List[Dict[str, Any]],
+    rules: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     p1_board_wins = 0
     p2_board_wins = 0
     p1_total_points = 0
@@ -41,7 +61,18 @@ def recalculate_match_scores(match: Dict[str, Any], boards: List[Dict[str, Any]]
             completed_count += 1
             p1_total_points += p1_score
             p2_total_points += p2_score
-            if p1_score > p2_score:
+
+            # Who won the board is what the umpire recorded, when they recorded
+            # it. Comparing the two scores gets it backwards whenever the losing
+            # side covered the queen: winning a board worth 2 against a queen
+            # worth 3 is still winning the board.
+            declared = _field(b, "boardWinner", "board_winner")
+            if declared in SIDES:
+                if declared == "player1":
+                    p1_board_wins += 1
+                else:
+                    p2_board_wins += 1
+            elif p1_score > p2_score:
                 p1_board_wins += 1
             elif p2_score > p1_score:
                 p2_board_wins += 1
@@ -52,13 +83,41 @@ def recalculate_match_scores(match: Dict[str, Any], boards: List[Dict[str, Any]]
     updated_match["player1TotalPoints"] = p1_total_points
     updated_match["player2TotalPoints"] = p2_total_points
 
-    # Determine winner based on board wins
     max_boards = _field(match, "maxBoards", "max_boards", 3)
     target_wins = (max_boards // 2) + 1
 
     winner_id = None
     winner_name = None
-    
+
+    def side(n: int):
+        return (_field(match, f"player{n}Id", f"player{n}_id"),
+                _field(match, f"player{n}Name", f"player{n}_name"))
+
+    if scoring_mode(rules) == "remaining_coins":
+        # Every board is played. A side that has already won five of eight
+        # can still lose on points, so the match is not called early.
+        updated_match["tieBreakRequired"] = False
+        if boards and completed_count == len(boards):
+            if p1_total_points > p2_total_points:
+                winner_id, winner_name = side(1)
+            elif p2_total_points > p1_total_points:
+                winner_id, winner_name = side(2)
+            else:
+                rule = _rule(rules or {}, "tieBreak", "tie_break", "additional_board")
+                if rule == "most_board_wins" and p1_board_wins != p2_board_wins:
+                    winner_id, winner_name = side(1) if p1_board_wins > p2_board_wins else side(2)
+                else:
+                    # An extra board, sudden death or an organiser ruling all
+                    # need a human, so the match stays open and says so.
+                    updated_match["tieBreakRequired"] = True
+                    updated_match["tieBreakRule"] = rule
+            if not updated_match["tieBreakRequired"]:
+                updated_match["status"] = "completed"
+                updated_match["matchCompletedAt"] = datetime.utcnow().isoformat()
+        updated_match["winnerId"] = winner_id
+        updated_match["winnerName"] = winner_name
+        return updated_match
+
     # Best of N boards check
     if p1_board_wins >= target_wins:
         winner_id = _field(match, "player1Id", "player1_id")
@@ -256,3 +315,148 @@ def apply_queen_points(
     """Coin counts in, effective board scores out."""
     bonus1, bonus2, note = queen_award(queen_claimed_by, queen_covered, rules)
     return p1_score + bonus1, p2_score + bonus2, note
+
+
+# --------------------------------------------------------------------------
+# Remaining-coins board scoring
+#
+# The classic engine above lets each player keep the coins they pocketed. Real
+# tournament carrom scores differently: only the side that finishes the board
+# scores, and what they score is the number of coins their OPPONENT still has
+# on the board, plus the queen if it was covered, less any penalties.
+#
+# Both models are kept because switching formula retroactively would rewrite
+# the totals of every match already confirmed under the old one.
+# --------------------------------------------------------------------------
+
+def _opponent(side: Optional[str]) -> Optional[str]:
+    if side == "player1":
+        return "player2"
+    if side == "player2":
+        return "player1"
+    return None
+
+
+def _rule(rules: Dict[str, Any], camel: str, snake: str, default: Any) -> Any:
+    if camel in rules and rules[camel] is not None:
+        return rules[camel]
+    if snake in rules and rules[snake] is not None:
+        return rules[snake]
+    return default
+
+
+def board_result(
+    *,
+    winner: Optional[str] = "none",
+    p1_coins_pocketed: int = 0,
+    p2_coins_pocketed: int = 0,
+    coins_remaining_with: Optional[str] = None,
+    coins_remaining: Optional[int] = None,
+    queen_pocketed_by: Optional[str] = "none",
+    queen_covered_by: Optional[str] = "none",
+    p1_penalty: int = 0,
+    p2_penalty: int = 0,
+    rules: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Score one board from what the umpire observed.
+
+    Every input is recorded exactly as given. Nothing is inferred from anything
+    else: naming a winner does not decide who took the queen, and taking the
+    queen does not decide who won. Where two inputs disagree the disagreement
+    is reported in `warnings` rather than silently resolved, because only the
+    umpire at the board can say which one is right.
+    """
+    rules = rules or {}
+    coins_per_side = int(_rule(rules, "coinsPerSide", "coins_per_side", 9))
+    queen_points = int(_rule(rules, "queenPoints", "queen_points", 3))
+    must_cover = bool(_rule(rules, "queenMustBeCovered", "queen_must_be_covered", True))
+    # Who the queen pays: whoever covered it, or whoever sank it.
+    award_to = _rule(rules, "queenAwardTo", "queen_award_to", "coverer")
+
+    warnings: List[str] = []
+    winner = winner if winner in SIDES else "none"
+    loser = _opponent(winner)
+
+    # ---- base points: the coins the loser still has on the board ----------
+    pocketed = {"player1": int(p1_coins_pocketed or 0), "player2": int(p2_coins_pocketed or 0)}
+    derived = {s: max(0, coins_per_side - pocketed[s]) for s in SIDES}
+
+    if winner == "none":
+        base = 0
+    elif coins_remaining_with in SIDES:
+        # The umpire named who still has coins on the board.
+        stated = derived[coins_remaining_with] if coins_remaining is None else max(0, int(coins_remaining))
+        if coins_remaining_with == winner:
+            base = 0
+            warnings.append(
+                f"{winner} is recorded as both the board winner and the side with coins left; "
+                "scored 0 base points"
+            )
+        else:
+            base = stated
+            if coins_remaining is not None and stated != derived[coins_remaining_with]:
+                warnings.append(
+                    f"coins remaining ({stated}) does not match {coins_per_side} minus the "
+                    f"{pocketed[coins_remaining_with]} pocketed ({derived[coins_remaining_with]})"
+                )
+    elif coins_remaining_with == "none":
+        base = 0 if coins_remaining is None else max(0, int(coins_remaining))
+    else:
+        # Not stated — fall back to the arithmetic on the coin counts.
+        base = derived[loser]
+
+    # ---- queen ------------------------------------------------------------
+    pocketed_by = queen_pocketed_by if queen_pocketed_by in SIDES else "none"
+    covered_by = queen_covered_by if queen_covered_by in SIDES else "none"
+    covered = covered_by in SIDES
+
+    if pocketed_by == "none":
+        queen_status = "not_pocketed"
+    elif covered or not must_cover:
+        queen_status = "covered"
+    else:
+        queen_status = "returned"
+
+    if covered_by in SIDES and pocketed_by == "none":
+        warnings.append("the queen is recorded as covered but nobody is recorded as pocketing it")
+
+    queen_side = None
+    queen_bonus = 0
+    if queen_status == "covered" and pocketed_by in SIDES:
+        queen_side = covered_by if (award_to == "coverer" and covered_by in SIDES) else pocketed_by
+        queen_bonus = queen_points
+        if covered_by in SIDES and covered_by != pocketed_by:
+            warnings.append(
+                f"{pocketed_by} pocketed the queen but {covered_by} covered it; "
+                f"the {queen_points} points went to {queen_side}"
+            )
+    elif queen_status == "returned":
+        warnings.append("the queen was pocketed but not covered, so it scores nothing and returns to the board")
+
+    # ---- assemble ---------------------------------------------------------
+    points = {"player1": 0, "player2": 0}
+    if winner in SIDES:
+        points[winner] += base
+    if queen_side in SIDES:
+        points[queen_side] += queen_bonus
+
+    penalty = {"player1": max(0, int(p1_penalty or 0)), "player2": max(0, int(p2_penalty or 0))}
+    for s in SIDES:
+        # A board cannot be worth less than nothing; penalties cannot push a
+        # side into debt that would then be subtracted from their match total.
+        points[s] = max(0, points[s] - penalty[s])
+
+    return {
+        "player1_score": points["player1"],
+        "player2_score": points["player2"],
+        "board_winner": winner,
+        "base_points": base,
+        "queen_bonus": queen_bonus,
+        "queen_awarded_to": queen_side or "none",
+        "queen_status": queen_status,
+        "p1_coins_remaining": derived["player1"],
+        "p2_coins_remaining": derived["player2"],
+        "penalties": {"player1": penalty["player1"], "player2": penalty["player2"]},
+        "warnings": warnings,
+    }

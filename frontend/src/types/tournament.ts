@@ -51,11 +51,34 @@ export interface Registration {
   notes?: string;
 }
 
+export type Side = 'player1' | 'player2' | 'none';
+
 export interface BoardScore {
   boardNumber: number;
   status: BoardStatus;
+  /** The final points for the board, after queen and penalties. */
   player1Score: number;
   player2Score: number;
+
+  // The umpire's observations. Each is recorded independently: who won the
+  // board says nothing about who took the queen, and vice versa.
+  boardWinner?: Side | null;
+  p1CoinsPocketed?: number | null;
+  p2CoinsPocketed?: number | null;
+  coinsRemainingWith?: Side | null;
+  coinsRemaining?: number | null;
+  queenPocketedBy?: Side | null;
+  queenCoveredBy?: Side | null;
+  queenStatus?: 'not_pocketed' | 'covered' | 'returned' | null;
+  queenAwardedTo?: Side | null;
+  p1Penalty?: number | null;
+  p2Penalty?: number | null;
+  basePoints?: number | null;
+  queenBonus?: number | null;
+  scoringWarnings?: string[] | null;
+  locked?: boolean;
+  confirmedAt?: string | null;
+
   queenClaimedBy?: 'player1' | 'player2' | 'none';
   queenCovered?: boolean;
   foulsPlayer1?: number;
@@ -118,6 +141,9 @@ export interface Match {
   winnerId?: string;
   winnerName?: string;
   resultConfirmed: boolean;
+  tieBreakRequired?: boolean;
+  tieBreakRule?: string | null;
+  tieBreakResult?: string | null;
   resultConfirmedAt?: string;
   player1BoardWins: number;
   player2BoardWins: number;
@@ -142,6 +168,20 @@ export interface TournamentRules {
   maxBoardsPerMatch: number;
   targetScore: number; // 29 for standard carrom
   queenPoints: number; // usually 3 points
+  /**
+   * 'classic'         — each player keeps the coins they pocketed.
+   * 'remaining_coins' — only the board winner scores, and scores the coins the
+   *                     loser still had on the board (standard tournament carrom).
+   */
+  scoringMode?: 'classic' | 'remaining_coins';
+  /** Coins per side, 9 in standard carrom. */
+  coinsPerSide?: number;
+  /** An uncovered queen returns to the board and scores nothing. */
+  queenMustBeCovered?: boolean;
+  /** Who the queen pays when the opponent covers it. */
+  queenAwardTo?: 'coverer' | 'pocketer';
+  /** How a tie is resolved once every board has been played. */
+  tieBreak?: 'additional_board' | 'sudden_death' | 'most_board_wins' | 'organizer_decision';
   matchDurationMinutes: number;
   restTimeMinutes: number;
   /** 1 = one league for everyone; higher splits the league phase into groups. */

@@ -25,6 +25,14 @@ class TournamentRulesSchema(BaseCamelModel):
     # have to exist here for the setting to survive tournament creation.
     group_count: Optional[int] = None
     qualifiers_per_group: Optional[int] = None
+    # Board scoring. Associations score carrom differently, so the engine reads
+    # these rather than assuming. Same caveat as above: an undeclared field is
+    # dropped by the model, so it would never reach the scoring engine.
+    scoring_mode: Optional[str] = None          # 'classic' | 'remaining_coins'
+    coins_per_side: Optional[int] = None        # 9 in standard carrom
+    queen_must_be_covered: Optional[bool] = None
+    queen_award_to: Optional[str] = None        # 'coverer' | 'pocketer'
+    tie_break: Optional[str] = None
 
 class PosterConfigSchema(BaseCamelModel):
     theme_style: str = "emerald_gold"

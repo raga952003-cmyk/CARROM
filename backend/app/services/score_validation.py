@@ -18,6 +18,7 @@ def validate_board_score(
     p2_score: int,
     match: Dict[str, Any],
     queen_claimed_by: Optional[str] = None,
+    allow_scoreless_queen: bool = False,
 ) -> None:
     """Raises 422 with a user-readable message if the score is not legal."""
     if p1_score < 0 or p2_score < 0:
@@ -48,14 +49,18 @@ def validate_board_score(
             detail="queenClaimedBy must be one of: player1, player2, none.",
         )
 
-    # A queen claim is worth points, so the claimant cannot have scored nothing.
-    if queen_claimed_by == "player1" and p1_score == 0:
-        raise HTTPException(
-            status_code=422,
-            detail="Player 1 cannot be credited with the queen on a board they scored 0 on.",
-        )
-    if queen_claimed_by == "player2" and p2_score == 0:
-        raise HTTPException(
-            status_code=422,
-            detail="Player 2 cannot be credited with the queen on a board they scored 0 on.",
-        )
+    # Under classic scoring a queen is added to the claimant's own coin count,
+    # so a claimant on zero is a data-entry slip. Under remaining-coins scoring
+    # it is a legal result: the losing side scores nothing for coins and still
+    # takes the queen they covered, so the check does not apply there.
+    if not allow_scoreless_queen:
+        if queen_claimed_by == "player1" and p1_score == 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Player 1 cannot be credited with the queen on a board they scored 0 on.",
+            )
+        if queen_claimed_by == "player2" and p2_score == 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Player 2 cannot be credited with the queen on a board they scored 0 on.",
+            )

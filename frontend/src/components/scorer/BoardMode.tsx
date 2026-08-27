@@ -4,6 +4,7 @@ import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { exitToApp } from '../../utils/useHashRoute';
 import { MatchTimer } from '../admin/MatchTimer';
+import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from '../admin/BoardResultForm';
 
 interface BoardModeProps {
   boardNumber: number;
@@ -94,6 +95,10 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
       </Shell>
     );
   }
+
+  const rules: any = tournament.rules || {};
+  const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
+  const [obs, setObs] = useState<BoardObservation>(emptyObservation);
 
   const decided = match.status === 'completed' || !!match.winnerId;
   // The setter is passed, not a plain callback: each tap must derive from the
@@ -193,9 +198,15 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                 Board {activeBoard.boardNumber} of {match.maxBoards} · first to {target}
               </div>
               <div className="text-[11px] text-gray-500 mt-0.5">
-                Enter coins only — the queen is added automatically.
+                {usesRemainingCoins
+                  ? 'Record what happened. The winner scores the coins left on the board.'
+                  : 'Enter coins only — the queen is added automatically.'}
               </div>
             </div>
+            {usesRemainingCoins ? (
+              <BoardResultForm match={match} rules={rules} value={obs} onChange={setObs} />
+            ) : (
+              <>
             <Stepper label={match.player1Name} value={p1} onChange={setP1} highlight={p1 > p2} />
             <Stepper label={match.player2Name} value={p2} onChange={setP2} highlight={p2 > p1} />
 
@@ -225,15 +236,37 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                 ))}
               </div>
             </div>
+              </>
+            )}
 
             <button
-              disabled={busy || (p1 === 0 && p2 === 0)}
+              disabled={busy || (usesRemainingCoins
+                ? obs.winner === 'none' && obs.queenPocketedBy === 'none'
+                : p1 === 0 && p2 === 0)}
               onClick={() => run(async () => {
-                await submitBoardScore(
-                  tournament.id, match.id, activeBoard.boardNumber,
-                  p1, p2, queen, false, 'Board mode'
-                );
-                setP1(0); setP2(0); setQueen('none');
+                if (usesRemainingCoins) {
+                  const preview = previewBoard(obs, rules);
+                  await submitBoardScore(tournament.id, match.id, activeBoard.boardNumber, {
+                    p1Score: preview.p1,
+                    p2Score: preview.p2,
+                    boardWinner: obs.winner,
+                    coinsRemainingWith: obs.coinsRemainingWith,
+                    coinsRemaining: obs.coinsRemaining,
+                    queenPocketedBy: obs.queenPocketedBy,
+                    queenCoveredBy: obs.queenCoveredBy,
+                    p1Penalty: obs.p1Penalty,
+                    p2Penalty: obs.p2Penalty,
+                    auditReason: 'Board mode',
+                  });
+                  setObs(emptyObservation);
+                } else {
+                  await submitBoardScore(tournament.id, match.id, activeBoard.boardNumber, {
+                    p1Score: p1, p2Score: p2,
+                    queenClaimedBy: queen, queenCovered: false,
+                    auditReason: 'Board mode',
+                  });
+                  setP1(0); setP2(0); setQueen('none');
+                }
               }, `Board ${activeBoard.boardNumber} recorded.`)}
               className="w-full py-4 rounded-2xl bg-[#0B5D3B] text-white font-black text-sm flex items-center justify-center gap-2 disabled:opacity-40"
             >

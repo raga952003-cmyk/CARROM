@@ -78,8 +78,32 @@ async def health():
     rpc_state = transactional_rpc_available()
     idem_state = idempotency_store_available()
     owner_state = ownership_enforced()
+
+    # Which migrations are actually present. Every feature here degrades rather
+    # than crashing when its migration is missing, which is right in the middle
+    # of a tournament and wrong at deploy time: without this the app comes up
+    # green while quietly not recording tosses or board detail.
+    pending = []
+    if supabase_admin is not None:
+        probes = (
+            ("002_serverless_architecture", "idempotency_keys", "key"),
+            ("003_ownership_and_access", "tournament_access", "id"),
+            ("004_match_toss", "matches", "toss_choice"),
+            ("005_board_detail", "boards", "board_winner"),
+        )
+        for migration, table, column in probes:
+            try:
+                supabase_admin.table(table).select(column).limit(1).execute()
+            except Exception:
+                pending.append(migration)
+
     return {
-        "status": "ok",
+        "status": "ok" if not pending else "degraded",
+        "pending_migrations": pending,
+        "migrations": (
+            "all applied" if not pending
+            else "DEGRADED - apply: " + ", ".join("db/migrations/%s.sql" % m for m in pending)
+        ),
         "env": settings.API_ENV,
         "database_client": supabase_client is not None,
         "database_admin_client": supabase_admin is not None,

@@ -16,6 +16,7 @@ import {
 import { TournamentFormat, MatchType, TournamentRules } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { GroupStageSettings } from './GroupStageSettings';
+import { ScoringRulesSettings, ScoringRules, defaultScoringRules } from './ScoringRulesSettings';
 
 interface CreateTournamentModalProps {
   isOpen: boolean;
@@ -50,7 +51,6 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   const [pointsForLoss, setPointsForLoss] = useState(0);
   const [maxBoards, setMaxBoards] = useState(3);
   const [targetScore, setTargetScore] = useState(29);
-  const [queenPoints, setQueenPoints] = useState(3);
   // 1 = a single league; anything higher splits the league phase into groups.
   const [groupCount, setGroupCount] = useState(1);
   const [qualifiersPerGroup, setQualifiersPerGroup] = useState(2);
@@ -63,6 +63,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   // tournament — a slow connection turns one impatient user into a dozen
   // identical events.
   const [saving, setSaving] = useState(false);
+  const [scoring, setScoring] = useState<ScoringRules>(defaultScoringRules);
 
   if (!isOpen) return null;
 
@@ -80,8 +81,8 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
       pointsForLoss,
       maxBoardsPerMatch: maxBoards,
       targetScore,
-      queenPoints,
       matchDurationMinutes: matchDuration,
+      ...scoring,
       restTimeMinutes: restTime,
       groupCount,
       qualifiersPerGroup,
@@ -431,7 +432,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
               </div>
 
               {/* Board Configuration */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
                   <label className="block text-xs font-bold text-gray-700 mb-1">
                     Boards per Match
@@ -463,24 +464,9 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                   </select>
                 </div>
 
-                <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
-                  <label className="block text-xs font-bold text-gray-700 mb-1">
-                    Queen Value
-                  </label>
-                  <p className="text-[10px] text-gray-500 mb-1.5">
-                    Added to the scorer's coin count when the queen is covered.
-                  </p>
-                  <select
-                    value={queenPoints}
-                    onChange={e => setQueenPoints(parseInt(e.target.value) || 3)}
-                    className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
-                  >
-                    <option value={3}>3 Points (AICF standard)</option>
-                    <option value={5}>5 Points</option>
-                    <option value={1}>1 Point</option>
-                  </select>
-                </div>
               </div>
+
+              <ScoringRulesSettings value={scoring} onChange={setScoring} />
 
               <GroupStageSettings
                 format={format}

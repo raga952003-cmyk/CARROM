@@ -9,10 +9,10 @@ import { apiClient, AUTH_EXPIRED_EVENT } from '../utils/apiClient';
 import { authService } from '../services/authService';
 import { tournamentService } from '../services/tournamentService';
 import { subscribeToTournamentData, RealtimeStatus } from '../services/realtimeService';
-import { 
-  Tournament, 
-  Match, 
-  Player, 
+import {
+  Tournament,
+  Match,
+  Player,
   Registration,
   TournamentNotification,
   StandingsRow,
@@ -20,8 +20,31 @@ import {
   UserRole,
   Admin,
   BoardScore,
-  Team
+  Team,
+  Side
 } from '../types/tournament';
+
+/**
+ * One board as the umpire recorded it. The winner, the queen and the coins
+ * left on the board are independent observations — the server scores them,
+ * and none of them is derived from another.
+ */
+export interface BoardSubmission {
+  p1Score: number;
+  p2Score: number;
+  boardWinner?: Side;
+  p1CoinsPocketed?: number;
+  p2CoinsPocketed?: number;
+  coinsRemainingWith?: Side;
+  coinsRemaining?: number;
+  queenPocketedBy?: Side;
+  queenCoveredBy?: Side;
+  p1Penalty?: number;
+  p2Penalty?: number;
+  queenClaimedBy?: Side;
+  queenCovered?: boolean;
+  auditReason?: string;
+}
 
 interface TournamentContextType {
   // Config & state
@@ -90,14 +113,10 @@ interface TournamentContextType {
     reason?: string
   ) => Promise<void>;
   submitBoardScore: (
-    tournamentId: string, 
-    matchId: string, 
-    boardNumber: number, 
-    p1Score: number, 
-    p2Score: number, 
-    queenClaimedBy?: 'player1' | 'player2' | 'none',
-    queenCovered?: boolean,
-    auditReason?: string
+    tournamentId: string,
+    matchId: string,
+    boardNumber: number,
+    payload: BoardSubmission
   ) => Promise<void>;
   confirmMatchResult: (tournamentId: string, matchId: string) => Promise<void>;
   
@@ -114,6 +133,15 @@ interface TournamentContextType {
   fetchStandings: (tournamentId: string) => Promise<StandingsRow[]>;
   /** The same tables split by category, and by group where one exists. */
   fetchStandingsBreakdown: (tournamentId: string) => Promise<StandingsBreakdown>;
+}
+
+/**
+ * The auth endpoint types `role` as a plain string, while `Admin` and `Player`
+ * each pin it to a literal. Narrow once here so the widening does not have to
+ * be re-asserted at every place a signed-in user is stored.
+ */
+function toCurrentUser(user: { role: string } & Record<string, any>): Admin | Player {
+  return (user.role === 'admin' ? user : { ...user, role: 'player' }) as Admin | Player;
 }
 
 const TournamentContext = createContext<TournamentContextType | undefined>(undefined);
@@ -227,7 +255,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     const checkAuth = async () => {
       try {
         const user = await authService.getCurrentUser();
-        setCurrentUserState(user);
+        setCurrentUserState(toCurrentUser(user));
         setRoleState(user.role as UserRole);
         setIsAuthenticated(true);
       } catch (error) {
@@ -297,7 +325,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         rating: metadata.rating || 1500
       });
       
-      setCurrentUserState(response.user);
+      setCurrentUserState(toCurrentUser(response.user));
       setRoleState(response.user.role as UserRole);
       setIsAuthenticated(true);
       await refreshData();
@@ -319,7 +347,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         role: selectedRole
       });
       
-      setCurrentUserState(response.user);
+      setCurrentUserState(toCurrentUser(response.user));
       setRoleState(response.user.role as UserRole);
       setIsAuthenticated(true);
       setSessionNotice('');
@@ -485,23 +513,15 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   };
 
   const submitBoardScore = async (
-    tournamentId: string, 
-    matchId: string, 
-    boardNumber: number, 
-    p1Score: number, 
-    p2Score: number, 
-    queenClaimedBy: 'player1' | 'player2' | 'none' = 'none',
-    queenCovered: boolean = false,
-    auditReason: string = 'Board score finalized'
+    tournamentId: string,
+    matchId: string,
+    boardNumber: number,
+    payload: BoardSubmission
   ) => {
-    const payload = {
-      p1Score,
-      p2Score,
-      queenClaimedBy,
-      queenCovered,
-      auditReason
-    };
-    await apiClient.post(`/matches/${matchId}/boards/${boardNumber}/submit`, payload);
+    await apiClient.post(`/matches/${matchId}/boards/${boardNumber}/submit`, {
+      auditReason: 'Board score finalized',
+      ...payload,
+    });
     await refreshData();
   };
 

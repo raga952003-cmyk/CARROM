@@ -75,8 +75,30 @@ export const BulkScoreEntry: React.FC<BulkScoreEntryProps> = ({ tournament, isOp
       try {
         // One board decides the match here; the engine still validates the
         // score and computes the winner server-side.
-        await submitBoardScore(
-          tournament.id, row.match.id, 1, p1, p2, 'none', false, 'Bulk entry'
+        //
+        // Under remaining-coins scoring two bare numbers are ambiguous, so the
+        // higher one is read as the winner's points and mapped to the coins
+        // their opponent had left. Without this the server would see no coins
+        // remaining and score the board 0-0.
+        const usesRemainingCoins = (tournament.rules as any)?.scoringMode === 'remaining_coins';
+        const winner = p1 === p2 ? 'none' : (p1 > p2 ? 'player1' : 'player2');
+        await submitBoardScore(tournament.id, row.match.id, 1,
+          usesRemainingCoins
+            ? {
+                p1Score: p1,
+                p2Score: p2,
+                boardWinner: winner,
+                coinsRemainingWith: winner === 'none' ? 'none' : (winner === 'player1' ? 'player2' : 'player1'),
+                coinsRemaining: Math.max(p1, p2),
+                queenPocketedBy: 'none',
+                queenCoveredBy: 'none',
+                auditReason: 'Bulk entry',
+              }
+            : {
+                p1Score: p1, p2Score: p2,
+                queenClaimedBy: 'none', queenCovered: false,
+                auditReason: 'Bulk entry',
+              }
         );
         await confirmMatchResult(tournament.id, row.match.id);
         ok += 1;

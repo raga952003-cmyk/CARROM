@@ -46,8 +46,29 @@ class MatchUpdateSchema(BaseCamelModel):
     player2_total_points: Optional[int] = None
 
 class ScoreSubmitSchema(BaseCamelModel):
+    """
+    What the umpire saw on one board.
+
+    Every field is an independent observation. Naming a winner says nothing
+    about the queen, and taking the queen says nothing about who won — a player
+    can lose the board and still be credited with covering the queen.
+    """
     p1_score: int
     p2_score: int
+
+    # --- remaining-coins scoring (the fields below are all optional so an
+    #     older client submitting only p1_score/p2_score still works) ---
+    board_winner: Optional[str] = None          # 'player1' | 'player2' | 'none'
+    p1_coins_pocketed: Optional[int] = None
+    p2_coins_pocketed: Optional[int] = None
+    coins_remaining_with: Optional[str] = None  # whose coins are left on the board
+    coins_remaining: Optional[int] = None
+    queen_pocketed_by: Optional[str] = None
+    queen_covered_by: Optional[str] = None      # may be the opponent
+    p1_penalty: Optional[int] = 0
+    p2_penalty: Optional[int] = 0
+
+    # Legacy spelling, still accepted.
     queen_claimed_by: Optional[str] = "none"  # "player1", "player2", "none"
     queen_covered: Optional[bool] = False
     audit_reason: Optional[str] = "Board score finalized"

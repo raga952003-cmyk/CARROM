@@ -32,12 +32,16 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
     tournament.category === 'doubles' ? 'doubles' : 'singles'
   );
 
+  // An admin registering on someone's behalf has no player profile, so the
+  // player-only fields are read from the signed-in user only when they are one.
+  const asPlayer = currentUser && currentUser.role === 'player' ? (currentUser as Player) : null;
+
   // Singles Fields
   const [playerName, setPlayerName] = useState(currentUser?.name || '');
-  const [phone, setPhone] = useState(currentUser?.phone || '');
+  const [phone, setPhone] = useState(asPlayer?.phone || '');
   const [email, setEmail] = useState(currentUser?.email || '');
-  const [club, setClub] = useState(currentUser?.club || '');
-  const [city, setCity] = useState(currentUser?.city || tournament.city || 'Pune');
+  const [club, setClub] = useState(asPlayer?.club || '');
+  const [city, setCity] = useState(asPlayer?.city || tournament.city || 'Pune');
 
   // Doubles Team Fields. These start empty on purpose: pre-filled sample values
   // were being submitted verbatim, registering a fictitious partner.
@@ -70,7 +74,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
         email,
         club,
         city,
-        rating: currentUser?.rating || 1500
+        rating: asPlayer?.rating || 1500
       };
 
       if (regType === 'singles') {

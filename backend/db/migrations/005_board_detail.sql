@@ -1,0 +1,241 @@
+-- =============================================================================
+-- 005 — Board detail: independent umpire observations
+--
+-- A board was stored as two numbers and a queen flag, so three separate facts
+-- had to be squeezed into one: who won it, who took the queen, and whose coins
+-- were left on the board. They are genuinely independent — a player can win the
+-- board while their opponent covers the queen — and forcing them together made
+-- real results impossible to record.
+--
+-- player1_score / player2_score keep their meaning as the FINAL board points,
+-- so standings, print sheets and brackets are untouched. Everything added here
+-- is the working that produced those numbers.
+--
+-- Safe to re-run.
+-- =============================================================================
+
+DO $$
+BEGIN
+    IF to_regclass('public.boards') IS NULL THEN
+        RAISE EXCEPTION
+            'Base schema missing in this database (current_database=%). '
+            'Run db/schema.sql first, or switch to the project whose ref '
+            'matches SUPABASE_URL in backend/.env.', current_database();
+    END IF;
+END $$;
+
+-- ---- what the umpire observed ---------------------------------------------
+
+ALTER TABLE public.boards
+    -- Who finished/won the board. Recorded, never inferred from the scores.
+    ADD COLUMN IF NOT EXISTS board_winner TEXT
+        CHECK (board_winner IS NULL OR board_winner IN ('player1', 'player2', 'none'));
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS p1_coins_pocketed INTEGER
+        CHECK (p1_coins_pocketed IS NULL OR p1_coins_pocketed >= 0);
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS p2_coins_pocketed INTEGER
+        CHECK (p2_coins_pocketed IS NULL OR p2_coins_pocketed >= 0);
+
+ALTER TABLE public.boards
+    -- Which side still had coins on the board when it ended.
+    ADD COLUMN IF NOT EXISTS coins_remaining_with TEXT
+        CHECK (coins_remaining_with IS NULL OR coins_remaining_with IN ('player1', 'player2', 'none'));
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS coins_remaining INTEGER
+        CHECK (coins_remaining IS NULL OR coins_remaining >= 0);
+
+-- ---- the queen, as two separate facts --------------------------------------
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS queen_pocketed_by TEXT
+        CHECK (queen_pocketed_by IS NULL OR queen_pocketed_by IN ('player1', 'player2', 'none'));
+
+ALTER TABLE public.boards
+    -- May be the opponent of whoever pocketed it.
+    ADD COLUMN IF NOT EXISTS queen_covered_by TEXT
+        CHECK (queen_covered_by IS NULL OR queen_covered_by IN ('player1', 'player2', 'none'));
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS queen_status TEXT
+        CHECK (queen_status IS NULL OR queen_status IN ('not_pocketed', 'covered', 'returned'));
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS queen_awarded_to TEXT
+        CHECK (queen_awarded_to IS NULL OR queen_awarded_to IN ('player1', 'player2', 'none'));
+
+-- ---- penalties --------------------------------------------------------------
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS p1_penalty INTEGER DEFAULT 0
+        CHECK (p1_penalty IS NULL OR p1_penalty >= 0);
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS p2_penalty INTEGER DEFAULT 0
+        CHECK (p2_penalty IS NULL OR p2_penalty >= 0);
+
+-- ---- the working, kept so a result can be audited without re-deriving it ----
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS base_points INTEGER;
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS queen_bonus INTEGER;
+
+ALTER TABLE public.boards
+    -- Contradictions the umpire chose to record anyway, e.g. the winner also
+    -- being the side with coins left. Surfaced, never silently corrected.
+    ADD COLUMN IF NOT EXISTS scoring_warnings JSONB;
+
+-- ---- confirmation and locking (spec 19, 20) --------------------------------
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS locked BOOLEAN DEFAULT false NOT NULL;
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS confirmed_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL;
+
+ALTER TABLE public.boards
+    ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
+
+-- ---- tie-break at match level (spec 22, 23) --------------------------------
+
+ALTER TABLE public.matches
+    ADD COLUMN IF NOT EXISTS tie_break_required BOOLEAN DEFAULT false NOT NULL;
+
+ALTER TABLE public.matches
+    ADD COLUMN IF NOT EXISTS tie_break_rule TEXT;
+
+ALTER TABLE public.matches
+    ADD COLUMN IF NOT EXISTS tie_break_result TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_boards_locked ON public.boards(match_id, locked);
+
+
+-- =============================================================================
+-- apply_board_result — rewritten so a board patch is applied whole
+--
+-- The 002 version enumerated the columns it would write. Every column added
+-- above would have been accepted by the API, passed into the patch, and then
+-- silently dropped on the way through this function — leaving the atomic path
+-- storing LESS than the non-atomic fallback beside it.
+--
+-- The patch is now merged onto the existing row as JSON, so a new column is
+-- written the moment it exists and this function never needs editing again.
+-- =============================================================================
+
+CREATE OR REPLACE FUNCTION public.apply_board_result(
+    p_match_id UUID,
+    p_board_number INTEGER,
+    p_board_patch JSONB,
+    p_match_patch JSONB,
+    p_audit JSONB,
+    p_next_board_number INTEGER DEFAULT NULL
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_prev  public.boards%ROWTYPE;
+    v_next  public.boards%ROWTYPE;
+    v_board public.boards%ROWTYPE;
+BEGIN
+    IF NOT public.is_admin_or_service() THEN
+        RAISE EXCEPTION 'insufficient_privilege: admin rights required to apply a board result';
+    END IF;
+
+    -- Lock the board so two scorers cannot interleave on the same board.
+    SELECT * INTO v_prev
+    FROM public.boards
+    WHERE match_id = p_match_id AND board_number = p_board_number
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'board_not_found: match % board %', p_match_id, p_board_number;
+    END IF;
+
+    -- Keys absent from the patch keep the value already on the row; the id and
+    -- the board's identity are pinned so a stray key cannot move the row.
+    v_next := jsonb_populate_record(
+        v_prev,
+        p_board_patch - 'id' - 'match_id' - 'board_number'
+    );
+
+    UPDATE public.boards SET
+        player1_score        = v_next.player1_score,
+        player2_score        = v_next.player2_score,
+        status               = v_next.status,
+        queen_claimed_by     = v_next.queen_claimed_by,
+        queen_covered        = v_next.queen_covered,
+        fouls_player1        = v_next.fouls_player1,
+        fouls_player2        = v_next.fouls_player2,
+        white_coins_pocketed = v_next.white_coins_pocketed,
+        black_coins_pocketed = v_next.black_coins_pocketed,
+        duration_minutes     = v_next.duration_minutes,
+        notes                = v_next.notes,
+        completed_at         = v_next.completed_at,
+        board_winner         = v_next.board_winner,
+        p1_coins_pocketed    = v_next.p1_coins_pocketed,
+        p2_coins_pocketed    = v_next.p2_coins_pocketed,
+        coins_remaining_with = v_next.coins_remaining_with,
+        coins_remaining      = v_next.coins_remaining,
+        queen_pocketed_by    = v_next.queen_pocketed_by,
+        queen_covered_by     = v_next.queen_covered_by,
+        queen_status         = v_next.queen_status,
+        queen_awarded_to     = v_next.queen_awarded_to,
+        p1_penalty           = v_next.p1_penalty,
+        p2_penalty           = v_next.p2_penalty,
+        base_points          = v_next.base_points,
+        queen_bonus          = v_next.queen_bonus,
+        scoring_warnings     = v_next.scoring_warnings,
+        locked               = v_next.locked,
+        confirmed_by         = v_next.confirmed_by,
+        confirmed_at         = v_next.confirmed_at
+    WHERE match_id = p_match_id AND board_number = p_board_number
+    RETURNING * INTO v_board;
+
+    INSERT INTO public.score_audit_logs (
+        match_id, admin_id, admin_name, board_number, previous_score, new_score, reason
+    ) VALUES (
+        p_match_id,
+        NULLIF(p_audit ->> 'admin_id', '')::UUID,
+        COALESCE(p_audit ->> 'admin_name', 'System'),
+        p_board_number,
+        jsonb_build_object('player1', v_prev.player1_score, 'player2', v_prev.player2_score),
+        COALESCE(p_audit -> 'new_score',
+                 jsonb_build_object('player1', v_board.player1_score, 'player2', v_board.player2_score)),
+        COALESCE(p_audit ->> 'reason', 'Score update')
+    );
+
+    UPDATE public.matches SET
+        player1_board_wins   = COALESCE((p_match_patch ->> 'player1_board_wins')::INTEGER, player1_board_wins),
+        player2_board_wins   = COALESCE((p_match_patch ->> 'player2_board_wins')::INTEGER, player2_board_wins),
+        player1_total_points = COALESCE((p_match_patch ->> 'player1_total_points')::INTEGER, player1_total_points),
+        player2_total_points = COALESCE((p_match_patch ->> 'player2_total_points')::INTEGER, player2_total_points),
+        status               = COALESCE(p_match_patch ->> 'status', status),
+        winner_id            = NULLIF(p_match_patch ->> 'winner_id', '')::UUID,
+        winner_name          = NULLIF(p_match_patch ->> 'winner_name', ''),
+        match_completed_at   = NULLIF(p_match_patch ->> 'match_completed_at', '')::TIMESTAMPTZ,
+        tie_break_required   = COALESCE((p_match_patch ->> 'tie_break_required')::BOOLEAN, tie_break_required),
+        tie_break_rule       = COALESCE(p_match_patch ->> 'tie_break_rule', tie_break_rule)
+    WHERE id = p_match_id;
+
+    -- Activate the following board only while the match is still running.
+    IF p_next_board_number IS NOT NULL
+       AND COALESCE(p_match_patch ->> 'status', '') <> 'completed' THEN
+        UPDATE public.boards
+        SET status = 'in_progress'
+        WHERE match_id = p_match_id
+          AND board_number = p_next_board_number
+          AND status = 'pending';
+    END IF;
+
+    RETURN to_jsonb(v_board);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DO $$
+BEGIN
+    RAISE NOTICE 'Migration 005 applied: board detail, queen split, penalties, locking, tie-break.';
+END $$;

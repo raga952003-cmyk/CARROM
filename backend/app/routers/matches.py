@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
 from app.models.match import MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema, TossSchema
 from app.utils.security import get_user_profile, verify_admin
-from app.services.scoring_engine import recalculate_match_scores, apply_queen_points
+from app.services.scoring_engine import (
+    recalculate_match_scores, apply_queen_points, board_result, scoring_mode,
+)
 from app.services.notification_service import fan_out_notification, resolve_tournament_audience
 from app.services.transaction_service import apply_board_result, confirm_match_result
 from app.services.qualification import try_auto_promote
@@ -42,6 +44,31 @@ def _authorise_match(admin_db, match_id: str, admin, action: str):
     require_tournament_access(admin_db, match["tournament_id"], admin, action)
     return match
 
+
+
+
+# Columns added by migration 005. Until it is applied the board detail has
+# nowhere to go, but the SCORES are still correct — so the detail is dropped
+# and the board is recorded rather than the umpire being blocked mid-match.
+_BOARD_DETAIL_COLUMNS = (
+    "board_winner", "p1_coins_pocketed", "p2_coins_pocketed",
+    "coins_remaining_with", "coins_remaining", "queen_pocketed_by",
+    "queen_covered_by", "queen_status", "queen_awarded_to",
+    "p1_penalty", "p2_penalty", "base_points", "queen_bonus",
+    "scoring_warnings", "locked", "confirmed_by", "confirmed_at",
+)
+_board_detail_available: Dict[str, bool] = {}
+
+
+def board_detail_available(admin_db) -> bool:
+    """Whether migration 005 has been applied. Probed once per process."""
+    if "value" not in _board_detail_available:
+        try:
+            admin_db.table("boards").select("board_winner").limit(1).execute()
+            _board_detail_available["value"] = True
+        except Exception:
+            _board_detail_available["value"] = False
+    return _board_detail_available["value"]
 
 
 @router.post("/{id}/start")
@@ -144,13 +171,33 @@ async def update_board(id: str, board_number: int, data: BoardScoreSchema, reaso
         pb = prev_board.data[0]
 
         # Update board score
-        # Corrections go through the same rule, so a fixed score is not left
-        # missing the queen that the original submission included.
+        # Corrections go through the same rule as the original submission, so a
+        # fixed score is not left missing the queen — or, under remaining-coins
+        # scoring, silently re-scored under the classic formula.
         corrected_rules = (tournament_rules(admin_db, prev_match_tournament(admin_db, id)) or {})
-        c_p1, c_p2, _ = apply_queen_points(
-            data.player1_score, data.player2_score,
-            data.queen_claimed_by, data.queen_covered, corrected_rules,
-        )
+        corrected_mode = scoring_mode(corrected_rules)
+
+        if corrected_mode == "remaining_coins":
+            # A correction restates the observations, so it is scored from them
+            # rather than from the two numbers, which are outputs not inputs.
+            outcome = board_result(
+                winner=pb.get("board_winner") or "none",
+                p1_coins_pocketed=pb.get("p1_coins_pocketed") or 0,
+                p2_coins_pocketed=pb.get("p2_coins_pocketed") or 0,
+                coins_remaining_with=pb.get("coins_remaining_with"),
+                coins_remaining=pb.get("coins_remaining"),
+                queen_pocketed_by=data.queen_claimed_by or pb.get("queen_pocketed_by"),
+                queen_covered_by=pb.get("queen_covered_by"),
+                p1_penalty=data.fouls_player1 or pb.get("p1_penalty") or 0,
+                p2_penalty=data.fouls_player2 or pb.get("p2_penalty") or 0,
+                rules=corrected_rules,
+            )
+            c_p1, c_p2 = outcome["player1_score"], outcome["player2_score"]
+        else:
+            c_p1, c_p2, _ = apply_queen_points(
+                data.player1_score, data.player2_score,
+                data.queen_claimed_by, data.queen_covered, corrected_rules,
+            )
 
         update_payload = {
             "player1_score": c_p1,
@@ -185,7 +232,7 @@ async def update_board(id: str, board_number: int, data: BoardScoreSchema, reaso
         boards = admin_db.table("boards").select("*").eq("match_id", id).execute().data
         match_data = admin_db.table("matches").select("*").eq("id", id).execute().data[0]
         
-        updated_match = recalculate_match_scores(match_data, boards)
+        updated_match = recalculate_match_scores(match_data, boards, corrected_rules)
         
         # Persist updated match scores
         admin_db.table("matches").update({
@@ -237,31 +284,81 @@ async def submit_board(
         if not any(b["board_number"] == board_number for b in boards):
             raise HTTPException(status_code=404, detail=f"Board {board_number} does not exist on this match.")
 
-        validate_board_score(data.p1_score, data.p2_score, match_data, data.queen_claimed_by)
-
-        # Scorers enter the coin count; the queen is added here from the
-        # tournament's configured value, and only when it was covered.
         rules = (tournament_rules(admin_db, match_data["tournament_id"]) or {})
-        p1_final, p2_final, queen_note = apply_queen_points(
-            data.p1_score, data.p2_score,
-            data.queen_claimed_by, data.queen_covered, rules,
+        mode = scoring_mode(rules)
+
+        validate_board_score(
+            data.p1_score, data.p2_score, match_data, data.queen_claimed_by,
+            allow_scoreless_queen=(mode == "remaining_coins"),
         )
 
-        board_patch = {
-            "player1_score": p1_final,
-            "player2_score": p2_final,
-            "status": "completed",
-            "queen_claimed_by": data.queen_claimed_by,
-            "queen_covered": data.queen_covered,
-            "completed_at": datetime.utcnow().isoformat(),
-        }
+        if mode == "remaining_coins":
+            # The umpire's observations are scored server-side. Each one is
+            # taken as given: the winner, the queen and the coins left on the
+            # board are three separate facts and none is inferred from another.
+            outcome = board_result(
+                winner=data.board_winner or "none",
+                p1_coins_pocketed=data.p1_coins_pocketed or 0,
+                p2_coins_pocketed=data.p2_coins_pocketed or 0,
+                coins_remaining_with=data.coins_remaining_with,
+                coins_remaining=data.coins_remaining,
+                queen_pocketed_by=data.queen_pocketed_by or data.queen_claimed_by,
+                queen_covered_by=data.queen_covered_by,
+                p1_penalty=data.p1_penalty or 0,
+                p2_penalty=data.p2_penalty or 0,
+                rules=rules,
+            )
+            p1_final = outcome["player1_score"]
+            p2_final = outcome["player2_score"]
+            queen_note = (
+                f"base {outcome['base_points']} + queen {outcome['queen_bonus']} "
+                f"to {outcome['queen_awarded_to']}"
+            )
+            board_patch = {
+                "player1_score": p1_final,
+                "player2_score": p2_final,
+                "status": "completed",
+                "board_winner": outcome["board_winner"],
+                "p1_coins_pocketed": data.p1_coins_pocketed,
+                "p2_coins_pocketed": data.p2_coins_pocketed,
+                "coins_remaining_with": data.coins_remaining_with,
+                "coins_remaining": data.coins_remaining,
+                "queen_pocketed_by": data.queen_pocketed_by or data.queen_claimed_by,
+                "queen_covered_by": data.queen_covered_by,
+                "queen_status": outcome["queen_status"],
+                "queen_awarded_to": outcome["queen_awarded_to"],
+                "base_points": outcome["base_points"],
+                "queen_bonus": outcome["queen_bonus"],
+                "p1_penalty": data.p1_penalty or 0,
+                "p2_penalty": data.p2_penalty or 0,
+                "scoring_warnings": outcome["warnings"] or None,
+                # Kept in step so the older reads of these two columns agree.
+                "queen_claimed_by": data.queen_pocketed_by or data.queen_claimed_by or "none",
+                "queen_covered": outcome["queen_status"] == "covered",
+                "completed_at": datetime.utcnow().isoformat(),
+            }
+        else:
+            # Scorers enter the coin count; the queen is added here from the
+            # tournament's configured value, and only when it was covered.
+            p1_final, p2_final, queen_note = apply_queen_points(
+                data.p1_score, data.p2_score,
+                data.queen_claimed_by, data.queen_covered, rules,
+            )
+            board_patch = {
+                "player1_score": p1_final,
+                "player2_score": p2_final,
+                "status": "completed",
+                "queen_claimed_by": data.queen_claimed_by,
+                "queen_covered": data.queen_covered,
+                "completed_at": datetime.utcnow().isoformat(),
+            }
 
         # Recompute the match from the board set as it will be after this write.
         projected = [
             {**b, **board_patch} if b["board_number"] == board_number else b
             for b in boards
         ]
-        updated_match = recalculate_match_scores(match_data, projected)
+        updated_match = recalculate_match_scores(match_data, projected, rules)
 
         match_patch = {
             "player1_board_wins": updated_match["player1BoardWins"],
@@ -273,6 +370,21 @@ async def submit_board(
             "winner_name": updated_match["winnerName"],
             "match_completed_at": updated_match.get("matchCompletedAt"),
         }
+        if mode == "remaining_coins":
+            # An all-boards-played draw needs a human decision, so say so on
+            # the match rather than quietly leaving it without a winner.
+            match_patch["tie_break_required"] = updated_match.get("tieBreakRequired", False)
+            match_patch["tie_break_rule"] = updated_match.get("tieBreakRule")
+
+        degraded_note = ""
+        if not board_detail_available(admin_db):
+            dropped = [k for k in _BOARD_DETAIL_COLUMNS if k in board_patch]
+            for k in dropped:
+                board_patch.pop(k, None)
+            match_patch.pop("tie_break_required", None)
+            match_patch.pop("tie_break_rule", None)
+            if dropped:
+                degraded_note = " [detail not stored: apply migration 005]"
 
         next_board_number = board_number + 1
         has_next = any(b["board_number"] == next_board_number for b in boards)
@@ -290,7 +402,7 @@ async def submit_board(
                 "reason": (
                     f"{data.audit_reason} (coins {data.p1_score}-{data.p2_score}; {queen_note})"
                     if queen_note else data.audit_reason
-                ),
+                ) + degraded_note,
             },
             next_board_number=next_board_number if has_next else None,
         )

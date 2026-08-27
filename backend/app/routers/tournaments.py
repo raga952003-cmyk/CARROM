@@ -246,6 +246,15 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
             else:
                 update_dict[key] = val
         
+        # `rules` is one JSONB column, so writing it whole means an edit that
+        # sets a single setting deletes every other one. The Rules tab sends
+        # exactly that shape, which was silently resetting the queen value,
+        # the scoring model and the group structure to their defaults.
+        if "rules" in update_dict and isinstance(update_dict["rules"], dict):
+            merged = dict(before.get("rules") or {})
+            merged.update({k: v for k, v in update_dict["rules"].items() if v is not None})
+            update_dict["rules"] = merged
+
         # Reject illegal lifecycle moves before touching the database (spec 75)
         if "status" in update_dict:
             validate_tournament_transition(before.get("status"), update_dict["status"])

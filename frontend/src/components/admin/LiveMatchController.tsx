@@ -25,6 +25,7 @@ import { Tournament, Match, BoardScore } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MatchTimer } from './MatchTimer';
+import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from './BoardResultForm';
 
 interface LiveMatchControllerProps {
   /** Something the umpire needs to know that happened before this view opened. */
@@ -76,6 +77,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [blackCoins, setBlackCoins] = useState<number>(4);
   const [auditReason, setAuditReason] = useState<string>('Official board completion');
   const [finishedBy, setFinishedBy] = useState<'player1' | 'player2' | 'none'>('none');
+  const [observation, setObservation] = useState<BoardObservation>(emptyObservation);
+
+  const rules = tournament.rules || ({} as any);
+  // Tournaments created before remaining-coins scoring existed keep the old
+  // model, so their confirmed results are not rewritten underneath them.
+  const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
 
   const isLive = match.status === 'live';
   const isPaused = match.status === 'paused';
@@ -101,8 +108,19 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
       } else {
         setFinishedBy('none');
       }
+
+      setObservation({
+        winner: currentBoard.boardWinner || 'none',
+        queenPocketedBy: currentBoard.queenPocketedBy || currentBoard.queenClaimedBy || 'none',
+        queenCoveredBy: currentBoard.queenCoveredBy || 'none',
+        coinsRemainingWith: currentBoard.coinsRemainingWith || 'none',
+        coinsRemaining: currentBoard.coinsRemaining ?? 0,
+        p1Penalty: currentBoard.p1Penalty ?? 0,
+        p2Penalty: currentBoard.p2Penalty ?? 0,
+      });
     } else {
       setFinishedBy('none');
+      setObservation(emptyObservation);
     }
     if (isCorrection) {
       setAuditReason('Score correction after referee review');
@@ -114,16 +132,33 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   };
 
   const handleSaveBoardScore = () => {
-    submitBoardScore(
-      tournament.id,
-      match.id,
-      selectedBoardForScore,
-      p1InputScore,
-      p2InputScore,
-      queenClaimed,
-      queenCovered,
-      auditReason
-    );
+    const payload = usesRemainingCoins
+      ? (() => {
+          const preview = previewBoard(observation, rules);
+          return {
+            // The server recomputes these; they are sent so the request is
+            // meaningful to anything reading the raw payload (audit, replay).
+            p1Score: preview.p1,
+            p2Score: preview.p2,
+            boardWinner: observation.winner,
+            coinsRemainingWith: observation.coinsRemainingWith,
+            coinsRemaining: observation.coinsRemaining,
+            queenPocketedBy: observation.queenPocketedBy,
+            queenCoveredBy: observation.queenCoveredBy,
+            p1Penalty: observation.p1Penalty,
+            p2Penalty: observation.p2Penalty,
+            auditReason,
+          };
+        })()
+      : {
+          p1Score: p1InputScore,
+          p2Score: p2InputScore,
+          queenClaimedBy: queenClaimed,
+          queenCovered,
+          auditReason,
+        };
+
+    submitBoardScore(tournament.id, match.id, selectedBoardForScore, payload);
     setIsSubmitScoreModalOpen(false);
   };
 
@@ -585,144 +620,95 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
             <div className="space-y-4 text-xs">
               
-              {/* Finished By / Board Winner Selector */}
-              <div className="p-3 bg-emerald-50/50 rounded-xl border border-emerald-100">
-                <label className="block font-bold text-gray-800 mb-1.5 flex items-center gap-1">
-                  <Flame className="w-3.5 h-3.5 text-emerald-700" />
-                  <span>Finished / Won By</span>
-                </label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFinishedBy('player1');
-                      setP2InputScore(0);
-                      if (p1InputScore === 0) setP1InputScore(1);
-                    }}
-                    className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all ${
-                      finishedBy === 'player1' ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]' : 'bg-white text-gray-700 border-gray-200'
-                    }`}
-                  >
-                    {match.player1Name.split(' ')[0]}
-                  </button>
+              {usesRemainingCoins ? (
+                <BoardResultForm
+                  match={match}
+                  rules={rules}
+                  value={observation}
+                  onChange={setObservation}
+                />
+              ) : (
+                <>
+                  {/* Finished By / Board Winner Selector */}
+                  <div className="p-3 bg-emerald-50/50 rounded-xl border border-emerald-100">
+                    <label className="block font-bold text-gray-800 mb-1.5 flex items-center gap-1">
+                      <Flame className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Finished / Won By</span>
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {([['player1', match.player1Name], ['player2', match.player2Name], ['none', 'None / Draw']] as const).map(([side, name]) => (
+                        <button
+                          key={side}
+                          type="button"
+                          onClick={() => setFinishedBy(side as any)}
+                          className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all truncate ${
+                            finishedBy === side
+                              ? (side === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
+                              : 'bg-white text-gray-700 border-gray-200'
+                          }`}
+                        >
+                          {side === 'none' ? name : name.split(' ')[0]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFinishedBy('player2');
-                      setP1InputScore(0);
-                      if (p2InputScore === 0) setP2InputScore(1);
-                    }}
-                    className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all ${
-                      finishedBy === 'player2' ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]' : 'bg-white text-gray-700 border-gray-200'
-                    }`}
-                  >
-                    {match.player2Name.split(' ')[0]}
-                  </button>
+                  {/* Score Input Fields — both always editable */}
+                  <div className="grid grid-cols-2 gap-3 bg-gray-50 p-3.5 rounded-xl border border-gray-200">
+                    <div>
+                      <label className="block font-bold text-gray-800 mb-1 truncate">
+                        {match.player1Name} (White)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={p1InputScore}
+                        onChange={e => setP1InputScore(Math.max(0, parseInt(e.target.value) || 0))}
+                        className="w-full text-base font-black text-center py-2 border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-[#0B5D3B]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-gray-800 mb-1 truncate">
+                        {match.player2Name} (Black)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={p2InputScore}
+                        onChange={e => setP2InputScore(Math.max(0, parseInt(e.target.value) || 0))}
+                        className="w-full text-base font-black text-center py-2 border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-[#0B5D3B]"
+                      />
+                    </div>
+                  </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFinishedBy('none');
-                      setP1InputScore(0);
-                      setP2InputScore(0);
-                      setQueenClaimed('none');
-                      setQueenCovered(false);
-                    }}
-                    className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all ${
-                      finishedBy === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-700 border-gray-200'
-                    }`}
-                  >
-                    None / Draw
-                  </button>
-                </div>
-              </div>
-
-              {/* Score Input Fields */}
-              <div className="grid grid-cols-2 gap-3 bg-gray-50 p-3.5 rounded-xl border border-gray-200">
-                <div>
-                  <label className="block font-bold text-gray-800 mb-1 truncate">
-                    {match.player1Name} (White)
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={29}
-                    value={p1InputScore}
-                    disabled={finishedBy !== 'player1'}
-                    onChange={e => setP1InputScore(Math.max(0, parseInt(e.target.value) || 0))}
-                    className="w-full text-base font-black text-center py-2 border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-[#0B5D3B] disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-bold text-gray-800 mb-1 truncate">
-                    {match.player2Name} (Black)
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={29}
-                    value={p2InputScore}
-                    disabled={finishedBy !== 'player2'}
-                    onChange={e => setP2InputScore(Math.max(0, parseInt(e.target.value) || 0))}
-                    className="w-full text-base font-black text-center py-2 border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-[#0B5D3B] disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
-                  />
-                </div>
-              </div>
-
-              {/* Queen Status */}
-              <div className="p-3 bg-amber-50/60 rounded-xl border border-amber-200">
-                <label className="block font-bold text-amber-950 mb-1.5 flex items-center gap-1">
-                  <Crown className="w-3.5 h-3.5 text-[#D4A72C]" />
-                  <span>Queen Pocketed & Covered</span>
-                </label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setQueenClaimed('player1');
-                      setQueenCovered(true);
-                      setFinishedBy('player1');
-                      setP2InputScore(0);
-                      if (p1InputScore === 0) setP1InputScore(1);
-                    }}
-                    className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all ${
-                      queenClaimed === 'player1' ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]' : 'bg-white text-gray-700 border-gray-200'
-                    }`}
-                  >
-                    {match.player1Name.split(' ')[0]} (+3)
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setQueenClaimed('player2');
-                      setQueenCovered(true);
-                      setFinishedBy('player2');
-                      setP1InputScore(0);
-                      if (p2InputScore === 0) setP2InputScore(1);
-                    }}
-                    className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all ${
-                      queenClaimed === 'player2' ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]' : 'bg-white text-gray-700 border-gray-200'
-                    }`}
-                  >
-                    {match.player2Name.split(' ')[0]} (+3)
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => { setQueenClaimed('none'); setQueenCovered(false); }}
-                    className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all ${
-                      queenClaimed === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-700 border-gray-200'
-                    }`}
-                  >
-                    None / Uncovered
-                  </button>
-                </div>
-              </div>
-
-
+                  {/* Queen — records the queen only, never the winner */}
+                  <div className="p-3 bg-amber-50/60 rounded-xl border border-amber-200">
+                    <label className="block font-bold text-amber-950 mb-1.5 flex items-center gap-1">
+                      <Crown className="w-3.5 h-3.5 text-[#D4A72C]" />
+                      <span>Queen Pocketed &amp; Covered</span>
+                    </label>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {([['player1', match.player1Name], ['player2', match.player2Name], ['none', 'None / Uncovered']] as const).map(([side, name]) => (
+                        <button
+                          key={side}
+                          type="button"
+                          onClick={() => {
+                            setQueenClaimed(side as any);
+                            setQueenCovered(side !== 'none');
+                          }}
+                          className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all truncate ${
+                            queenClaimed === side
+                              ? (side === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
+                              : 'bg-white text-gray-700 border-gray-200'
+                          }`}
+                        >
+                          {side === 'none' ? name : `${name.split(' ')[0]} (+${rules.queenPoints ?? 3})`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
 
               {/* Audit reason if correction */}
               {isEditAuditModalOpen && (
