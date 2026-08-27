@@ -22,7 +22,6 @@ import {
 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
-import { AutomationPipelineCard } from './AutomationPipelineCard';
 import { CreateTournamentModal } from './CreateTournamentModal';
 import { EditTournamentModal } from './EditTournamentModal';
 import { PosterGeneratorModal } from './PosterGeneratorModal';
@@ -145,9 +144,6 @@ export const AdminDashboard: React.FC = () => {
         />
       ) : (
         <>
-          {/* Automation Pipeline & Overview Header */}
-          <AutomationPipelineCard />
-
           {/* Tournament Selection & Creation Bar */}
           <div className="bg-white p-5 rounded-2xl border border-gray-200/80 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
