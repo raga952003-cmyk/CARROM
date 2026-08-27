@@ -49,18 +49,17 @@ def validate_board_score(
             detail="queenClaimedBy must be one of: player1, player2, none.",
         )
 
-    # Under classic scoring a queen is added to the claimant's own coin count,
-    # so a claimant on zero is a data-entry slip. Under remaining-coins scoring
-    # it is a legal result: the losing side scores nothing for coins and still
-    # takes the queen they covered, so the check does not apply there.
+    # A queen on a board where nothing at all was entered is a slip — the scorer
+    # picked the queen and forgot the coins. A queen on a board where the OTHER
+    # side scored is a real result: the loser can be the one who covered it, and
+    # under classic scoring their board score is then just the queen. Rejecting
+    # that made an ordinary carrom board impossible to record.
     if not allow_scoreless_queen:
-        if queen_claimed_by == "player1" and p1_score == 0:
+        if queen_claimed_by in ("player1", "player2") and p1_score == 0 and p2_score == 0:
             raise HTTPException(
                 status_code=422,
-                detail="Player 1 cannot be credited with the queen on a board they scored 0 on.",
-            )
-        if queen_claimed_by == "player2" and p2_score == 0:
-            raise HTTPException(
-                status_code=422,
-                detail="Player 2 cannot be credited with the queen on a board they scored 0 on.",
+                detail=(
+                    "The queen is credited to a player but neither side scored. "
+                    "Enter the coins each player pocketed, or set the queen to none."
+                ),
             )

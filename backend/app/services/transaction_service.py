@@ -9,6 +9,7 @@ If that migration has not been applied yet the helpers fall back to sequential
 writes and log a loud warning — the app keeps working, but without atomicity.
 `GET /api/health` reports which mode is active.
 """
+import time
 from typing import Any, Dict, List, Optional
 import logging
 
@@ -43,6 +44,42 @@ def _mark(available: bool) -> None:
     _rpc_available = available
 
 
+
+# Supabase occasionally drops a pooled connection mid-request, surfacing as
+# "Server disconnected" or a read timeout. Losing a board score to that is the
+# worst outcome in the app — the game was played and the record is not there —
+# and the write is a single atomic RPC, so retrying it once is safe.
+_TRANSIENT = (
+    "server disconnected",
+    "connection reset",
+    "connection aborted",
+    "remote end closed",
+    "read timeout",
+    "timed out",
+    "connection refused",
+    "temporarily unavailable",
+)
+
+
+def _looks_transient(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT)
+
+
+def _with_retry(call, attempts: int = 3, delay: float = 0.4):
+    """Run `call`, retrying only failures that look like a dropped connection."""
+    last = None
+    for attempt in range(attempts):
+        try:
+            return call()
+        except Exception as e:
+            last = e
+            if not _looks_transient(e) or attempt == attempts - 1:
+                raise
+            time.sleep(delay * (attempt + 1))
+    raise last
+
+
 def apply_board_result(
     admin_db,
     *,
@@ -55,14 +92,14 @@ def apply_board_result(
 ) -> Dict[str, Any]:
     """Board row + audit row + match aggregates + next board, in one transaction."""
     try:
-        result = admin_db.rpc("apply_board_result", {
+        result = _with_retry(lambda: admin_db.rpc("apply_board_result", {
             "p_match_id": match_id,
             "p_board_number": board_number,
             "p_board_patch": board_patch,
             "p_match_patch": match_patch,
             "p_audit": audit,
             "p_next_board_number": next_board_number,
-        }).execute()
+        }).execute())
         _mark(True)
         return result.data or {}
     except Exception as e:

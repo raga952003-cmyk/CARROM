@@ -8,6 +8,7 @@ looking for a scoring bug that was not there. Now the request re-authenticates
 once and retries, and anything still failing is a real defect.
 """
 import os
+import time
 
 import requests
 
@@ -47,8 +48,23 @@ def relogin(headers):
         return False
 
 
+# A dropped Supabase connection surfaces as a 400 carrying this text. It is not
+# a bad request, and treating it as one made a lost write look like a wrong
+# score in whichever assertion happened to read the row next.
+_TRANSIENT_TEXT = ("server disconnected", "connection reset", "read timeout",
+                   "timed out", "remote end closed", "temporarily unavailable")
+
+
+def _is_transient(response) -> bool:
+    if response.status_code in (502, 503, 504):
+        return True
+    if response.status_code != 400:
+        return False
+    return any(m in (response.text or "").lower() for m in _TRANSIENT_TEXT)
+
+
 def request(method, path, headers, **kw):
-    """One API call, retried once against a refused token."""
+    """One API call, retried against a refused token or a dropped connection."""
     kw.setdefault("timeout", 120)
     extra = kw.pop("headers", {}) or {}
 
@@ -59,5 +75,10 @@ def request(method, path, headers, **kw):
 
     r = send()
     if r.status_code == 401 and relogin(headers):
+        r = send()
+    for attempt in range(2):
+        if not _is_transient(r):
+            break
+        time.sleep(0.5 * (attempt + 1))
         r = send()
     return r

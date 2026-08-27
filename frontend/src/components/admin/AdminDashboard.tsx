@@ -29,6 +29,7 @@ import { RegistrationManager } from './RegistrationManager';
 import { FixtureScheduleView } from './FixtureScheduleView';
 import { LiveMatchController } from './LiveMatchController';
 import { MatchTossControl } from './MatchTossControl';
+import { ScoringRulesSettings, ScoringRules, defaultScoringRules } from './ScoringRulesSettings';
 import { StandingsSections } from '../common/StandingsSections';
 import { OperationsBar } from './OperationsBar';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
@@ -58,6 +59,7 @@ export const AdminDashboard: React.FC = () => {
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
 
   const [isEditingRules, setIsEditingRules] = useState(false);
+  const [scoringForm, setScoringForm] = useState<ScoringRules>(defaultScoringRules);
   const [rulesForm, setRulesForm] = useState({
     pointsForWin: 2,
     pointsForDraw: 1,
@@ -93,6 +95,17 @@ export const AdminDashboard: React.FC = () => {
         tournamentStartDate: currentTournament.tournamentStartDate || '',
         tournamentEndDate: currentTournament.tournamentEndDate || ''
       });
+      const r: any = currentTournament.rules || {};
+      setScoringForm({
+        // A tournament created before this setting existed has no value, and
+        // its confirmed results were decided under the old model.
+        scoringMode: r.scoringMode || 'classic',
+        coinsPerSide: r.coinsPerSide ?? 9,
+        queenPoints: r.queenPoints ?? 3,
+        queenMustBeCovered: r.queenMustBeCovered !== false,
+        queenAwardTo: r.queenAwardTo || 'coverer',
+        tieBreak: r.tieBreak || 'additional_board',
+      });
       setIsEditingRules(true);
     }
   };
@@ -115,7 +128,8 @@ export const AdminDashboard: React.FC = () => {
           targetScore: rulesForm.targetScore,
           queenPoints: rulesForm.queenPoints,
           matchDurationMinutes: rulesForm.matchDurationMinutes,
-          restTimeMinutes: rulesForm.restTimeMinutes
+          restTimeMinutes: rulesForm.restTimeMinutes,
+          ...scoringForm
         }
       };
 
@@ -524,20 +538,23 @@ export const AdminDashboard: React.FC = () => {
                           </div>
                           <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center py-1.5 border-b border-gray-100 gap-1.5 sm:gap-0">
                             <span>Queen Value:</span>
-                            {isEditingRules ? (
-                              <input
-                                type="number"
-                                min={1}
-                                max={10}
-                                value={rulesForm.queenPoints}
-                                onChange={e => setRulesForm({ ...rulesForm, queenPoints: parseInt(e.target.value) || 3 })}
-                                className="w-full sm:w-24 p-1 border border-gray-200 rounded text-left sm:text-right font-bold focus:border-[#0B5D3B] focus:ring-1 focus:ring-[#0B5D3B]"
-                              />
-                            ) : (
-                              <strong className="text-gray-900">+{currentTournament.rules.queenPoints} pts</strong>
-                            )}
+                            <strong className="text-gray-900">+{currentTournament.rules.queenPoints ?? 3} pts</strong>
+                          </div>
+                          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center py-1.5 gap-1.5 sm:gap-0">
+                            <span>Board Scoring:</span>
+                            <strong className="text-gray-900">
+                              {(currentTournament.rules as any)?.scoringMode === 'remaining_coins'
+                                ? "Winner scores the opponent's remaining coins"
+                                : 'Each player scores their own coins'}
+                            </strong>
                           </div>
                         </div>
+
+                        {isEditingRules && (
+                          <div className="pt-1">
+                            <ScoringRulesSettings value={scoringForm} onChange={setScoringForm} />
+                          </div>
+                        )}
                       </div>
 
                       {/* Schedule & Equipment Card */}
