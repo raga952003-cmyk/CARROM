@@ -11,6 +11,7 @@ from app.routers import (
     registrations,
     teams,
     access,
+    ai,
     fixtures,
     scheduling,
     standings,
@@ -50,6 +51,7 @@ app.include_router(tournaments.router, prefix="/api")
 app.include_router(registrations.router, prefix="/api")
 app.include_router(teams.router, prefix="/api")
 app.include_router(access.router, prefix="/api")
+app.include_router(ai.router, prefix="/api")
 app.include_router(matches.router, prefix="/api")
 app.include_router(fixtures.router, prefix="/api")
 app.include_router(scheduling.router, prefix="/api")

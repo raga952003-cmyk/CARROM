@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     API_PORT: int = int(os.getenv("PORT", 8000))
     API_ENV: str = os.getenv("ENV", "development")
 
+    # Server-side only. The browser calls /api/ai/* instead, so the key is
+    # never inlined into the frontend bundle.
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+
     # Comma-separated list of allowed browser origins, used outside development.
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
 

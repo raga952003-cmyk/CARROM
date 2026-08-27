@@ -4,7 +4,12 @@
  */
 
 const env = (import.meta as any).env || {};
-const API_BASE_URL = env.VITE_API_URL || 'http://localhost:8000/api';
+// Same-origin '/api' anywhere but a local dev machine. The built bundle used
+// to hardcode localhost:8000, so a deployed frontend called the developer's
+// own machine and every request failed.
+const isLocalHost = typeof window !== 'undefined' &&
+  /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname);
+const API_BASE_URL = env.VITE_API_URL || (isLocalHost ? 'http://localhost:8000/api' : '/api');
 
 const ACCESS_KEY = 'auth_token';
 const REFRESH_KEY = 'auth_refresh_token';

@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { Tournament, PosterConfig } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
-import { getGeminiClient } from '../../utils/geminiClient';
+import { tournamentService } from '../../services/tournamentService';
 
 interface PosterGeneratorModalProps {
   tournament: Tournament;
@@ -60,9 +60,16 @@ export const PosterGeneratorModal: React.FC<PosterGeneratorModalProps> = ({
   const handleGenerateAiConcept = async () => {
     setIsGeneratingAi(true);
     try {
-      const ai = getGeminiClient();
-      if (!ai) {
-        // Fallback elegant tagline and palette if no API key
+      // Generated server-side: the AI key must not reach the browser.
+      const copy = await tournamentService.generatePosterCopy({
+        tournamentName: tournament.name,
+        venue: tournament.venue,
+        city: tournament.city,
+        category: tournament.category,
+        format: tournament.format,
+      });
+
+      if (!copy.available) {
         setTagline("Strike with Precision. Reign Supreme on the Board.");
         setHighlights([
           "Championship Grade Synco & Siscaa Boards",
@@ -74,45 +81,10 @@ export const PosterGeneratorModal: React.FC<PosterGeneratorModalProps> = ({
         return;
       }
 
-      const prompt = `You are a sports tournament branding director specializing in Carrom championships.
-Tournament Details:
-- Name: ${tournament.name || "Carrom Championship"}
-- Venue: ${tournament.venue || "City Arena"}
-- Dates: ${tournament.tournamentStartDate} to ${tournament.tournamentEndDate}
-- Format: ${tournament.format || "Singles & Doubles"}
-- Prize Pool: ${tournament.prizePool || "Trophy & Cash Rewards"}
-- Style Vibe: ${themeStyle || "Classic Green and Gold Luxury Sports"}
-
-Provide a JSON object with:
-1. "tagline": A punchy, inspirational 5-8 word tournament slogan
-2. "highlights": Array of 3 short exciting feature bullets (e.g., Championship Carrom Boards, National Rating Points, Refreshments)
-3. "announcement": A 2-sentence formal registration invitation
-4. "paletteTheme": A recommended aesthetic theme description ("Royal Emerald & Gold", "Midnight Ebony Master", or "Ivory Classic")
-5. "badgeText": Top banner badge text (e.g. "OFFICIAL 2026 INVITATIONAL")
-
-Respond in pure JSON matching this exact structure:
-{
-  "tagline": "string",
-  "highlights": ["string", "string", "string"],
-  "announcement": "string",
-  "paletteTheme": "string",
-  "badgeText": "string"
-}`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-        },
-      });
-
-      const jsonText = response.text || "{}";
-      const data = JSON.parse(jsonText);
-      if (data.tagline) setTagline(data.tagline);
-      if (Array.isArray(data.highlights)) setHighlights(data.highlights);
-      if (data.announcement) setAnnouncement(data.announcement);
-      if (data.badgeText) setBadgeText(data.badgeText);
+      setTagline(copy.tagline);
+      setHighlights(copy.highlights || []);
+      setAnnouncement(copy.announcement);
+      setBadgeText(copy.badgeText);
     } catch (e) {
       console.error('AI Poster generation failed', e);
       // Fallback

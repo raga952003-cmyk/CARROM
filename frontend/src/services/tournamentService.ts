@@ -57,6 +57,22 @@ export const tournamentService = {
   },
 
   /**
+   * Parse a pasted player list server-side. The AI key stays on the server.
+   */
+  async parseParticipantsWithAI(text: string) {
+    return apiClient.post<{ available: boolean; players: any[]; error?: string }>(
+      '/ai/parse-participants', { text }
+    );
+  },
+
+  /**
+   * Generate poster copy server-side.
+   */
+  async generatePosterCopy(payload: Record<string, any>) {
+    return apiClient.post<any>('/ai/poster-copy', payload);
+  },
+
+  /**
    * All doubles teams, optionally limited to one tournament's entrants
    */
   async getTeams(tournamentId?: string) {

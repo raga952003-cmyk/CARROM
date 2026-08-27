@@ -13,7 +13,6 @@ import {
 } from 'lucide-react';
 import { Tournament, Player } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
-import { getGeminiClient } from '../../utils/geminiClient';
 import { tournamentService } from '../../services/tournamentService';
 
 interface ImportParticipantsModalProps {
@@ -128,45 +127,14 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
         }
       } else {
         // Fallback to Gemini parsing for pasted text
-        const ai = getGeminiClient();
-        if (!ai) {
-          throw new Error('Gemini API key not configured. Using local parsing fallback.');
+        // Parsing happens server-side so the AI key is never shipped to the
+        // browser; the local fallback below still applies if it is unavailable.
+        const aiResult = await tournamentService.parseParticipantsWithAI(rawText);
+        if (!aiResult.available) {
+          throw new Error(aiResult.error || 'AI parsing is not configured.');
         }
+        const data = { players: aiResult.players };
 
-        const prompt = `You are a data extraction assistant. Parse this raw list of players into a structured JSON list.
-Rules for extraction:
-1. Try to extract: Name, Club (default 'Independent' if not found), City (default 'Pune' if not found), Rating (default 1500 if not found), and Seed (optional integer, null if not found).
-2. Clean up any weird symbols, numbering prefixes (like "1.", "2)"), or headers.
-3. If only a name is present per line, use default values for others.
-
-Player text input:
----
-${rawText}
----
-
-Respond with a JSON object matching this exact structure:
-{
-  "players": [
-    {
-      "name": "string",
-      "club": "string",
-      "city": "string",
-      "rating": 1500,
-      "seed": 1
-    }
-  ]
-}`;
-
-        const response = await ai.models.generateContent({
-          model: "gemini-3.7-flash",
-          contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-          },
-        });
-
-        const jsonText = response.text || "{}";
-        const data = JSON.parse(jsonText);
         if (data.players && Array.isArray(data.players)) {
           setParsedPlayers(
             data.players.map((p: any) => ({
