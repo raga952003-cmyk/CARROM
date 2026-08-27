@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { TournamentFormat, MatchType, TournamentRules } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { GroupStageSettings } from './GroupStageSettings';
 
 interface CreateTournamentModalProps {
   isOpen: boolean;
@@ -50,6 +51,10 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   const [maxBoards, setMaxBoards] = useState(3);
   const [targetScore, setTargetScore] = useState(29);
   const [queenPoints, setQueenPoints] = useState(3);
+  // 1 = a single league; anything higher splits the league phase into groups.
+  const [groupCount, setGroupCount] = useState(1);
+  const [qualifiersPerGroup, setQualifiersPerGroup] = useState(2);
+  const [expectedEntrants, setExpectedEntrants] = useState(16);
   const [matchDuration, setMatchDuration] = useState(30);
   const [restTime, setRestTime] = useState(10);
 
@@ -72,6 +77,8 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
       queenPoints,
       matchDurationMinutes: matchDuration,
       restTimeMinutes: restTime,
+      groupCount,
+      qualifiersPerGroup,
       tiebreakerRules: ['points', 'board_difference', 'net_score_difference', 'head_to_head']
     };
 
@@ -464,6 +471,16 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                   </select>
                 </div>
               </div>
+
+              <GroupStageSettings
+                format={format}
+                groupCount={groupCount}
+                qualifiersPerGroup={qualifiersPerGroup}
+                expectedEntrants={expectedEntrants}
+                onGroupCountChange={setGroupCount}
+                onQualifiersChange={setQualifiersPerGroup}
+                onExpectedEntrantsChange={setExpectedEntrants}
+              />
 
               {/* Tiebreaker Rules Hierarchy */}
               <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">

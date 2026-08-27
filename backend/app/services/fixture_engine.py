@@ -436,12 +436,12 @@ def generate_group_knockout_fixtures(
                 "seed": (rank - 1) * len(labels) + labels.index(label) + 1,
             })
 
-    # Trim to a power of two so the bracket needs no byes of its own.
-    slots = 2
-    while slots * 2 <= len(placeholders):
-        slots *= 2
-    placeholders = placeholders[:slots]
-
+    # Every qualifier enters the bracket. Trimming to a power of two dropped
+    # them by list position: with 12 groups, all 12 winners went through but
+    # only four runners-up did, and which four depended on the order the labels
+    # happened to be built in rather than on merit. The bracket generator
+    # already handles a non-power-of-two field by giving byes to the top seeds,
+    # which is both fair and the normal way to run this.
     knockout = generate_knockout_bracket(
         tournament_id, placeholders, max_boards, id_prefix=f"{id_prefix}ko"
     )

@@ -137,6 +137,10 @@ export interface TournamentRules {
   queenPoints: number; // usually 3 points
   matchDurationMinutes: number;
   restTimeMinutes: number;
+  /** 1 = one league for everyone; higher splits the league phase into groups. */
+  groupCount?: number;
+  /** How many from each group reach the knockout. */
+  qualifiersPerGroup?: number;
   tiebreakerRules: ('points' | 'board_difference' | 'net_score_difference' | 'head_to_head')[];
 }
 
