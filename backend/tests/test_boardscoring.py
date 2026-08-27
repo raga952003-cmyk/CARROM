@@ -215,6 +215,34 @@ try:
     ok("4 base + 3 queen - 1 penalty = 6", b.get("player1_score") == 6, b.get("player1_score"))
 
     print("\n" + "=" * 70)
+    print("SECTION 20 - A CONFIRMED BOARD IS LOCKED")
+    print("=" * 70)
+    tid8, m8 = build(boards=2)
+    submit(m8["id"], 1, boardWinner="player1", coinsRemainingWith="player2", coinsRemaining=5,
+           queenPocketedBy="none", queenCoveredBy="none")
+    b = board_row(m8["id"], 1)
+    ok("a submitted board is marked confirmed", b.get("locked") is True, b.get("locked"), needs_005=True)
+
+    r = api("PUT", "/matches/{}/boards/1?reason=oops".format(m8["id"]),
+            json={"boardNumber": 1, "status": "completed",
+                  "player1Score": 99, "player2Score": 0})
+    ok("changing it without an override is refused -> {}".format(r.status_code),
+       r.status_code == 409, r.text[:160], needs_005=True)
+    if MIGRATED:
+        b = board_row(m8["id"], 1)
+        ok("the refused edit changed nothing", b.get("player1_score") == 5, b.get("player1_score"))
+
+    r = api("PUT", "/matches/{}/boards/1?reason=referee+review&override=true".format(m8["id"]),
+            json={"boardNumber": 1, "status": "completed",
+                  "player1Score": 0, "player2Score": 0})
+    ok("an explicit override is accepted -> {}".format(r.status_code),
+       r.status_code == 200, r.text[:160], needs_005=True)
+    if MIGRATED and r.status_code == 200:
+        logs = api("GET", "/audit/scores/" + m8["id"]).json()
+        ok("the override is named as such in the audit trail",
+           any("OVERRIDE" in (l.get("reason") or "") for l in logs),
+           [l.get("reason") for l in logs][:3])
+    print("\n" + "=" * 70)
     print("CLASSIC TOURNAMENTS ARE UNCHANGED")
     print("=" * 70)
     r = api("POST", "/tournaments", json={

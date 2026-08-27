@@ -161,7 +161,14 @@ async def add_board(id: str, admin = Depends(verify_admin)):
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.put("/{id}/boards/{board_number}")
-async def update_board(id: str, board_number: int, data: BoardScoreSchema, reason: str = Query("Scorer update"), admin = Depends(verify_admin)):
+async def update_board(
+    id: str,
+    board_number: int,
+    data: BoardScoreSchema,
+    reason: str = Query("Scorer update"),
+    override: bool = Query(False, description="Required to change a confirmed board."),
+    admin = Depends(verify_admin),
+):
     admin_db = get_admin_db()
     try:
         # Fetch previous board score for audit log
@@ -169,6 +176,16 @@ async def update_board(id: str, board_number: int, data: BoardScoreSchema, reaso
         if not prev_board.data:
             raise HTTPException(status_code=404, detail="Board not found")
         pb = prev_board.data[0]
+
+        if pb.get("locked") and not override:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Board {} is confirmed. Re-submitting would quietly rewrite a played "
+                    "game, so an override and a reason are required to change it."
+                ).format(board_number),
+            )
+        overriding = bool(pb.get("locked") and override)
 
         # Update board score
         # Corrections go through the same rule as the original submission, so a
@@ -223,8 +240,8 @@ async def update_board(id: str, board_number: int, data: BoardScoreSchema, reaso
             "admin_name": admin["name"],
             "board_number": board_number,
             "previous_score": {"player1": pb.get("player1_score", 0), "player2": pb.get("player2_score", 0)},
-            "new_score": {"player1": data.player1_score, "player2": data.player2_score},
-            "reason": reason
+            "new_score": {"player1": c_p1, "player2": c_p2},
+            "reason": ("OVERRIDE of a confirmed board: " + reason) if overriding else reason,
         }
         admin_db.table("score_audit_logs").insert(audit_payload).execute()
         
@@ -336,6 +353,12 @@ async def submit_board(
                 "queen_claimed_by": data.queen_pocketed_by or data.queen_claimed_by or "none",
                 "queen_covered": outcome["queen_status"] == "covered",
                 "completed_at": datetime.utcnow().isoformat(),
+                # A confirmed board is the official record of a game that has
+                # been played. Changing it later is a deliberate act, not a
+                # second submission.
+                "locked": True,
+                "confirmed_by": admin["id"],
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
             }
         else:
             # Scorers enter the coin count; the queen is added here from the
