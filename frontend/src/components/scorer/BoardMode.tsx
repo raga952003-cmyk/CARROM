@@ -177,14 +177,21 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
 
         {!decided && activeBoard && (
           <>
-            <div className="text-[11px] font-bold uppercase tracking-wider text-gray-500">
-              Board {activeBoard.boardNumber} of {match.maxBoards} · first to {target}
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-gray-500">
+                Board {activeBoard.boardNumber} of {match.maxBoards} · first to {target}
+              </div>
+              <div className="text-[11px] text-gray-500 mt-0.5">
+                Enter coins only — the queen is added automatically.
+              </div>
             </div>
             <Stepper label={match.player1Name} value={p1} onChange={setP1} highlight={p1 > p2} />
             <Stepper label={match.player2Name} value={p2} onChange={setP2} highlight={p2 > p1} />
 
             <div>
-              <div className="text-[11px] font-bold text-gray-600 mb-1.5">Queen taken by</div>
+              <div className="text-[11px] font-bold text-gray-600 mb-1.5">
+                Queen taken by <span className="font-normal text-gray-400">(only scores if covered)</span>
+              </div>
               <div className="grid grid-cols-3 gap-2">
                 {([
                   ['none', 'Nobody'],

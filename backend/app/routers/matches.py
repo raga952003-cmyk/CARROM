@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
 from app.models.match import MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema
 from app.utils.security import get_user_profile, verify_admin
-from app.services.scoring_engine import recalculate_match_scores
+from app.services.scoring_engine import recalculate_match_scores, apply_queen_points
 from app.services.notification_service import fan_out_notification, resolve_tournament_audience
 from app.services.transaction_service import apply_board_result, confirm_match_result
 from app.services.qualification import try_auto_promote
@@ -16,6 +16,21 @@ from datetime import datetime
 import json
 
 router = APIRouter(prefix="/matches", tags=["matches"])
+
+def tournament_rules(admin_db, tournament_id: str) -> dict:
+    """The tournament's scoring rules, for the queen value."""
+    if not tournament_id:
+        return {}
+    rows = admin_db.table("tournaments").select("rules").eq(
+        "id", tournament_id).execute().data
+    return (rows[0].get("rules") or {}) if rows else {}
+
+
+def prev_match_tournament(admin_db, match_id: str) -> str:
+    rows = admin_db.table("matches").select("tournament_id").eq(
+        "id", match_id).execute().data
+    return rows[0]["tournament_id"] if rows else ""
+
 
 def _authorise_match(admin_db, match_id: str, admin, action: str):
     """Resolve a match to its tournament and authorise the caller for `action`."""
@@ -128,9 +143,17 @@ async def update_board(id: str, board_number: int, data: BoardScoreSchema, reaso
         pb = prev_board.data[0]
 
         # Update board score
+        # Corrections go through the same rule, so a fixed score is not left
+        # missing the queen that the original submission included.
+        corrected_rules = (tournament_rules(admin_db, prev_match_tournament(admin_db, id)) or {})
+        c_p1, c_p2, _ = apply_queen_points(
+            data.player1_score, data.player2_score,
+            data.queen_claimed_by, data.queen_covered, corrected_rules,
+        )
+
         update_payload = {
-            "player1_score": data.player1_score,
-            "player2_score": data.player2_score,
+            "player1_score": c_p1,
+            "player2_score": c_p2,
             "status": data.status,
             "queen_claimed_by": data.queen_claimed_by,
             "queen_covered": data.queen_covered,
@@ -215,9 +238,17 @@ async def submit_board(
 
         validate_board_score(data.p1_score, data.p2_score, match_data, data.queen_claimed_by)
 
+        # Scorers enter the coin count; the queen is added here from the
+        # tournament's configured value, and only when it was covered.
+        rules = (tournament_rules(admin_db, match_data["tournament_id"]) or {})
+        p1_final, p2_final, queen_note = apply_queen_points(
+            data.p1_score, data.p2_score,
+            data.queen_claimed_by, data.queen_covered, rules,
+        )
+
         board_patch = {
-            "player1_score": data.p1_score,
-            "player2_score": data.p2_score,
+            "player1_score": p1_final,
+            "player2_score": p2_final,
             "status": "completed",
             "queen_claimed_by": data.queen_claimed_by,
             "queen_covered": data.queen_covered,
@@ -254,8 +285,11 @@ async def submit_board(
             audit={
                 "admin_id": admin["id"],
                 "admin_name": admin["name"],
-                "new_score": {"player1": data.p1_score, "player2": data.p2_score},
-                "reason": data.audit_reason,
+                "new_score": {"player1": p1_final, "player2": p2_final},
+                "reason": (
+                    f"{data.audit_reason} (coins {data.p1_score}-{data.p2_score}; {queen_note})"
+                    if queen_note else data.audit_reason
+                ),
             },
             next_board_number=next_board_number if has_next else None,
         )

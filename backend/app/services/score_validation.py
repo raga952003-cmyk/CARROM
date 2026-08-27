@@ -33,8 +33,9 @@ def validate_board_score(
                 detail=f"{label}'s score of {score} exceeds the maximum possible board score ({ceiling}).",
             )
 
-    # In carrom only one side pockets the remaining men, so both players cannot
-    # finish a board on the target score.
+    # Judged on the coin count the scorer entered, before the queen is added:
+    # a board won 21-3 with the queen becomes 24-3, which must not be treated
+    # as both sides reaching the target.
     if p1_score >= int(target) and p2_score >= int(target):
         raise HTTPException(
             status_code=422,

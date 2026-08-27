@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
 def _field(row: Dict[str, Any], camel: str, snake: str, default: Any = None) -> Any:
@@ -209,3 +209,50 @@ def calculate_points_table(
         r["isQualified"] = (idx < 4)
 
     return rows
+
+
+def queen_award(
+    queen_claimed_by: Optional[str],
+    queen_covered: Optional[bool],
+    rules: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, int, Optional[str]]:
+    """
+    Points to add for the queen, as (player1_bonus, player2_bonus, note).
+
+    Scorers enter the coin count only; the queen is added here from the
+    tournament's configured value. Previously `queenPoints` existed in the
+    rules and in the setup screen but no scoring code read it, so choosing 1
+    or 3 changed nothing.
+
+    A queen only counts if it was covered -- pocketing it and failing to follow
+    with your own coin returns it to the board -- so a claimed but uncovered
+    queen scores nothing.
+    """
+    rules = rules or {}
+    points = rules.get("queenPoints", rules.get("queen_points", 3))
+    try:
+        points = int(points)
+    except (TypeError, ValueError):
+        points = 3
+
+    if queen_claimed_by not in ("player1", "player2"):
+        return 0, 0, None
+
+    if not queen_covered:
+        return 0, 0, "queen claimed but not covered, so it scores nothing"
+
+    if queen_claimed_by == "player1":
+        return points, 0, f"+{points} to player 1 for the queen"
+    return 0, points, f"+{points} to player 2 for the queen"
+
+
+def apply_queen_points(
+    p1_score: int,
+    p2_score: int,
+    queen_claimed_by: Optional[str],
+    queen_covered: Optional[bool],
+    rules: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, int, Optional[str]]:
+    """Coin counts in, effective board scores out."""
+    bonus1, bonus2, note = queen_award(queen_claimed_by, queen_covered, rules)
+    return p1_score + bonus1, p2_score + bonus2, note

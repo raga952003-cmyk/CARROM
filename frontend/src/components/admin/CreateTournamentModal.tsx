@@ -450,12 +450,16 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                   <label className="block text-xs font-bold text-gray-700 mb-1">
                     Queen Value
                   </label>
+                  <p className="text-[10px] text-gray-500 mb-1.5">
+                    Added to the scorer's coin count when the queen is covered.
+                  </p>
                   <select
                     value={queenPoints}
                     onChange={e => setQueenPoints(parseInt(e.target.value) || 3)}
                     className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
                   >
-                    <option value={3}>3 Points (If under 21 pts)</option>
+                    <option value={3}>3 Points (AICF standard)</option>
+                    <option value={5}>5 Points</option>
                     <option value={1}>1 Point</option>
                   </select>
                 </div>
