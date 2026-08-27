@@ -8,6 +8,9 @@ format does not hide the others.
 """
 import os, sys, uuid, requests
 sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _session
 from app.database import get_admin_db
 
 BASE = os.getenv("CARROM_API", "http://127.0.0.1:8000") + "/api"
@@ -22,7 +25,7 @@ ADMIN_HEADERS = {}
 
 def ok(label, cond, detail=""):
     print("  {}  {}{}".format("PASS" if cond else "FAIL", label,
-                              ("  <- " + detail) if (detail and not cond) else ""))
+                              ("  <- " + repr(detail)) if (detail not in (None, "") and not cond) else ""))
     if not cond:
         failures.append(label + ((" | " + detail) if detail else ""))
     return cond
@@ -34,10 +37,7 @@ def warn(label):
 
 
 def api(method, path, **kw):
-    kw.setdefault("timeout", 120)
-    headers = dict(ADMIN_HEADERS)
-    headers.update(kw.pop("headers", {}))
-    return requests.request(method, BASE + path, headers=headers, **kw)
+    return _session.request(method, path, ADMIN_HEADERS, **kw)
 
 
 def make_players(n, prefix):
@@ -148,6 +148,7 @@ try:
         "name": "Scenario Admin", "role": "admin", "club": "QA", "city": "Pune"}, timeout=90)
     assert r.status_code == 200, r.text[:300]
     ADMIN_HEADERS["Authorization"] = "Bearer " + r.json()["access_token"]
+    _session.remember("sc_admin_{}@carromarena.com".format(RUN), PASSWORD)
     admin_id = r.json()["user"]["id"]
     created_users.append(admin_id)
     print("    admin ready")

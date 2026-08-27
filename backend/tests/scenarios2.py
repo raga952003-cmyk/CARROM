@@ -1,6 +1,9 @@
 """Edge-case harness: draws, corrections, tiebreakers, gating, larger brackets."""
 import os, sys, uuid, requests
 sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _session
 from app.database import get_admin_db
 
 BASE = os.getenv("CARROM_API", "http://127.0.0.1:8000") + "/api"
@@ -14,17 +17,14 @@ H = {}
 
 def ok(label, cond, detail=""):
     print("  {}  {}{}".format("PASS" if cond else "FAIL", label,
-                              ("  <- " + detail) if (detail and not cond) else ""))
+                              ("  <- " + repr(detail)) if (detail not in (None, "") and not cond) else ""))
     if not cond:
         failures.append(label + ((" | " + detail) if detail else ""))
     return cond
 
 
 def api(method, path, **kw):
-    kw.setdefault("timeout", 120)
-    headers = dict(H)
-    headers.update(kw.pop("headers", {}))
-    return requests.request(method, BASE + path, headers=headers, **kw)
+    return _session.request(method, path, H, **kw)
 
 
 def make_players(n, prefix):
@@ -97,6 +97,7 @@ try:
         "name": "Edge Admin", "role": "admin"}, timeout=90)
     assert r.status_code == 200, r.text[:300]
     H["Authorization"] = "Bearer " + r.json()["access_token"]
+    _session.remember("ec_admin_{}@carromarena.com".format(RUN), PASSWORD)
     created_users.append(r.json()["user"]["id"])
 
     # =====================================================================

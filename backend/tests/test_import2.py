@@ -1,6 +1,9 @@
 """Excel/CSV import: singles, doubles, mixed, category mismatch, CSV, dedupe."""
 import os, sys, io, uuid, json, requests
 sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _session
 from openpyxl import Workbook
 from app.database import get_admin_db
 
@@ -14,7 +17,7 @@ H = {}
 
 def ok(label, cond, detail=""):
     print("  {}  {}{}".format("PASS" if cond else "FAIL", label,
-                              ("  <- " + detail) if (detail and not cond) else ""))
+                              ("  <- " + repr(detail)) if (detail not in (None, "") and not cond) else ""))
     if not cond:
         failures.append(label)
     return cond
@@ -34,9 +37,7 @@ def csvfile(headers, rows):
 
 
 def api(method, path, **kw):
-    kw.setdefault("timeout", 180)
-    headers = dict(H); headers.update(kw.pop("headers", {}))
-    return requests.request(method, BASE + path, headers=headers, **kw)
+    return _session.request(method, path, H, **kw)
 
 
 def upload(fileobj, name):
@@ -78,6 +79,7 @@ try:
         "name": "Imp Admin", "role": "admin"}, timeout=90)
     assert r.status_code == 200, r.text[:300]
     H["Authorization"] = "Bearer " + r.json()["access_token"]
+    _session.remember("imp{}_admin@carromarena.com".format(RUN), "TestPass2345x")
 
     E = lambda n: "imp{}_{}@carromarena.com".format(RUN, n)
 

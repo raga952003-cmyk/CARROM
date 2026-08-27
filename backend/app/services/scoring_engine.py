@@ -348,8 +348,8 @@ def _rule(rules: Dict[str, Any], camel: str, snake: str, default: Any) -> Any:
 def board_result(
     *,
     winner: Optional[str] = "none",
-    p1_coins_pocketed: int = 0,
-    p2_coins_pocketed: int = 0,
+    p1_coins_pocketed: Optional[int] = None,
+    p2_coins_pocketed: Optional[int] = None,
     coins_remaining_with: Optional[str] = None,
     coins_remaining: Optional[int] = None,
     queen_pocketed_by: Optional[str] = "none",
@@ -379,14 +379,29 @@ def board_result(
     loser = _opponent(winner)
 
     # ---- base points: the coins the loser still has on the board ----------
-    pocketed = {"player1": int(p1_coins_pocketed or 0), "player2": int(p2_coins_pocketed or 0)}
-    derived = {s: max(0, coins_per_side - pocketed[s]) for s in SIDES}
+    #
+    # Pocketed counts are optional. A scorer who counts what was potted gets a
+    # cross-check against what they said was left; one who just reports the
+    # coins on the board gets no spurious disagreement with a number they
+    # never entered.
+    pocketed = {
+        "player1": None if p1_coins_pocketed is None else max(0, int(p1_coins_pocketed)),
+        "player2": None if p2_coins_pocketed is None else max(0, int(p2_coins_pocketed)),
+    }
+    derived = {
+        s: None if pocketed[s] is None else max(0, coins_per_side - pocketed[s])
+        for s in SIDES
+    }
 
     if winner == "none":
         base = 0
     elif coins_remaining_with in SIDES:
         # The umpire named who still has coins on the board.
-        stated = derived[coins_remaining_with] if coins_remaining is None else max(0, int(coins_remaining))
+        if coins_remaining is not None:
+            stated = max(0, int(coins_remaining))
+        else:
+            stated = derived[coins_remaining_with] or 0
+
         if coins_remaining_with == winner:
             base = 0
             warnings.append(
@@ -395,16 +410,19 @@ def board_result(
             )
         else:
             base = stated
-            if coins_remaining is not None and stated != derived[coins_remaining_with]:
+            expected = derived[coins_remaining_with]
+            if coins_remaining is not None and expected is not None and stated != expected:
                 warnings.append(
                     f"coins remaining ({stated}) does not match {coins_per_side} minus the "
-                    f"{pocketed[coins_remaining_with]} pocketed ({derived[coins_remaining_with]})"
+                    f"{pocketed[coins_remaining_with]} pocketed ({expected})"
                 )
     elif coins_remaining_with == "none":
-        base = 0 if coins_remaining is None else max(0, int(coins_remaining))
+        # "Nobody has coins left" means nobody has coins left. A count still
+        # sitting in the payload from an earlier selection must not be scored.
+        base = 0
     else:
-        # Not stated — fall back to the arithmetic on the coin counts.
-        base = derived[loser]
+        # Not stated — fall back to the arithmetic on the coin counts, if any.
+        base = (derived[loser] or 0) if loser else 0
 
     # ---- queen ------------------------------------------------------------
     pocketed_by = queen_pocketed_by if queen_pocketed_by in SIDES else "none"

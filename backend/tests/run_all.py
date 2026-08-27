@@ -25,6 +25,7 @@ API = os.getenv("CARROM_API", "http://127.0.0.1:8000")
 # Ordered cheapest-first so an obvious break is reported in seconds, not minutes.
 SUITES = [
     "test_access",
+    "test_preview_parity",
     "test_queen",
     "test_boardscoring",
     "test_toss",
@@ -39,7 +40,8 @@ SUITES = [
     "scenarios2",
 ]
 
-PASS_MARKERS = ("RESULTS: 0 failure(s)", "ALL END-TO-END CHECKS PASSED",
+PASS_MARKERS = ("RESULTS: 0 failure(s)",
+                "ALL PREVIEW-PARITY CHECKS PASSED", "ALL END-TO-END CHECKS PASSED",
                 "ALL ARCHITECTURE CHECKS PASSED", "ALL DOUBLES CHECKS PASSED",
                 "ALL EDGE-CASE SCENARIOS PASSED")
 

@@ -17,7 +17,7 @@ H = {}
 
 def ok(label, cond, detail=""):
     print("  {}  {}{}".format("PASS" if cond else "FAIL", label,
-                              ("  <- " + detail) if (detail and not cond) else ""))
+                              ("  <- " + repr(detail)) if (detail not in (None, "") and not cond) else ""))
     if not cond:
         failures.append(label)
     return cond

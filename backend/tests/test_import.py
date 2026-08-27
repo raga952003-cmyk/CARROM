@@ -1,6 +1,9 @@
 """What actually happens when you upload a singles sheet and a doubles sheet?"""
 import os, sys, io, uuid, json, requests
 sys.path.insert(0, '.')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _session
 from openpyxl import Workbook
 from app.database import get_admin_db
 
@@ -24,10 +27,7 @@ def sheet(rows, headers):
 
 
 def api(method, path, **kw):
-    kw.setdefault("timeout", 180)
-    headers = dict(H)
-    headers.update(kw.pop("headers", {}))
-    return requests.request(method, BASE + path, headers=headers, **kw)
+    return _session.request(method, path, H, **kw)
 
 
 def cleanup():
@@ -67,6 +67,7 @@ try:
         "password": "TestPass2345x", "name": "Import Admin", "role": "admin"}, timeout=90)
     assert r.status_code == 200, r.text[:300]
     H["Authorization"] = "Bearer " + r.json()["access_token"]
+    _session.remember("imp_admin_{}@carromarena.com".format(RUN), "TestPass2345x")
     created_users.append(r.json()["user"]["id"])
 
     # ================= A. SINGLES SHEET =================
