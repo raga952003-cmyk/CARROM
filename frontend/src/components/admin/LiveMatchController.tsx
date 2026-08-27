@@ -163,19 +163,42 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   };
 
   const handleSaveScoreCorrection = () => {
+    // A correction restates the observations, the same shape the original
+    // submission used. Sending the two score numbers instead left the server
+    // with nothing to re-score from, so the edit appeared to do nothing.
+    const preview = usesRemainingCoins ? previewBoard(observation, rules) : null;
     updateBoardScore(
       tournament.id,
       match.id,
       selectedBoardForScore,
-      {
-        player1Score: p1InputScore,
-        player2Score: p2InputScore,
-        queenClaimedBy: queenClaimed,
-        queenCovered,
-        whiteCoinsPocketed: whiteCoins,
-        blackCoinsPocketed: blackCoins
-      },
-      auditReason
+      usesRemainingCoins
+        ? {
+            boardNumber: selectedBoardForScore,
+            status: 'completed',
+            player1Score: preview!.p1,
+            player2Score: preview!.p2,
+            boardWinner: observation.winner,
+            coinsRemainingWith: observation.coinsRemainingWith,
+            coinsRemaining: observation.coinsRemaining,
+            queenPocketedBy: observation.queenPocketedBy,
+            queenCoveredBy: observation.queenCoveredBy,
+            p1Penalty: observation.p1Penalty,
+            p2Penalty: observation.p2Penalty,
+          } as any
+        : {
+            boardNumber: selectedBoardForScore,
+            status: 'completed',
+            player1Score: p1InputScore,
+            player2Score: p2InputScore,
+            queenClaimedBy: queenClaimed,
+            queenCovered,
+            whiteCoinsPocketed: whiteCoins,
+            blackCoinsPocketed: blackCoins
+          } as any,
+      auditReason,
+      // Opening the correction screen and writing a reason IS the deliberate
+      // act that a confirmed board requires.
+      true
     );
     setIsEditAuditModalOpen(false);
   };

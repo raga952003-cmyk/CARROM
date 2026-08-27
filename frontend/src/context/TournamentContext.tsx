@@ -109,8 +109,10 @@ interface TournamentContextType {
     tournamentId: string, 
     matchId: string, 
     boardNumber: number, 
-    boardData: Partial<BoardScore>, 
-    reason?: string
+    boardData: Partial<BoardScore>,
+    reason?: string,
+    /** Required once a board is confirmed; the correction screen is that act. */
+    override?: boolean
   ) => Promise<void>;
   submitBoardScore: (
     tournamentId: string,
@@ -506,9 +508,14 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     matchId: string, 
     boardNumber: number, 
     boardData: Partial<BoardScore>, 
-    reason: string = 'Score update'
+    reason: string = 'Score update',
+    override: boolean = false
   ) => {
-    await apiClient.put(`/matches/${matchId}/boards/${boardNumber}?reason=${encodeURIComponent(reason)}`, boardData);
+    await apiClient.put(
+      `/matches/${matchId}/boards/${boardNumber}?reason=${encodeURIComponent(reason)}`
+      + (override ? '&override=true' : ''),
+      boardData
+    );
     await refreshData();
   };
 

@@ -243,6 +243,41 @@ try:
            any("OVERRIDE" in (l.get("reason") or "") for l in logs),
            [l.get("reason") for l in logs][:3])
     print("\n" + "=" * 70)
+    print("EDITING A SUBMITTED SCORE ACTUALLY CHANGES IT")
+    print("=" * 70)
+    tid9, m9 = build(boards=2)
+    submit(m9["id"], 1, boardWinner="player1", coinsRemainingWith="player2", coinsRemaining=5,
+           queenPocketedBy="player1", queenCoveredBy="player1")
+    b = board_row(m9["id"], 1)
+    ok("submitted as 5 coins + 3 queen = 8", b.get("player1_score") == 8, b.get("player1_score"))
+
+    # The umpire re-counts: it was 3 coins, and the opponent covered the queen.
+    r = api("PUT", "/matches/{}/boards/1?reason=recount&override=true".format(m9["id"]),
+            json={"boardNumber": 1, "status": "completed",
+                  "player1Score": 0, "player2Score": 0,
+                  "boardWinner": "player1", "coinsRemainingWith": "player2",
+                  "coinsRemaining": 3,
+                  "queenPocketedBy": "player1", "queenCoveredBy": "player2"})
+    ok("correction accepted -> {}".format(r.status_code), r.status_code == 200, r.text[:200])
+    b = board_row(m9["id"], 1)
+    ok("the edit took: winner now scores 3, not 8", b.get("player1_score") == 3,
+       b.get("player1_score"))
+    ok("and the queen moved to the opponent: 3", b.get("player2_score") == 3,
+       b.get("player2_score"))
+
+    row = adm.table("matches").select("*").eq("id", m9["id"]).execute().data[0]
+    ok("match totals follow the correction", 
+       (row.get("player1_total_points"), row.get("player2_total_points")) == (3, 3),
+       (row.get("player1_total_points"), row.get("player2_total_points")))
+
+    # A second correction must read the corrected board, not the original.
+    r = api("PUT", "/matches/{}/boards/1?reason=again&override=true".format(m9["id"]),
+            json={"boardNumber": 1, "status": "completed",
+                  "player1Score": 0, "player2Score": 0, "coinsRemaining": 7})
+    b = board_row(m9["id"], 1)
+    ok("a second edit builds on the first (7 coins -> 7)",
+       b.get("player1_score") == 7, b.get("player1_score"), needs_005=True)
+    print("\n" + "=" * 70)
     print("CLASSIC TOURNAMENTS ARE UNCHANGED")
     print("=" * 70)
     r = api("POST", "/tournaments", json={

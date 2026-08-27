@@ -197,16 +197,25 @@ async def update_board(
         if corrected_mode == "remaining_coins":
             # A correction restates the observations, so it is scored from them
             # rather than from the two numbers, which are outputs not inputs.
+            # Anything the correction does not mention keeps what the board
+            # already had; `is None` rather than `or`, so a deliberate 0 sticks.
+            def restated(field, stored, fallback=None):
+                value = getattr(data, field, None)
+                if value is not None:
+                    return value
+                return pb.get(stored, fallback) if pb.get(stored) is not None else fallback
+
             outcome = board_result(
-                winner=pb.get("board_winner") or "none",
-                p1_coins_pocketed=pb.get("p1_coins_pocketed") or 0,
-                p2_coins_pocketed=pb.get("p2_coins_pocketed") or 0,
-                coins_remaining_with=pb.get("coins_remaining_with"),
-                coins_remaining=pb.get("coins_remaining"),
-                queen_pocketed_by=data.queen_claimed_by or pb.get("queen_pocketed_by"),
-                queen_covered_by=pb.get("queen_covered_by"),
-                p1_penalty=data.fouls_player1 or pb.get("p1_penalty") or 0,
-                p2_penalty=data.fouls_player2 or pb.get("p2_penalty") or 0,
+                winner=restated("board_winner", "board_winner", "none"),
+                p1_coins_pocketed=restated("p1_coins_pocketed", "p1_coins_pocketed"),
+                p2_coins_pocketed=restated("p2_coins_pocketed", "p2_coins_pocketed"),
+                coins_remaining_with=restated("coins_remaining_with", "coins_remaining_with"),
+                coins_remaining=restated("coins_remaining", "coins_remaining"),
+                queen_pocketed_by=restated("queen_pocketed_by", "queen_pocketed_by")
+                                  or data.queen_claimed_by,
+                queen_covered_by=restated("queen_covered_by", "queen_covered_by"),
+                p1_penalty=restated("p1_penalty", "p1_penalty", 0) or 0,
+                p2_penalty=restated("p2_penalty", "p2_penalty", 0) or 0,
                 rules=corrected_rules,
             )
             c_p1, c_p2 = outcome["player1_score"], outcome["player2_score"]
@@ -228,6 +237,30 @@ async def update_board(
             "black_coins_pocketed": data.black_coins_pocketed,
             "notes": data.notes
         }
+
+        if corrected_mode == "remaining_coins":
+            # Store what the correction observed, not just what it scored, so a
+            # second correction reads the current board rather than the original.
+            update_payload.update({
+                "board_winner": outcome["board_winner"],
+                "coins_remaining_with": restated("coins_remaining_with", "coins_remaining_with"),
+                "coins_remaining": restated("coins_remaining", "coins_remaining"),
+                "p1_coins_pocketed": restated("p1_coins_pocketed", "p1_coins_pocketed"),
+                "p2_coins_pocketed": restated("p2_coins_pocketed", "p2_coins_pocketed"),
+                "queen_pocketed_by": restated("queen_pocketed_by", "queen_pocketed_by"),
+                "queen_covered_by": restated("queen_covered_by", "queen_covered_by"),
+                "queen_status": outcome["queen_status"],
+                "queen_awarded_to": outcome["queen_awarded_to"],
+                "base_points": outcome["base_points"],
+                "queen_bonus": outcome["queen_bonus"],
+                "p1_penalty": restated("p1_penalty", "p1_penalty", 0) or 0,
+                "p2_penalty": restated("p2_penalty", "p2_penalty", 0) or 0,
+                "scoring_warnings": outcome["warnings"] or None,
+            })
+
+        if not board_detail_available(admin_db):
+            for key in _BOARD_DETAIL_COLUMNS:
+                update_payload.pop(key, None)
         if data.status == "completed":
             update_payload["completed_at"] = datetime.utcnow().isoformat()
 

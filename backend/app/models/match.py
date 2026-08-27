@@ -8,6 +8,20 @@ class BoardScoreSchema(BaseCamelModel):
     status: str = "pending"  # "pending", "in_progress", "completed"
     player1_score: int = 0
     player2_score: int = 0
+
+    # A correction restates what the umpire saw, exactly as the original
+    # submission did. Without these a correction had nothing to re-score from
+    # and could only rewrite the board with what was already on it.
+    board_winner: Optional[str] = None
+    p1_coins_pocketed: Optional[int] = None
+    p2_coins_pocketed: Optional[int] = None
+    coins_remaining_with: Optional[str] = None
+    coins_remaining: Optional[int] = None
+    queen_pocketed_by: Optional[str] = None
+    queen_covered_by: Optional[str] = None
+    p1_penalty: Optional[int] = None
+    p2_penalty: Optional[int] = None
+
     queen_claimed_by: Optional[str] = "none"  # "player1", "player2", "none"
     queen_covered: Optional[bool] = False
     fouls_player1: Optional[int] = 0
