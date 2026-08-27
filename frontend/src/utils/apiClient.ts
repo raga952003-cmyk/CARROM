@@ -182,6 +182,17 @@ class ApiClient {
 
       return await response.json();
     } catch (error) {
+      // fetch() rejects with a TypeError when the request never reached the
+      // server. That is an Error, so the friendly fallback below was
+      // unreachable and the user saw a bare "Failed to fetch" instead of being
+      // told their change was not saved.
+      if (error instanceof TypeError || !navigator.onLine) {
+        throw new Error(
+          navigator.onLine
+            ? 'Could not reach the server. Your change was not saved — try again.'
+            : 'You appear to be offline. Your change was not saved — reconnect and try again.'
+        );
+      }
       if (error instanceof Error) {
         throw error;
       }
