@@ -96,6 +96,13 @@ export interface Match {
   scheduledTime: string;
   status: MatchStatus;
   
+  // Toss — recorded by the umpire before the first board
+  tossCoinResult?: 'black' | 'white' | null;
+  tossWinnerId?: string | null;
+  tossWinnerName?: string | null;
+  tossChoice?: 'strike' | 'side' | null;
+  tossRecordedAt?: string | null;
+
   // Timer state
   timerStartedAt?: number; // timestamp in ms
   timerElapsedSeconds: number;

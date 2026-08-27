@@ -28,6 +28,7 @@ import { PosterGeneratorModal } from './PosterGeneratorModal';
 import { RegistrationManager } from './RegistrationManager';
 import { FixtureScheduleView } from './FixtureScheduleView';
 import { LiveMatchController } from './LiveMatchController';
+import { MatchTossControl } from './MatchTossControl';
 import { StandingsSections } from '../common/StandingsSections';
 import { OperationsBar } from './OperationsBar';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
@@ -40,6 +41,7 @@ export const AdminDashboard: React.FC = () => {
     setActiveTournamentId,
     activeMatch,
     setActiveMatch,
+    role,
     publishTournament,
     updateTournament,
     deleteTournament
@@ -122,6 +124,18 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
+  // Matches whose toss step is finished in this session, so a database
+  // without migration 004 does not send the umpire round the wizard again.
+  const [tossedIds, setTossedIds] = useState<string[]>([]);
+  const [matchNotice, setMatchNotice] = useState('');
+  const setTossDone = (id: string) => setTossedIds(prev => prev.includes(id) ? prev : [...prev, id]);
+  const needsToss = (m: Match) =>
+    role === 'admin' &&
+    m.status === 'scheduled' &&
+    !m.resultConfirmed &&
+    !m.tossRecordedAt &&
+    !tossedIds.includes(m.id);
+
   const liveActiveMatch = activeMatch && currentTournament 
     ? currentTournament.matches.find(m => m.id === activeMatch.id) || activeMatch
     : null;
@@ -137,11 +151,27 @@ export const AdminDashboard: React.FC = () => {
       
       {/* If a match is currently opened in the controller, show LiveMatchController */}
       {liveActiveMatch && currentTournament ? (
-        <LiveMatchController
-          tournament={currentTournament}
-          match={liveActiveMatch}
-          onBack={() => setActiveMatch(null)}
-        />
+        // A match that has not been started yet begins with the toss; once it
+        // is live the umpire goes straight to scoring.
+        needsToss(liveActiveMatch) ? (
+          <MatchTossControl
+            tournament={currentTournament}
+            match={liveActiveMatch}
+            onBack={() => setActiveMatch(null)}
+            onStarted={(warning) => {
+              setMatchNotice(warning || '');
+              setTossDone(liveActiveMatch.id);
+            }}
+          />
+        ) : (
+          <LiveMatchController
+            tournament={currentTournament}
+            match={liveActiveMatch}
+            onBack={() => setActiveMatch(null)}
+            notice={matchNotice}
+            onDismissNotice={() => setMatchNotice('')}
+          />
+        )
       ) : (
         <>
           {/* Tournament Selection & Creation Bar */}

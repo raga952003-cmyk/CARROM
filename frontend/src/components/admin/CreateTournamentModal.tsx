@@ -59,14 +59,20 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   const [restTime, setRestTime] = useState(10);
 
   const [activeTab, setActiveTab] = useState<'basic' | 'rules'>('basic');
+  // Without this, every click while the request is in flight creates another
+  // tournament — a slow connection turns one impatient user into a dozen
+  // identical events.
+  const [saving, setSaving] = useState(false);
 
   if (!isOpen) return null;
 
   const handleSave = async (publishImmediately: boolean = false) => {
+    if (saving) return;
     if (!name.trim()) {
       alert('Please enter a tournament name.');
       return;
     }
+    setSaving(true);
 
     const rules: TournamentRules = {
       pointsForWin,
@@ -82,29 +88,33 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
       tiebreakerRules: ['points', 'board_difference', 'net_score_difference', 'head_to_head']
     };
 
-    const newId = await createTournament({
-      name,
-      description: description || 'Official Carrom Championship tournament featuring automated scoring, fixtures, and standings.',
-      category,
-      format,
-      registrationStartDate: regStart,
-      registrationEndDate: regEnd,
-      tournamentStartDate: tourStart,
-      tournamentEndDate: tourEnd,
-      venue,
-      city,
-      numberOfBoards,
-      entryFee,
-      prizePool,
-      rules,
-      status: publishImmediately ? 'registration_open' : 'draft'
-    });
+    try {
+      const newId = await createTournament({
+        name,
+        description: description || 'Official Carrom Championship tournament featuring automated scoring, fixtures, and standings.',
+        category,
+        format,
+        registrationStartDate: regStart,
+        registrationEndDate: regEnd,
+        tournamentStartDate: tourStart,
+        tournamentEndDate: tourEnd,
+        venue,
+        city,
+        numberOfBoards,
+        entryFee,
+        prizePool,
+        rules,
+        status: publishImmediately ? 'registration_open' : 'draft'
+      });
 
-    if (publishImmediately) {
-      await publishTournament(newId);
+      if (publishImmediately) {
+        await publishTournament(newId);
+      }
+
+      onClose();
+    } finally {
+      setSaving(false);
     }
-
-    onClose();
   };
 
   return (
@@ -517,7 +527,8 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
             <button
               type="button"
               onClick={() => handleSave(false)}
-              className="px-4 py-2 text-xs font-bold text-[#0B5D3B] border border-[#0B5D3B] hover:bg-emerald-50 rounded-xl transition-all"
+              disabled={saving}
+              className="px-4 py-2 text-xs font-bold text-[#0B5D3B] border border-[#0B5D3B] hover:bg-emerald-50 rounded-xl transition-all disabled:opacity-50"
             >
               Save Draft
             </button>
@@ -525,10 +536,11 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
             <button
               type="button"
               onClick={() => handleSave(true)}
-              className="px-5 py-2 text-xs font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white rounded-xl shadow-md transition-all flex items-center gap-1.5"
+              disabled={saving}
+              className="px-5 py-2 text-xs font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white rounded-xl shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50"
             >
               <Check className="w-4 h-4 text-[#D4A72C]" />
-              <span>Publish Tournament</span>
+              <span>{saving ? 'Creating…' : 'Publish Tournament'}</span>
             </button>
           </div>
         </div>

@@ -72,6 +72,12 @@ interface TournamentContextType {
   rejectRegistration: (tournamentId: string, regId: string) => Promise<void>;
   
   // Match & Board Live Controls
+  recordToss: (matchId: string, toss: {
+    coinResult?: string | null;
+    tossWinnerId?: string | null;
+    tossWinnerName?: string | null;
+    choice: string;
+  }) => Promise<void>;
   startMatch: (tournamentId: string, matchId: string) => Promise<void>;
   pauseMatch: (tournamentId: string, matchId: string) => Promise<void>;
   resumeMatch: (tournamentId: string, matchId: string) => Promise<void>;
@@ -443,6 +449,10 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   };
 
   // Match operations
+  const recordToss = async (matchId: string, toss: any) => {
+    await apiClient.post(`/matches/${matchId}/toss`, toss);
+  };
+
   const startMatch = async (tournamentId: string, matchId: string) => {
     await apiClient.post(`/matches/${matchId}/start`, {});
     await refreshData();
@@ -576,6 +586,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         registerForTournament,
         approveRegistration,
         rejectRegistration,
+        recordToss,
         startMatch,
         pauseMatch,
         resumeMatch,

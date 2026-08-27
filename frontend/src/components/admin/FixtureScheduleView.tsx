@@ -20,6 +20,7 @@ import {
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
+import { MatchTimer } from './MatchTimer';
 
 interface FixtureScheduleViewProps {
   tournament: Tournament;
@@ -399,11 +400,19 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                   <div className="flex items-center justify-between text-[11px] text-gray-500 pt-2 border-t border-gray-100">
                     <div className="flex items-center space-x-1">
                       <Clock className="w-3.5 h-3.5 text-gray-400" />
-                      <span>{match.scheduledDate || 'Today'} · {match.scheduledTime || '09:00 AM'}</span>
+                      {/* Once a match is under way the elapsed time is the useful
+                          number, not the time it was scheduled for. */}
+                      {match.isTimerRunning || match.timerElapsedSeconds > 0 ? (
+                        <span className="font-bold text-gray-700 tabular-nums">
+                          <MatchTimer match={match} /> elapsed
+                        </span>
+                      ) : (
+                        <span>{match.scheduledDate || 'Today'} · {match.scheduledTime || '09:00 AM'}</span>
+                      )}
                     </div>
 
                     <span className="text-[#0B5D3B] font-bold flex items-center gap-0.5 group-hover:translate-x-0.5 transition-transform">
-                      <span>{role === 'admin' ? 'Control Match' : 'View Scores'}</span>
+                      <span>{role !== 'admin' ? 'View Scores' : match.status === 'scheduled' ? 'Start Match' : 'Control Match'}</span>
                       <ArrowRight className="w-3 h-3" />
                     </span>
                   </div>

@@ -3,6 +3,7 @@ import { ArrowLeft, Minus, Plus, Play, Check, Crown, Loader2 } from 'lucide-reac
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { exitToApp } from '../../utils/useHashRoute';
+import { MatchTimer } from '../admin/MatchTimer';
 
 interface BoardModeProps {
   boardNumber: number;
@@ -154,7 +155,17 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
               boards {match.player1BoardWins}–{match.player2BoardWins}
             </span>
             <span className="px-2 py-0.5 rounded-full bg-emerald-900/70 capitalize">{match.status}</span>
+            {(match.isTimerRunning || match.timerElapsedSeconds > 0) && (
+              <span className="px-2 py-0.5 rounded-full bg-emerald-900/70 tabular-nums">
+                <MatchTimer match={match} />
+              </span>
+            )}
           </div>
+          {match.tossWinnerName && (
+            <div className="mt-1.5 text-[11px] text-emerald-200">
+              Toss: <strong>{match.tossWinnerName}</strong> chose {match.tossChoice || 'strike'}
+            </div>
+          )}
         </div>
 
         {error && (

@@ -51,3 +51,11 @@ class ScoreSubmitSchema(BaseCamelModel):
     queen_claimed_by: Optional[str] = "none"  # "player1", "player2", "none"
     queen_covered: Optional[bool] = False
     audit_reason: Optional[str] = "Board score finalized"
+
+
+class TossSchema(BaseCamelModel):
+    """The umpire's record of the toss before the first board is played."""
+    coin_result: Optional[str] = None          # 'black' | 'white'
+    toss_winner_id: Optional[str] = None       # profile id (singles) or team id
+    toss_winner_name: Optional[str] = None
+    choice: str = "strike"                     # 'strike' | 'side'

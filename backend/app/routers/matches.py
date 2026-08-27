@@ -1,18 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
-from app.models.match import MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema
+from app.models.match import MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema, TossSchema
 from app.utils.security import get_user_profile, verify_admin
 from app.services.scoring_engine import recalculate_match_scores, apply_queen_points
 from app.services.notification_service import fan_out_notification, resolve_tournament_audience
 from app.services.transaction_service import apply_board_result, confirm_match_result
 from app.services.qualification import try_auto_promote
 from app.services.access_control import require_tournament_access
+from app.services.audit_service import record_audit
 from app.services.state_machine import validate_match_transition, assert_match_scorable
 from app.services.score_validation import validate_board_score
 from app.utils.serializers import serialize_board, serialize_match
 from app.utils.idempotency import IdempotencyGuard, get_idempotency_key
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 router = APIRouter(prefix="/matches", tags=["matches"])
@@ -50,7 +51,7 @@ async def start_match(id: str, admin = Depends(verify_admin)):
         current = _authorise_match(admin_db, id, admin, "match.start")
         validate_match_transition(current.get("status"), "live")
 
-        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         res = admin_db.table("matches").update({
             "status": "live",
             "timer_started_at": now_ms,
@@ -73,7 +74,7 @@ async def pause_match(id: str, admin = Depends(verify_admin)):
         started_at = m.get("timer_started_at")
         
         if m.get("is_timer_running") and started_at:
-            now_ms = int(datetime.utcnow().timestamp() * 1000)
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             elapsed += int((now_ms - started_at) / 1000)
 
         res = admin_db.table("matches").update({
@@ -94,7 +95,7 @@ async def resume_match(id: str, admin = Depends(verify_admin)):
         current = _authorise_match(admin_db, id, admin, "match.resume")
         validate_match_transition(current.get("status"), "live")
 
-        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         res = admin_db.table("matches").update({
             "status": "live",
             "timer_started_at": now_ms,
@@ -390,6 +391,78 @@ async def confirm_match(
             )
         guard.store(response)
         return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{id}/toss")
+async def record_toss(id: str, data: TossSchema, admin = Depends(verify_admin)):
+    """
+    Record the toss for a match.
+
+    Runs before the first board. The winning side is stored along with what
+    they chose, so the match card, the printed sheet and the audit trail all
+    show how the match began rather than it living only in the umpire's head.
+    """
+    admin_db = get_admin_db()
+    try:
+        match = _authorise_match(admin_db, id, admin, "match.start")
+
+        if match.get("result_confirmed"):
+            raise HTTPException(
+                status_code=409,
+                detail="This match is already finished; the toss cannot be changed.",
+            )
+
+        if data.choice not in ("strike", "side"):
+            raise HTTPException(status_code=422, detail="Choice must be 'strike' or 'side'.")
+        if data.coin_result not in (None, "black", "white"):
+            raise HTTPException(status_code=422, detail="Coin result must be 'black' or 'white'.")
+
+        # The winner must be one of the two sides actually in this match.
+        sides = {
+            match.get("player1_id"): match.get("player1_name"),
+            match.get("player2_id"): match.get("player2_name"),
+        }
+        winner_id = data.toss_winner_id
+        if winner_id and winner_id not in sides:
+            raise HTTPException(
+                status_code=422,
+                detail="The toss winner must be one of the two sides in this match.",
+            )
+        winner_name = data.toss_winner_name or sides.get(winner_id)
+
+        patch = {
+            "toss_coin_result": data.coin_result,
+            "toss_winner_id": winner_id,
+            "toss_winner_name": winner_name,
+            "toss_choice": data.choice,
+            "toss_recorded_at": datetime.now(timezone.utc).isoformat(),
+            "toss_recorded_by": admin["id"],
+        }
+
+        try:
+            res = admin_db.table("matches").update(patch).eq("id", id).execute()
+        except Exception as e:
+            if "toss_" not in str(e):
+                raise
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The toss cannot be saved on this database yet. "
+                    "Apply backend/db/migrations/004_match_toss.sql."
+                ),
+            )
+
+        record_audit(
+            admin_db, actor=admin, action="match.toss",
+            entity_type="match", entity_id=id,
+            new_state={"winner": winner_name, "choice": data.choice,
+                       "coin": data.coin_result},
+            request_context={"tournament_id": match.get("tournament_id")},
+        )
+        return serialize_match(res.data[0]) if res.data else {"status": "success"}
     except HTTPException:
         raise
     except Exception as e:

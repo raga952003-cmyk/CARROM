@@ -7,6 +7,7 @@ import {
   Clock, 
   Trophy, 
   AlertCircle, 
+  AlertTriangle,
   ShieldAlert, 
   Sparkles, 
   History, 
@@ -23,8 +24,12 @@ import confetti from 'canvas-confetti';
 import { Tournament, Match, BoardScore } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
+import { MatchTimer } from './MatchTimer';
 
 interface LiveMatchControllerProps {
+  /** Something the umpire needs to know that happened before this view opened. */
+  notice?: string;
+  onDismissNotice?: () => void;
   tournament: Tournament;
   match: Match;
   onBack: () => void;
@@ -33,7 +38,9 @@ interface LiveMatchControllerProps {
 export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   tournament,
   match,
-  onBack
+  onBack,
+  notice,
+  onDismissNotice
 }) => {
   const { 
     startMatch, 
@@ -73,13 +80,6 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const isLive = match.status === 'live';
   const isPaused = match.status === 'paused';
   const isCompleted = match.status === 'completed';
-
-  // Format elapsed time (MM:SS)
-  const formatTimer = (totalSeconds: number) => {
-    const mins = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-  };
 
   const handleOpenScoreModal = (boardNum: number, isCorrection: boolean = false) => {
     const currentBoard = match.boards.find(b => b.boardNumber === boardNum);
@@ -206,9 +206,27 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
           <div className="flex items-center space-x-3 font-mono text-2xl font-bold text-[#D4A72C]">
             <Clock className="w-5 h-5 text-[#D4A72C]" />
-            <span>{formatTimer(match.timerElapsedSeconds)}</span>
+            <MatchTimer match={match} />
           </div>
         </div>
+
+        {notice && (
+          <div className="px-4 sm:px-6 py-2 bg-amber-50 border-b border-amber-200 flex items-start gap-2 text-[11px] text-amber-900">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span className="flex-1">{notice}</span>
+            {onDismissNotice && (
+              <button onClick={onDismissNotice} className="font-bold underline shrink-0">Dismiss</button>
+            )}
+          </div>
+        )}
+
+        {match.tossWinnerName && (
+          <div className="px-4 sm:px-6 py-2 bg-emerald-50 border-b border-emerald-200 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-emerald-900">
+            <span className="font-bold uppercase tracking-wider text-[10px]">Toss</span>
+            <span><strong>{match.tossWinnerName}</strong> won{match.tossCoinResult ? ` (${match.tossCoinResult})` : ''}</span>
+            <span className="capitalize">and chose <strong>{match.tossChoice || 'strike'}</strong></span>
+          </div>
+        )}
 
         {/* Players & Central Score Display */}
         <div className="p-6 bg-white">
