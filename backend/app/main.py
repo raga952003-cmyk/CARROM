@@ -10,6 +10,7 @@ from app.routers import (
     imports,
     registrations,
     teams,
+    access,
     fixtures,
     scheduling,
     standings,
@@ -48,6 +49,7 @@ app.include_router(players.router, prefix="/api")
 app.include_router(tournaments.router, prefix="/api")
 app.include_router(registrations.router, prefix="/api")
 app.include_router(teams.router, prefix="/api")
+app.include_router(access.router, prefix="/api")
 app.include_router(matches.router, prefix="/api")
 app.include_router(fixtures.router, prefix="/api")
 app.include_router(scheduling.router, prefix="/api")
@@ -69,9 +71,11 @@ async def health():
     from app.database import supabase_client, supabase_admin
     from app.services.transaction_service import transactional_rpc_available
     from app.utils.idempotency import idempotency_store_available
+    from app.services.access_control import ownership_enforced
 
     rpc_state = transactional_rpc_available()
     idem_state = idempotency_store_available()
+    owner_state = ownership_enforced()
     return {
         "status": "ok",
         "env": settings.API_ENV,
@@ -86,5 +90,11 @@ async def health():
             "unknown (not exercised yet)" if idem_state is None
             else "active" if idem_state
             else "DEGRADED - apply db/migrations/002_serverless_architecture.sql"
+        ),
+        "tournament_ownership": (
+            "unknown (not exercised yet)" if owner_state is None
+            else "enforced" if owner_state
+            else "DEGRADED - any admin can manage any tournament; "
+                 "apply db/migrations/003_ownership_and_access.sql"
         ),
     }

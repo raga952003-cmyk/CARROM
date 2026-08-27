@@ -18,6 +18,12 @@ from app.services.fixture_engine import (
 from app.services.scheduling_engine import generate_conflict_free_schedule
 from app.services.notification_service import fan_out_notification
 from app.services.audit_service import record_audit
+from app.services.access_control import (
+    require_tournament_access,
+    set_owner_on_create,
+    strip_owner,
+    describe_access,
+)
 from app.services.state_machine import (
     validate_tournament_transition,
     canonical_tournament_status,
@@ -197,7 +203,14 @@ async def create_tournament(data: TournamentCreateSchema, admin = Depends(verify
             "poster_config": data.poster_config.model_dump(by_alias=True) if data.poster_config else {},
             "status": data.status or "draft"
         }
-        res = admin_db.table("tournaments").insert(payload).execute()
+        # The creator owns it; other admins must request access (migration 003).
+        try:
+            res = admin_db.table("tournaments").insert(
+                set_owner_on_create(payload, admin)).execute()
+        except Exception as e:
+            if "owner_id" not in str(e):
+                raise
+            res = admin_db.table("tournaments").insert(strip_owner(payload)).execute()
         created = res.data[0]
         record_audit(
             admin_db, actor=admin, action="tournament.create",
@@ -214,10 +227,7 @@ async def create_tournament(data: TournamentCreateSchema, admin = Depends(verify
 async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        existing = admin_db.table("tournaments").select("*").eq("id", id).execute().data
-        if not existing:
-            raise HTTPException(status_code=404, detail="Tournament not found")
-        before = existing[0]
+        before = require_tournament_access(admin_db, id, admin, "tournament.update")
 
         update_dict = {}
         # Iterate over non-None values to build patch
@@ -260,9 +270,7 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
 async def delete_tournament(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        before = admin_db.table("tournaments").select("*").eq("id", id).execute().data
-        if not before:
-            raise HTTPException(status_code=404, detail="Tournament not found")
+        before = [require_tournament_access(admin_db, id, admin, "tournament.delete")]
 
         admin_db.table("tournaments").delete().eq("id", id).execute()
         record_audit(
@@ -411,11 +419,7 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
 async def generate_fixtures(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        # Load tournament details
-        t_res = admin_db.table("tournaments").select("*").eq("id", id).execute()
-        if not t_res.data:
-            raise HTTPException(status_code=404, detail="Tournament not found")
-        t = t_res.data[0]
+        t = require_tournament_access(admin_db, id, admin, "tournament.fixtures")
         
         # Load approved registrations
         reg_res = admin_db.table("registrations").select("*, player:profiles(*), team:teams(*)").eq("tournament_id", id).eq("status", "approved").execute()
@@ -581,11 +585,7 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
 async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        # Load tournament
-        t_res = admin_db.table("tournaments").select("*").eq("id", id).execute()
-        if not t_res.data:
-            raise HTTPException(status_code=404, detail="Tournament not found")
-        t = t_res.data[0]
+        t = require_tournament_access(admin_db, id, admin, "tournament.schedule")
 
         # Load all matches
         matches_res = admin_db.table("matches").select("*").eq("tournament_id", id).execute()
@@ -658,6 +658,7 @@ async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depen
 async def publish_schedule(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
+        require_tournament_access(admin_db, id, admin, "tournament.publish")
         admin_db.table("tournaments").update({"schedule_published": True}).eq("id", id).execute()
         
         # Load tournament name

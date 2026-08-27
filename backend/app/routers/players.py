@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.database import get_db, get_admin_db
 from app.models.player import PlayerSchema
-from app.utils.security import verify_admin
+from app.utils.security import verify_admin, get_optional_profile
 from app.utils.serializers import serialize_player
 from app.services.audit_service import record_audit
 from typing import List, Dict, Any
@@ -11,12 +11,22 @@ import secrets
 router = APIRouter(prefix="/players", tags=["players"])
 
 @router.get("")
-async def get_players():
+async def get_players(viewer = Depends(get_optional_profile)):
+    """
+    Player directory.
+
+    Contact details are returned only to admins. This endpoint is reachable
+    without a session (the spectator views rely on it), and it previously
+    returned whole profile rows -- publishing every participant's phone number
+    and email address.
+    """
     supabase = get_admin_db()
+    is_admin = bool(viewer and viewer.get("role") == "admin")
+    columns = "*" if is_admin else "id, name, avatar, club, city, rating, role, created_at"
     try:
-        # Load all player roles
-        res = supabase.table("profiles").select("*").eq("role", "player").order("name").execute()
-        return [serialize_player(p) for p in (res.data or [])]
+        res = supabase.table("profiles").select(columns).eq(
+            "role", "player").order("name").execute()
+        return [serialize_player(p, include_contact=is_admin) for p in (res.data or [])]
     except HTTPException:
         raise
     except Exception as e:

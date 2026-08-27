@@ -120,3 +120,24 @@ def verify_admin(profile = Depends(get_user_profile)):
     if profile.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden. Action requires admin rights.")
     return profile
+
+
+def get_optional_profile(
+    credentials: HTTPAuthorizationCredentials = Depends(security_bearer),
+):
+    """
+    The caller's profile when they present a valid token, otherwise None.
+
+    For endpoints that are readable without signing in but should return more
+    to an authenticated admin. An invalid token is treated as anonymous rather
+    than an error, so a stale token cannot break a public page.
+    """
+    if not credentials or not credentials.credentials:
+        return None
+    try:
+        user = get_current_user(credentials.credentials)
+        return get_user_profile(user)
+    except HTTPException:
+        return None
+    except Exception:
+        return None

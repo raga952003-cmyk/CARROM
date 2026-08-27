@@ -26,8 +26,24 @@ def camelize(value: Any) -> Any:
     return value
 
 
-def serialize_player(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    return camelize(row) if row else None
+# Contact details are never part of a public listing.
+PRIVATE_PLAYER_FIELDS = {"phone", "email"}
+
+
+def serialize_player(row: Optional[Dict[str, Any]],
+                     include_contact: bool = True) -> Optional[Dict[str, Any]]:
+    """
+    A player profile.
+
+    `include_contact=False` drops phone and email. The public directory used
+    to return whole profile rows, which published every participant's mobile
+    number and email address to anyone who could reach the API.
+    """
+    if not row:
+        return None
+    if include_contact:
+        return camelize(row)
+    return camelize({k: v for k, v in row.items() if k not in PRIVATE_PLAYER_FIELDS})
 
 
 def serialize_team(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

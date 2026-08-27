@@ -6,6 +6,7 @@ from app.services.scoring_engine import recalculate_match_scores
 from app.services.notification_service import fan_out_notification, resolve_tournament_audience
 from app.services.transaction_service import apply_board_result, confirm_match_result
 from app.services.qualification import try_auto_promote
+from app.services.access_control import require_tournament_access
 from app.services.state_machine import validate_match_transition, assert_match_scorable
 from app.services.score_validation import validate_board_score
 from app.utils.serializers import serialize_board, serialize_match
@@ -16,14 +17,23 @@ import json
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
+def _authorise_match(admin_db, match_id: str, admin, action: str):
+    """Resolve a match to its tournament and authorise the caller for `action`."""
+    rows = admin_db.table("matches").select("*").eq("id", match_id).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Match not found.")
+    match = rows[0]
+    require_tournament_access(admin_db, match["tournament_id"], admin, action)
+    return match
+
+
+
 @router.post("/{id}/start")
 async def start_match(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        current = admin_db.table("matches").select("*").eq("id", id).execute().data
-        if not current:
-            raise HTTPException(status_code=404, detail="Match not found.")
-        validate_match_transition(current[0].get("status"), "live")
+        current = _authorise_match(admin_db, id, admin, "match.start")
+        validate_match_transition(current.get("status"), "live")
 
         now_ms = int(datetime.utcnow().timestamp() * 1000)
         res = admin_db.table("matches").update({
@@ -42,10 +52,7 @@ async def pause_match(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
         # Fetch current match
-        rows = admin_db.table("matches").select("*").eq("id", id).execute().data
-        if not rows:
-            raise HTTPException(status_code=404, detail="Match not found.")
-        m = rows[0]
+        m = _authorise_match(admin_db, id, admin, "match.pause")
         validate_match_transition(m.get("status"), "paused")
         elapsed = m.get("timer_elapsed_seconds", 0)
         started_at = m.get("timer_started_at")
@@ -69,10 +76,8 @@ async def pause_match(id: str, admin = Depends(verify_admin)):
 async def resume_match(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        current = admin_db.table("matches").select("*").eq("id", id).execute().data
-        if not current:
-            raise HTTPException(status_code=404, detail="Match not found.")
-        validate_match_transition(current[0].get("status"), "live")
+        current = _authorise_match(admin_db, id, admin, "match.resume")
+        validate_match_transition(current.get("status"), "live")
 
         now_ms = int(datetime.utcnow().timestamp() * 1000)
         res = admin_db.table("matches").update({
@@ -201,10 +206,7 @@ async def submit_board(
         return cached
 
     try:
-        match_rows = admin_db.table("matches").select("*").eq("id", id).execute().data
-        if not match_rows:
-            raise HTTPException(status_code=404, detail="Match not found.")
-        match_data = match_rows[0]
+        match_data = _authorise_match(admin_db, id, admin, "match.score")
         assert_match_scorable(match_data)
 
         boards = admin_db.table("boards").select("*").eq("match_id", id).order("board_number").execute().data or []
@@ -285,10 +287,7 @@ async def confirm_match(
         return cached
 
     try:
-        match_res = admin_db.table("matches").select("*").eq("id", id).execute()
-        if not match_res.data:
-            raise HTTPException(status_code=404, detail="Match not found")
-        m = match_res.data[0]
+        m = _authorise_match(admin_db, id, admin, "match.confirm")
 
         if not m.get("winner_id") and m.get("status") != "completed":
             raise HTTPException(
