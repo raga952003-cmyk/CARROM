@@ -1,5 +1,9 @@
 import React, { useState } from 'react';
 import { TournamentProvider, useTournament } from './context/TournamentContext';
+import { useHashRoute } from './utils/useHashRoute';
+import { BoardMode } from './components/scorer/BoardMode';
+import { SpectatorView } from './components/public/SpectatorView';
+import { PrintSheets } from './components/print/PrintSheets';
 import { Header } from './components/common/Header';
 import { NotificationDrawer } from './components/common/NotificationDrawer';
 import { AdminDashboard } from './components/admin/AdminDashboard';
@@ -13,7 +17,28 @@ const TournamentApp: React.FC = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
   const { role, notifications, currentUser } = useTournament();
+  const route = useHashRoute();
   const unreadCount = notifications.filter(n => !n.read).length;
+
+  // Board mode and the print sheets are signed-in surfaces, but they replace
+  // the dashboard chrome entirely -- a scorer at a board and a sheet headed
+  // for a printer both want the screen to themselves.
+  if (currentUser && route.view === 'board') {
+    return (
+      <BoardMode
+        boardNumber={Number(route.segments[1]) || 1}
+        tournamentId={route.params.get('t') || undefined}
+      />
+    );
+  }
+  if (currentUser && route.view === 'print') {
+    return (
+      <PrintSheets
+        kind={(route.segments[1] as any) || 'all'}
+        tournamentId={route.segments[2] || ''}
+      />
+    );
+  }
 
   if (!currentUser) {
     return <AuthPortal />;
@@ -79,6 +104,14 @@ const TournamentApp: React.FC = () => {
 
 // Wrapper component that safely renders AuthPortal with context
 const AppWrapper: React.FC = () => {
+  const route = useHashRoute();
+
+  // Public board: rendered outside the provider so it never needs a session
+  // and never triggers the authenticated refresh loop.
+  if (route.view === 'live') {
+    return <SpectatorView tournamentId={route.segments[1] || undefined} />;
+  }
+
   return (
     <TournamentProvider>
       <TournamentApp />

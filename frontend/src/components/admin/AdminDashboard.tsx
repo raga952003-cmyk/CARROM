@@ -30,6 +30,7 @@ import { RegistrationManager } from './RegistrationManager';
 import { FixtureScheduleView } from './FixtureScheduleView';
 import { LiveMatchController } from './LiveMatchController';
 import { StandingsSections } from '../common/StandingsSections';
+import { OperationsBar } from './OperationsBar';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
 import { ManagePlayersTab } from './ManagePlayersTab';
 
@@ -334,6 +335,8 @@ export const AdminDashboard: React.FC = () => {
               </div>
 
               {/* Sub-Tabs Navigation */}
+              <OperationsBar tournament={currentTournament} />
+
               <div className="px-3 sm:px-6 pt-3 bg-gray-50 border-b border-gray-200 flex space-x-1.5 sm:space-x-2 overflow-x-auto scroll-smooth">
                 {[
                   { id: 'fixtures', label: 'Fixtures & Schedule', icon: Calendar, badge: currentTournament.matches.length },

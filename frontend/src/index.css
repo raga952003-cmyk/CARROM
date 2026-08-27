@@ -1,1 +1,45 @@
 @import "tailwindcss";
+
+
+/* ---------------------------------------------------------------------------
+   Print
+   Board sheets, the draw and the points tables are printed on the day. Each
+   .print-page starts a new sheet of paper, and the app chrome is dropped.
+--------------------------------------------------------------------------- */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  html, body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  .print\:hidden,
+  header#app-header,
+  footer {
+    display: none !important;
+  }
+
+  .print-page {
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .print-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  /* Keep a match and its score boxes together on one sheet. */
+  tr, section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  table {
+    width: 100% !important;
+  }
+}

@@ -23,6 +23,7 @@ import { RegistrationFormModal } from './RegistrationFormModal';
 import { FixtureScheduleView } from '../admin/FixtureScheduleView';
 import { LiveMatchController } from '../admin/LiveMatchController';
 import { StandingsSections } from '../common/StandingsSections';
+import { NextMatchCard } from './NextMatchCard';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
 
 export const PlayerDashboard: React.FC = () => {
@@ -358,6 +359,21 @@ export const PlayerDashboard: React.FC = () => {
                   )
                 )}
               </div>
+
+              <NextMatchCard
+
+
+                tournament={currentTournament}
+
+
+                currentUser={currentUser}
+
+
+                onOpenMatch={setActiveMatch}
+
+
+              />
+
 
               {/* Sub-Tabs */}
               <div className="px-6 pt-3 bg-gray-50 border-b border-gray-200 flex space-x-2 overflow-x-auto">
