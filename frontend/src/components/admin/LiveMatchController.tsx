@@ -55,6 +55,14 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     role
   } = useTournament();
 
+  const rules = tournament.rules || ({} as any);
+  const totalSets = Math.max(1, match.numberOfSets || rules.numberOfSets || 1);
+  const boardsPerSet = rules.boardsPerSet || match.maxBoards || 8;
+  // The set currently being scored. Board numbers restart each set, so every
+  // board lookup has to be qualified by it.
+  const [activeSet, setActiveSet] = useState<number>(1);
+  const setBoards = match.boards.filter(b => (b.setNumber || 1) === activeSet);
+
   const [activeBoardNumber, setActiveBoardNumber] = useState<number>(() => {
     const inProgress = setBoards.find(b => b.status === 'in_progress');
     if (inProgress) return inProgress.boardNumber;
@@ -80,13 +88,6 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [finishedBy, setFinishedBy] = useState<'player1' | 'player2' | 'none'>('none');
   const [observation, setObservation] = useState<BoardObservation>(emptyObservation);
 
-  const rules = tournament.rules || ({} as any);
-  const totalSets = Math.max(1, match.numberOfSets || rules.numberOfSets || 1);
-  const boardsPerSet = rules.boardsPerSet || match.maxBoards || 8;
-  // The set currently being scored. Board numbers restart each set, so every
-  // board lookup has to be qualified by it.
-  const [activeSet, setActiveSet] = useState<number>(1);
-  const setBoards = match.boards.filter(b => (b.setNumber || 1) === activeSet);
   // Tournaments created before remaining-coins scoring existed keep the old
   // model, so their confirmed results are not rewritten underneath them.
   const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
