@@ -94,8 +94,8 @@ def recalculate_match_scores(
                 _field(match, f"player{n}Name", f"player{n}_name"))
 
     if scoring_mode(rules) == "remaining_coins":
-        # Every board is played. A side that has already won five of eight
-        # can still lose on points, so the match is not called early.
+        # Every board is played. A side that has already won most boards can
+        # still lose on points, so the match is not called early.
         updated_match["tieBreakRequired"] = False
         if boards and completed_count == len(boards):
             if p1_total_points > p2_total_points:
@@ -118,28 +118,23 @@ def recalculate_match_scores(
         updated_match["winnerName"] = winner_name
         return updated_match
 
-    # Best of N boards check
+    # Classic: best of N boards, decided as soon as one side is out of reach.
     if p1_board_wins >= target_wins:
-        winner_id = _field(match, "player1Id", "player1_id")
-        winner_name = _field(match, "player1Name", "player1_name")
+        winner_id, winner_name = side(1)
         updated_match["status"] = "completed"
         updated_match["matchCompletedAt"] = datetime.utcnow().isoformat()
     elif p2_board_wins >= target_wins:
-        winner_id = _field(match, "player2Id", "player2_id")
-        winner_name = _field(match, "player2Name", "player2_name")
+        winner_id, winner_name = side(2)
         updated_match["status"] = "completed"
         updated_match["matchCompletedAt"] = datetime.utcnow().isoformat()
     elif boards and completed_count == len(boards):
-        # All boards completed but no one reached target wins (possible draws or flat format)
-        # `boards` is guarded: an empty list would otherwise satisfy 0 == 0 and
-        # instantly complete a match that has not been played.
+        # Every board played without either side reaching the target: decide on
+        # board wins, or leave it drawn. `boards` is guarded because an empty
+        # list would otherwise satisfy 0 == 0 and complete an unplayed match.
         if p1_board_wins > p2_board_wins:
-            winner_id = _field(match, "player1Id", "player1_id")
-            winner_name = _field(match, "player1Name", "player1_name")
+            winner_id, winner_name = side(1)
         elif p2_board_wins > p1_board_wins:
-            winner_id = _field(match, "player2Id", "player2_id")
-            winner_name = _field(match, "player2Name", "player2_name")
-        
+            winner_id, winner_name = side(2)
         updated_match["status"] = "completed"
         updated_match["matchCompletedAt"] = datetime.utcnow().isoformat()
 
@@ -478,3 +473,157 @@ def board_result(
         "penalties": {"player1": penalty["player1"], "player2": penalty["player2"]},
         "warnings": warnings,
     }
+
+
+# --------------------------------------------------------------------------
+# Sets
+#
+# The Carromite format puts a set between the match and its boards: three sets
+# of eight boards is twenty-four boards, each set is won on the points scored
+# within it, and the match is won on sets. A player can therefore score fewer
+# points across the match and still win it, which is the whole reason the
+# layer exists and something a flat list of boards cannot express.
+# --------------------------------------------------------------------------
+
+
+def set_layout(match: Dict[str, Any], rules: Optional[Dict[str, Any]] = None) -> Tuple[int, int]:
+    """(number_of_sets, boards_per_set) for a match, falling back to one set."""
+    rules = rules or {}
+    sets = _field(match, "numberOfSets", "number_of_sets") \
+        or _rule(rules, "numberOfSets", "number_of_sets", 1)
+    per_set = _rule(rules, "boardsPerSet", "boards_per_set", None) \
+        or _field(match, "maxBoards", "max_boards", 8)
+    try:
+        sets = max(1, int(sets))
+    except (TypeError, ValueError):
+        sets = 1
+    try:
+        per_set = max(1, int(per_set))
+    except (TypeError, ValueError):
+        per_set = 8
+    return sets, per_set
+
+
+def summarise_sets(
+    match: Dict[str, Any],
+    boards: List[Dict[str, Any]],
+    rules: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    One row per set: points each way, whether it is finished, and who took it.
+
+    Boards written before sets existed carry no set_number and default to 1, so
+    an older match reads as a single set and scores exactly as it always did.
+    """
+    total_sets, per_set = set_layout(match, rules)
+    p1_id = _field(match, "player1Id", "player1_id")
+    p2_id = _field(match, "player2Id", "player2_id")
+    p1_name = _field(match, "player1Name", "player1_name")
+    p2_name = _field(match, "player2Name", "player2_name")
+
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for b in boards:
+        n = _field(b, "setNumber", "set_number", 1) or 1
+        grouped.setdefault(int(n), []).append(b)
+
+    rows = []
+    for set_number in range(1, total_sets + 1):
+        members = grouped.get(set_number, [])
+        p1 = p2 = 0
+        done = 0
+        for b in members:
+            if b.get("status") != "completed":
+                continue
+            done += 1
+            p1 += _field(b, "player1Score", "player1_score", 0) or 0
+            p2 += _field(b, "player2Score", "player2_score", 0) or 0
+
+        expected = len(members) or per_set
+        complete = done > 0 and done >= expected
+
+        winner_id = winner_name = None
+        if complete:
+            if p1 > p2:
+                winner_id, winner_name = p1_id, p1_name
+            elif p2 > p1:
+                winner_id, winner_name = p2_id, p2_name
+
+        rows.append({
+            "setNumber": set_number,
+            "status": "completed" if complete else ("in_progress" if done else "pending"),
+            "boardsCompleted": done,
+            "boardsExpected": expected,
+            "player1Points": p1,
+            "player2Points": p2,
+            "winnerId": winner_id,
+            "winnerName": winner_name,
+        })
+    return rows
+
+
+def apply_set_results(
+    match: Dict[str, Any],
+    boards: List[Dict[str, Any]],
+    rules: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Decide a match on sets won rather than on total points.
+
+    Layered on top of `recalculate_match_scores`, which still produces the
+    board totals every existing screen reads; this only changes who is declared
+    the winner, and only when the tournament is actually played in sets.
+    """
+    updated = recalculate_match_scores(match, boards, rules)
+    total_sets, _ = set_layout(match, rules)
+    if total_sets <= 1:
+        return updated
+
+    sets = summarise_sets(match, boards, rules)
+    updated["sets"] = sets
+
+    p1_id = _field(match, "player1Id", "player1_id")
+    p2_id = _field(match, "player2Id", "player2_id")
+    p1_sets = sum(1 for s in sets if s["winnerId"] == p1_id and p1_id)
+    p2_sets = sum(1 for s in sets if s["winnerId"] == p2_id and p2_id)
+    updated["player1SetsWon"] = p1_sets
+    updated["player2SetsWon"] = p2_sets
+
+    # Every set is played out: the match is not called on a set lead, for the
+    # same reason a set is not called on a board lead.
+    if all(s["status"] == "completed" for s in sets):
+        if p1_sets > p2_sets:
+            updated["winnerId"] = p1_id
+            updated["winnerName"] = _field(match, "player1Name", "player1_name")
+        elif p2_sets > p1_sets:
+            updated["winnerId"] = p2_id
+            updated["winnerName"] = _field(match, "player2Name", "player2_name")
+        else:
+            # Level on sets. Fall back to total points, then to the tie-break.
+            p1_pts = updated["player1TotalPoints"]
+            p2_pts = updated["player2TotalPoints"]
+            if p1_pts > p2_pts:
+                updated["winnerId"] = p1_id
+                updated["winnerName"] = _field(match, "player1Name", "player1_name")
+            elif p2_pts > p1_pts:
+                updated["winnerId"] = p2_id
+                updated["winnerName"] = _field(match, "player2Name", "player2_name")
+            else:
+                updated["winnerId"] = None
+                updated["winnerName"] = None
+                updated["tieBreakRequired"] = True
+                updated["tieBreakRule"] = _rule(
+                    rules or {}, "tieBreak", "tie_break", "additional_board")
+
+        updated["status"] = "completed" if updated.get("winnerId") else updated.get("status", "live")
+        if updated.get("winnerId"):
+            updated["matchCompletedAt"] = datetime.utcnow().isoformat()
+            updated["tieBreakRequired"] = False
+    else:
+        # Not every set is in yet, so nothing is decided.
+        updated["winnerId"] = None
+        updated["winnerName"] = None
+        updated["status"] = match.get("status", "live")
+        updated["matchCompletedAt"] = None
+        updated["tieBreakRequired"] = False
+
+    return updated

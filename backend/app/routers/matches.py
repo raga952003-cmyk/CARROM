@@ -1,9 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
-from app.models.match import MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema, TossSchema
+from app.models.match import (
+    MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema, TossSchema,
+    MatchSidesSchema,
+)
 from app.utils.security import get_user_profile, verify_admin
 from app.services.scoring_engine import (
     recalculate_match_scores, apply_queen_points, board_result, scoring_mode,
+    apply_set_results, summarise_sets, set_layout,
 )
 from app.services.notification_service import fan_out_notification, resolve_tournament_audience
 from app.services.transaction_service import apply_board_result, confirm_match_result
@@ -229,6 +233,7 @@ async def update_board(
             "player1_score": c_p1,
             "player2_score": c_p2,
             "status": data.status,
+            "board_winner": data.board_winner or "none",
             "queen_claimed_by": data.queen_claimed_by,
             "queen_covered": data.queen_covered,
             "fouls_player1": data.fouls_player1,
@@ -331,8 +336,20 @@ async def submit_board(
         assert_match_scorable(match_data)
 
         boards = admin_db.table("boards").select("*").eq("match_id", id).order("board_number").execute().data or []
-        if not any(b["board_number"] == board_number for b in boards):
-            raise HTTPException(status_code=404, detail=f"Board {board_number} does not exist on this match.")
+
+        # Board numbers restart in each set, so the set has to be named or the
+        # board is ambiguous. Unset means the match is not played in sets.
+        set_number = data.set_number or 1
+        def is_target(b):
+            return (b["board_number"] == board_number
+                    and (b.get("set_number") or 1) == set_number)
+
+        if not any(is_target(b) for b in boards):
+            raise HTTPException(
+                status_code=404,
+                detail="Board {} of set {} does not exist on this match.".format(
+                    board_number, set_number),
+            )
 
         rules = (tournament_rules(admin_db, match_data["tournament_id"]) or {})
         mode = scoring_mode(rules)
@@ -404,6 +421,7 @@ async def submit_board(
                 "player1_score": p1_final,
                 "player2_score": p2_final,
                 "status": "completed",
+                "board_winner": data.board_winner or "none",
                 "queen_claimed_by": data.queen_claimed_by,
                 "queen_covered": data.queen_covered,
                 "completed_at": datetime.utcnow().isoformat(),
@@ -411,10 +429,12 @@ async def submit_board(
 
         # Recompute the match from the board set as it will be after this write.
         projected = [
-            {**b, **board_patch} if b["board_number"] == board_number else b
+            {**b, **board_patch} if is_target(b) else b
             for b in boards
         ]
-        updated_match = recalculate_match_scores(match_data, projected, rules)
+        total_sets, _ = set_layout(match_data, rules)
+        updated_match = (apply_set_results(match_data, projected, rules) if total_sets > 1
+                         else recalculate_match_scores(match_data, projected, rules))
 
         match_patch = {
             "player1_board_wins": updated_match["player1BoardWins"],
@@ -431,6 +451,9 @@ async def submit_board(
             # the match rather than quietly leaving it without a winner.
             match_patch["tie_break_required"] = updated_match.get("tieBreakRequired", False)
             match_patch["tie_break_rule"] = updated_match.get("tieBreakRule")
+        if total_sets > 1:
+            match_patch["player1_sets_won"] = updated_match.get("player1SetsWon", 0)
+            match_patch["player2_sets_won"] = updated_match.get("player2SetsWon", 0)
 
         degraded_note = ""
         if not board_detail_available(admin_db):
@@ -443,7 +466,16 @@ async def submit_board(
                 degraded_note = " [detail not stored: apply migration 005]"
 
         next_board_number = board_number + 1
-        has_next = any(b["board_number"] == next_board_number for b in boards)
+        has_next = any(b["board_number"] == next_board_number
+                       and (b.get("set_number") or 1) == set_number
+                       for b in boards)
+        if not has_next and total_sets > 1:
+            # End of a set: the following set opens at its first board.
+            if any(b["board_number"] == 1 and (b.get("set_number") or 1) == set_number + 1
+                   for b in boards):
+                admin_db.table("boards").update({"status": "in_progress"}).eq(
+                    "match_id", id).eq("set_number", set_number + 1).eq(
+                    "board_number", 1).eq("status", "pending").execute()
 
         board_row = apply_board_result(
             admin_db,
@@ -631,6 +663,103 @@ async def record_toss(id: str, data: TossSchema, admin = Depends(verify_admin)):
             request_context={"tournament_id": match.get("tournament_id")},
         )
         return serialize_match(res.data[0]) if res.data else {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{id}/sides")
+async def set_match_sides(id: str, data: MatchSidesSchema, admin = Depends(verify_admin)):
+    """
+    Record the coin each side plays, and which way round they are on screen.
+
+    The colour is stored against the player id, and swapping the screen sets a
+    presentation flag only. That separation is the point: an umpire standing on
+    the other side of the board flips the display, and the queen recorded as
+    covered by player 2 must still mean the same person afterwards.
+    """
+    admin_db = get_admin_db()
+    try:
+        match = _authorise_match(admin_db, id, admin, "match.start")
+
+        if match.get("result_confirmed"):
+            raise HTTPException(
+                status_code=409,
+                detail="This match is finished; the sides cannot be changed.",
+            )
+
+        colors = (data.player1_color, data.player2_color)
+        for c in colors:
+            if c not in (None, "black", "white"):
+                raise HTTPException(status_code=422, detail="Colour must be 'black' or 'white'.")
+        if colors[0] and colors[1] and colors[0] == colors[1]:
+            raise HTTPException(
+                status_code=422,
+                detail="Both players cannot play the same colour.",
+            )
+
+        patch = {}
+        if data.player1_color is not None:
+            patch["player1_color"] = data.player1_color
+        if data.player2_color is not None:
+            patch["player2_color"] = data.player2_color
+        if data.sides_swapped is not None:
+            patch["sides_swapped"] = data.sides_swapped
+        if data.table_number is not None:
+            patch["table_number"] = data.table_number
+        if data.referee_id is not None:
+            patch["referee_id"] = data.referee_id
+            ref = admin_db.table("profiles").select("name").eq("id", data.referee_id).execute().data
+            patch["referee_name"] = ref[0]["name"] if ref else None
+
+        if not patch:
+            return serialize_match(match)
+
+        try:
+            res = admin_db.table("matches").update(patch).eq("id", id).execute()
+        except Exception as e:
+            if "player1_color" not in str(e) and "sides_swapped" not in str(e) \
+               and "table_number" not in str(e) and "referee_id" not in str(e):
+                raise
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Sides cannot be saved on this database yet. "
+                    "Apply backend/db/migrations/006_sets_and_sides.sql."
+                ),
+            )
+
+        record_audit(
+            admin_db, actor=admin, action="match.sides",
+            entity_type="match", entity_id=id, new_state=patch,
+            request_context={"tournament_id": match.get("tournament_id")},
+        )
+        return serialize_match(res.data[0]) if res.data else {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{id}/sets")
+async def get_match_sets(id: str):
+    """Per-set totals for a match: points each way, and who took each set."""
+    admin_db = get_admin_db()
+    try:
+        rows = admin_db.table("matches").select("*").eq("id", id).execute().data
+        if not rows:
+            raise HTTPException(status_code=404, detail="Match not found.")
+        match = rows[0]
+        boards = admin_db.table("boards").select("*").eq("match_id", id).execute().data or []
+        rules = tournament_rules(admin_db, match["tournament_id"]) or {}
+        return {
+            "matchId": id,
+            "numberOfSets": set_layout(match, rules)[0],
+            "sets": summarise_sets(match, boards, rules),
+            "player1SetsWon": match.get("player1_sets_won", 0),
+            "player2SetsWon": match.get("player2_sets_won", 0),
+        }
     except HTTPException:
         raise
     except Exception as e:

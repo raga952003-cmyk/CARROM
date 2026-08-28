@@ -33,6 +33,10 @@ class TournamentRulesSchema(BaseCamelModel):
     queen_must_be_covered: Optional[bool] = None
     queen_award_to: Optional[str] = None        # 'coverer' | 'pocketer'
     tie_break: Optional[str] = None
+    # Carromite format: a match is N sets of M boards, won on sets rather than
+    # on total points. 1 set keeps the original flat-board behaviour.
+    number_of_sets: Optional[int] = None
+    boards_per_set: Optional[int] = None
 
 class PosterConfigSchema(BaseCamelModel):
     theme_style: str = "emerald_gold"

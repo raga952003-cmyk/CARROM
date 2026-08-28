@@ -278,6 +278,38 @@ try:
     ok("a second edit builds on the first (7 coins -> 7)",
        b.get("player1_score") == 7, b.get("player1_score"), needs_005=True)
     print("\n" + "=" * 70)
+    print("CLASSIC BEST-OF-N STILL ENDS AS SOON AS IT IS DECIDED")
+    print("=" * 70)
+    # This is the shape every league/knockout tournament without a scoringMode
+    # uses. When the mode guard was lost, these matches never completed, the
+    # league never finished, and no knockout was ever populated from it.
+    r = api("POST", "/tournaments", json={
+        "name": "ClassicBoN " + RUN, "category": "singles", "format": "knockout",
+        "registrationStartDate": "2026-09-01", "registrationEndDate": "2026-09-05",
+        "tournamentStartDate": "2026-09-10", "tournamentEndDate": "2026-09-12",
+        "venue": "V", "city": "Pune", "numberOfBoards": 1,
+        "rules": {"maxBoardsPerMatch": 3}, "status": "registration_open"})
+    ctid = r.json()["id"]; created.append(ctid)
+    for i in range(2):
+        p = api("POST", "/players", json={"name": "CB{} P{}".format(RUN, i),
+                                          "email": "bs{}_cb{}@carromarena.com".format(RUN, i)}).json()
+        api("POST", "/tournaments/{}/registrations".format(ctid),
+            json={"type": "singles", "playerId": p["id"]})
+    api("PUT", "/tournaments/" + ctid, json={"status": "registration_closed"})
+    api("POST", "/tournaments/{}/fixtures".format(ctid))
+    cm = api("GET", "/fixtures/" + ctid).json()[0]
+    api("POST", "/matches/{}/start".format(cm["id"]))
+    for b in (1, 2):
+        api("POST", "/matches/{}/boards/{}/submit".format(cm["id"], b),
+            json={"p1Score": 29, "p2Score": 12, "auditReason": "bo3"})
+    row = adm.table("matches").select("*").eq("id", cm["id"]).execute().data[0]
+    ok("best of 3 is decided after 2 board wins, without board 3",
+       row.get("status") == "completed" and row.get("winner_id"),
+       "status={} winner={}".format(row.get("status"), row.get("winner_name")))
+    r = api("POST", "/matches/{}/confirm".format(cm["id"]), json={})
+    ok("and the result can be confirmed -> {}".format(r.status_code),
+       r.status_code == 200, r.text[:160])
+    print("\n" + "=" * 70)
     print("CLASSIC TOURNAMENTS ARE UNCHANGED")
     print("=" * 70)
     r = api("POST", "/tournaments", json={

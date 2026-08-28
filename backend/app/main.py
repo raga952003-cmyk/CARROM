@@ -90,6 +90,7 @@ async def health():
             ("003_ownership_and_access", "tournament_access", "id"),
             ("004_match_toss", "matches", "toss_choice"),
             ("005_board_detail", "boards", "board_winner"),
+            ("006_sets_and_sides", "boards", "set_number"),
         )
         for migration, table, column in probes:
             try:

@@ -151,6 +151,23 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> Lis
     ]
 
 
+
+# Migration 006 adds the set columns. Until it is applied a match is a flat
+# list of boards exactly as before, so the columns are simply not written
+# rather than the whole fixture generation failing on an unknown column.
+_sets_supported: Dict[str, bool] = {}
+
+
+def sets_supported(admin_db) -> bool:
+    if "value" not in _sets_supported:
+        try:
+            admin_db.table("boards").select("set_number").limit(1).execute()
+            _sets_supported["value"] = True
+        except Exception:
+            _sets_supported["value"] = False
+    return _sets_supported["value"]
+
+
 @router.get("")
 async def get_tournaments():
     # Reads run with the service client: this API layer performs its own
@@ -448,6 +465,14 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
                 pools["doubles"].append(r["team"])
 
         max_boards = t.get("rules", {}).get("maxBoardsPerMatch", 3)
+        # Boards per SET when the tournament is played in sets; the flat board
+        # count otherwise, so a one-set tournament is unchanged.
+        number_of_sets = int(t.get("rules", {}).get("numberOfSets") or 1)
+        boards_per_set = int(t.get("rules", {}).get("boardsPerSet") or max_boards)
+        if not sets_supported(admin_db):
+            number_of_sets = 1
+        if number_of_sets > 1:
+            max_boards = boards_per_set
         format_type = t.get("format")
 
         rules = t.get("rules") or {}
@@ -465,19 +490,19 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
             if wants_groups:
                 if format_type in ("knockout",):
                     # Groups make no sense without a league phase.
-                    return generate_knockout_bracket(id, pool, max_boards, id_prefix=prefix + "ko")
+                    return generate_knockout_bracket(id, pool, max_boards, number_of_sets=number_of_sets, id_prefix=prefix + "ko")
                 if format_type in ("group_knockout", "league_knockout"):
                     return generate_group_knockout_fixtures(
-                        id, pool, max_boards, group_count=group_count,
+                        id, pool, max_boards, number_of_sets=number_of_sets, group_count=group_count,
                         qualifiers_per_group=qualifiers_per_group, id_prefix=prefix + "gk")
                 return generate_group_stage_fixtures(
-                    id, pool, max_boards, group_count=group_count, id_prefix=prefix + "gs")
+                    id, pool, max_boards, number_of_sets=number_of_sets, group_count=group_count, id_prefix=prefix + "gs")
 
             if format_type == "round_robin":
-                return generate_round_robin_fixtures(id, pool, max_boards, id_prefix=prefix + "rr")
+                return generate_round_robin_fixtures(id, pool, max_boards, number_of_sets=number_of_sets, id_prefix=prefix + "rr")
             if format_type == "knockout":
-                return generate_knockout_bracket(id, pool, max_boards, id_prefix=prefix + "ko")
-            return generate_league_knockout_fixtures(id, pool, max_boards, id_prefix=prefix)
+                return generate_knockout_bracket(id, pool, max_boards, number_of_sets=number_of_sets, id_prefix=prefix + "ko")
+            return generate_league_knockout_fixtures(id, pool, max_boards, number_of_sets=number_of_sets, id_prefix=prefix)
 
         matches = []
         per_category: Dict[str, int] = {}
@@ -536,19 +561,26 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
                 # Note: We will update bracket linking parent IDs later since they must refer to database UUIDs
                 pass
             
+            if number_of_sets > 1:
+                match_payload["number_of_sets"] = number_of_sets
+
             inserted_match = admin_db.table("matches").insert(match_payload).execute()
             match_id = inserted_match.data[0]["id"]
             match["db_uuid"] = match_id  # Save reference for bracket linking
 
             # Create boards
             for board in match["boards"]:
+                set_number = board.get("setNumber", 1)
                 board_payload = {
                     "match_id": match_id,
                     "board_number": board["boardNumber"],
-                    "status": "pending" if board["boardNumber"] > 1 else "in_progress",
+                    "status": "in_progress" if (set_number == 1 and board["boardNumber"] == 1)
+                              else "pending",
                     "player1_score": 0,
                     "player2_score": 0
                 }
+                if number_of_sets > 1:
+                    board_payload["set_number"] = set_number
                 admin_db.table("boards").insert(board_payload).execute()
 
         # Update knockout parent references with database-assigned UUIDs

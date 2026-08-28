@@ -5,6 +5,7 @@ from app.models.tournament import BaseCamelModel
 
 class BoardScoreSchema(BaseCamelModel):
     board_number: int
+    set_number: Optional[int] = None
     status: str = "pending"  # "pending", "in_progress", "completed"
     player1_score: int = 0
     player2_score: int = 0
@@ -69,6 +70,8 @@ class ScoreSubmitSchema(BaseCamelModel):
     """
     p1_score: int
     p2_score: int
+    # Board numbers restart each set, so a board is (set, number).
+    set_number: Optional[int] = None
 
     # --- remaining-coins scoring (the fields below are all optional so an
     #     older client submitting only p1_score/p2_score still works) ---
@@ -94,3 +97,18 @@ class TossSchema(BaseCamelModel):
     toss_winner_id: Optional[str] = None       # profile id (singles) or team id
     toss_winner_name: Optional[str] = None
     choice: str = "strike"                     # 'strike' | 'side'
+
+
+class MatchSidesSchema(BaseCamelModel):
+    """
+    Who plays which coin, and which way round the board is drawn.
+
+    Colour belongs to the player id. `sides_swapped` moves the display only —
+    player1 stays player1 however the umpire is standing, so every reference
+    recorded against them survives the swap.
+    """
+    player1_color: Optional[str] = None   # 'black' | 'white'
+    player2_color: Optional[str] = None
+    sides_swapped: Optional[bool] = None
+    table_number: Optional[int] = None
+    referee_id: Optional[str] = None

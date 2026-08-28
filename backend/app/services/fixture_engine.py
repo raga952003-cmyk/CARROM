@@ -1,27 +1,38 @@
 import math
 from typing import List, Dict, Any, Optional
 
-def create_empty_boards(max_boards: int = 3) -> List[Dict[str, Any]]:
+def create_empty_boards(max_boards: int = 3, number_of_sets: int = 1) -> List[Dict[str, Any]]:
+    """
+    The empty boards a match starts with.
+
+    Board numbers restart in each set, so three sets of eight is boards 1-8
+    three times over rather than 1-24 — which is what the scorer sees on the
+    sheet and what the set totals are grouped by.
+    """
     boards = []
-    for i in range(1, max_boards + 1):
-        boards.append({
-            "boardNumber": i,
-            "status": "in_progress" if i == 1 else "pending",
-            "player1Score": 0,
-            "player2Score": 0,
-            "queenClaimedBy": "none",
-            "queenCovered": False,
-            "foulsPlayer1": 0,
-            "foulsPlayer2": 0,
-            "whiteCoinsPocketed": 0,
-            "blackCoinsPocketed": 0
-        })
+    for set_number in range(1, max(1, number_of_sets) + 1):
+        for i in range(1, max_boards + 1):
+            boards.append({
+                "setNumber": set_number,
+                "boardNumber": i,
+                # Only the very first board of the match is live to begin with.
+                "status": "in_progress" if (set_number == 1 and i == 1) else "pending",
+                "player1Score": 0,
+                "player2Score": 0,
+                "queenClaimedBy": "none",
+                "queenCovered": False,
+                "foulsPlayer1": 0,
+                "foulsPlayer2": 0,
+                "whiteCoinsPocketed": 0,
+                "blackCoinsPocketed": 0
+            })
     return boards
 
 def generate_round_robin_fixtures(
     tournament_id: str,
     participants: List[Dict[str, Any]],
     max_boards: int = 3,
+    number_of_sets: int = 1,
     id_prefix: str = "rr",
 ) -> List[Dict[str, Any]]:
     n = len(participants)
@@ -75,7 +86,8 @@ def generate_round_robin_fixtures(
                 "status": "scheduled",
                 "timerElapsedSeconds": 0,
                 "isTimerRunning": False,
-                "boards": create_empty_boards(max_boards),
+                "boards": create_empty_boards(max_boards, number_of_sets),
+                "numberOfSets": number_of_sets,
                 "maxBoards": max_boards,
                 "resultConfirmed": False,
                 "player1BoardWins": 0,
@@ -139,6 +151,7 @@ def generate_knockout_bracket(
     tournament_id: str,
     participants: List[Dict[str, Any]],
     max_boards: int = 3,
+    number_of_sets: int = 1,
     id_prefix: str = "ko",
 ) -> List[Dict[str, Any]]:
     """
@@ -187,7 +200,8 @@ def generate_knockout_bracket(
             "status": "scheduled",
             "timerElapsedSeconds": 0,
             "isTimerRunning": False,
-            "boards": create_empty_boards(max_boards),
+            "boards": create_empty_boards(max_boards, number_of_sets),
+                "numberOfSets": number_of_sets,
             "maxBoards": max_boards,
             "resultConfirmed": False,
             "player1BoardWins": 0,
@@ -258,6 +272,7 @@ def generate_league_knockout_fixtures(
     tournament_id: str,
     participants: List[Dict[str, Any]],
     max_boards: int = 3,
+    number_of_sets: int = 1,
     id_prefix: str = "lk",
 ) -> List[Dict[str, Any]]:
     """
@@ -270,7 +285,8 @@ def generate_league_knockout_fixtures(
     UUID, so this format could never generate fixtures at all.
     """
     league_matches = generate_round_robin_fixtures(
-        tournament_id, participants, max_boards, id_prefix=f"{id_prefix}rr"
+        tournament_id, participants, max_boards,
+        number_of_sets=number_of_sets, id_prefix=f"{id_prefix}rr"
     )
 
     qualifier_count = min(4, max(2, len(participants) // 2))
@@ -285,7 +301,8 @@ def generate_league_knockout_fixtures(
     ]
 
     knockout_matches = generate_knockout_bracket(
-        tournament_id, placeholders, max_boards, id_prefix=f"{id_prefix}ko"
+        tournament_id, placeholders, max_boards,
+        number_of_sets=number_of_sets, id_prefix=f"{id_prefix}ko"
     )
 
     # Placeholders are not real participants: keep the label, drop the id so the
@@ -366,6 +383,7 @@ def generate_group_stage_fixtures(
     tournament_id: str,
     participants: List[Dict[str, Any]],
     max_boards: int = 3,
+    number_of_sets: int = 1,
     group_count: Optional[int] = None,
     id_prefix: str = "gs",
 ) -> List[Dict[str, Any]]:
@@ -388,7 +406,8 @@ def generate_group_stage_fixtures(
             continue
         label = group_label(gi)
         drawn = generate_round_robin_fixtures(
-            tournament_id, members, max_boards, id_prefix=f"{id_prefix}{label}"
+            tournament_id, members, max_boards,
+            number_of_sets=number_of_sets, id_prefix=f"{id_prefix}{label}"
         )
         for m in drawn:
             m["roundName"] = f"Group {label} · {m['roundName'].replace('League ', '')}"
@@ -406,6 +425,7 @@ def generate_group_knockout_fixtures(
     tournament_id: str,
     participants: List[Dict[str, Any]],
     max_boards: int = 3,
+    number_of_sets: int = 1,
     group_count: Optional[int] = None,
     qualifiers_per_group: int = 2,
     id_prefix: str = "gk",
@@ -418,7 +438,11 @@ def generate_group_knockout_fixtures(
     (services/qualification.py), which keeps the draw deterministic.
     """
     group_matches = generate_group_stage_fixtures(
-        tournament_id, participants, max_boards, group_count, id_prefix=f"{id_prefix}g"
+        tournament_id, participants, max_boards,
+        # By keyword: a positional argument here silently became the set count
+        # when that parameter was added, and every group draw came out wrong.
+        number_of_sets=number_of_sets, group_count=group_count,
+        id_prefix=f"{id_prefix}g",
     )
     if not group_matches:
         return []
@@ -443,7 +467,8 @@ def generate_group_knockout_fixtures(
     # already handles a non-power-of-two field by giving byes to the top seeds,
     # which is both fair and the normal way to run this.
     knockout = generate_knockout_bracket(
-        tournament_id, placeholders, max_boards, id_prefix=f"{id_prefix}ko"
+        tournament_id, placeholders, max_boards,
+        number_of_sets=number_of_sets, id_prefix=f"{id_prefix}ko"
     )
     for m in knockout:
         for side in ("player1", "player2"):
