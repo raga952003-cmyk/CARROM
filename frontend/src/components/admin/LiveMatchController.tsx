@@ -26,6 +26,7 @@ import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MatchTimer } from './MatchTimer';
 import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from './BoardResultForm';
+import { SetScoreboard, summariseSets } from './SetScoreboard';
 
 interface LiveMatchControllerProps {
   /** Something the umpire needs to know that happened before this view opened. */
@@ -55,9 +56,9 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   } = useTournament();
 
   const [activeBoardNumber, setActiveBoardNumber] = useState<number>(() => {
-    const inProgress = match.boards.find(b => b.status === 'in_progress');
+    const inProgress = setBoards.find(b => b.status === 'in_progress');
     if (inProgress) return inProgress.boardNumber;
-    const firstPending = match.boards.find(b => b.status === 'pending');
+    const firstPending = setBoards.find(b => b.status === 'pending');
     if (firstPending) return firstPending.boardNumber;
     return 1;
   });
@@ -80,6 +81,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [observation, setObservation] = useState<BoardObservation>(emptyObservation);
 
   const rules = tournament.rules || ({} as any);
+  const totalSets = Math.max(1, match.numberOfSets || rules.numberOfSets || 1);
+  const boardsPerSet = rules.boardsPerSet || match.maxBoards || 8;
+  // The set currently being scored. Board numbers restart each set, so every
+  // board lookup has to be qualified by it.
+  const [activeSet, setActiveSet] = useState<number>(1);
+  const setBoards = match.boards.filter(b => (b.setNumber || 1) === activeSet);
   // Tournaments created before remaining-coins scoring existed keep the old
   // model, so their confirmed results are not rewritten underneath them.
   const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
@@ -89,7 +96,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const isCompleted = match.status === 'completed';
 
   const handleOpenScoreModal = (boardNum: number, isCorrection: boolean = false) => {
-    const currentBoard = match.boards.find(b => b.boardNumber === boardNum);
+    const currentBoard = setBoards.find(b => b.boardNumber === boardNum);
     setSelectedBoardForScore(boardNum);
     if (currentBoard) {
       const p1S = currentBoard.player1Score || 0;
@@ -158,7 +165,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
           auditReason,
         };
 
-    submitBoardScore(tournament.id, match.id, selectedBoardForScore, payload);
+    submitBoardScore(tournament.id, match.id, selectedBoardForScore,
+      totalSets > 1 ? { ...payload, setNumber: activeSet } : payload);
     setIsSubmitScoreModalOpen(false);
   };
 
@@ -174,6 +182,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
       usesRemainingCoins
         ? {
             boardNumber: selectedBoardForScore,
+            setNumber: totalSets > 1 ? activeSet : undefined,
             status: 'completed',
             player1Score: preview!.p1,
             player2Score: preview!.p2,
@@ -306,8 +315,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
               <div className="mt-4 flex items-center justify-center space-x-6 pt-3 border-t border-gray-200">
                 <div>
-                  <div className="text-[10px] uppercase font-bold text-gray-400">Board Wins</div>
-                  <div className="text-3xl font-black text-[#0B5D3B]">{match.player1BoardWins}</div>
+                  <div className="text-[10px] uppercase font-bold text-gray-400">
+                    {totalSets > 1 ? 'Sets Won' : 'Board Wins'}
+                  </div>
+                  <div className="text-3xl font-black text-[#0B5D3B]">
+                    {totalSets > 1 ? (match.player1SetsWon ?? 0) : match.player1BoardWins}
+                  </div>
                 </div>
                 <div className="h-8 w-px bg-gray-200" />
                 <div>
@@ -323,10 +336,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 VS
               </div>
               <div className="text-[10px] uppercase font-bold text-gray-400 mt-2">
-                Best of {match.maxBoards} Boards
+                {totalSets > 1
+                  ? `${totalSets} Sets × ${boardsPerSet} Boards`
+                  : `Best of ${match.maxBoards} Boards`}
               </div>
               <div className="text-xs font-bold text-[#2E7D32] mt-1">
-                {match.boards.filter(b => b.status === 'completed').length} Finished
+                {setBoards.filter(b => b.status === 'completed').length} Finished
               </div>
             </div>
 
@@ -346,8 +361,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
               <div className="mt-4 flex items-center justify-center space-x-6 pt-3 border-t border-gray-200">
                 <div>
-                  <div className="text-[10px] uppercase font-bold text-gray-400">Board Wins</div>
-                  <div className="text-3xl font-black text-[#0B5D3B]">{match.player2BoardWins}</div>
+                  <div className="text-[10px] uppercase font-bold text-gray-400">
+                    {totalSets > 1 ? 'Sets Won' : 'Board Wins'}
+                  </div>
+                  <div className="text-3xl font-black text-[#0B5D3B]">
+                    {totalSets > 1 ? (match.player2SetsWon ?? 0) : match.player2BoardWins}
+                  </div>
                 </div>
                 <div className="h-8 w-px bg-gray-200" />
                 <div>
@@ -427,6 +446,15 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         </div>
       )}
 
+      {totalSets > 1 && (
+        <SetScoreboard
+          match={match}
+          boardsPerSet={boardsPerSet}
+          activeSet={activeSet}
+          onSelectSet={setActiveSet}
+        />
+      )}
+
       {/* Board-by-Board Scoring Table Card */}
       <div className="bg-white rounded-2xl border border-gray-200/80 p-6 shadow-xs space-y-4">
         
@@ -442,7 +470,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
           <div className="flex items-center space-x-2">
             <div className="text-xs font-semibold text-gray-600 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-200">
-              {match.boards.filter(b => b.status === 'completed').length} / {match.maxBoards} Boards Completed
+              {setBoards.filter(b => b.status === 'completed').length} / {boardsPerSet} Boards Completed{totalSets > 1 ? ` · Set ${activeSet} of ${totalSets}` : ''}
             </div>
             {role === 'admin' && !match.resultConfirmed && (
               <button
@@ -459,7 +487,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
         {/* Boards List */}
         <div className="space-y-3">
-          {match.boards.map((board) => {
+          {setBoards.map((board) => {
             const isBoardCompleted = board.status === 'completed';
             const isBoardInProgress = board.status === 'in_progress';
             

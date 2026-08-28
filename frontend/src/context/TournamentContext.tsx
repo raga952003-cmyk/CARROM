@@ -30,6 +30,8 @@ import {
  * and none of them is derived from another.
  */
 export interface BoardSubmission {
+  /** Which set the board belongs to; omit for a single-set match. */
+  setNumber?: number;
   p1Score: number;
   p2Score: number;
   boardWinner?: Side;

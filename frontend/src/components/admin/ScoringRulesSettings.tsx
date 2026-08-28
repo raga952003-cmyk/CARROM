@@ -3,6 +3,10 @@ import { Calculator, Info } from 'lucide-react';
 
 export interface ScoringRules {
   scoringMode: 'classic' | 'remaining_coins';
+  /** Sets per match. 1 is a flat list of boards, as before. */
+  numberOfSets: number;
+  /** Boards inside one set. */
+  boardsPerSet: number;
   coinsPerSide: number;
   queenPoints: number;
   queenMustBeCovered: boolean;
@@ -12,6 +16,8 @@ export interface ScoringRules {
 
 export const defaultScoringRules: ScoringRules = {
   scoringMode: 'remaining_coins',
+  numberOfSets: 1,
+  boardsPerSet: 8,
   coinsPerSide: 9,
   queenPoints: 3,
   queenMustBeCovered: true,
@@ -54,6 +60,30 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-[11px] font-bold text-gray-700 mb-1">Sets per match</label>
+          <select
+            value={value.numberOfSets}
+            onChange={e => set({ numberOfSets: parseInt(e.target.value) || 1 })}
+            className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
+          >
+            <option value={1}>1 set (a single run of boards)</option>
+            <option value={3}>3 sets</option>
+            <option value={5}>5 sets</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-[11px] font-bold text-gray-700 mb-1">Boards per set</label>
+          <select
+            value={value.boardsPerSet}
+            onChange={e => set({ boardsPerSet: parseInt(e.target.value) || 8 })}
+            className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
+          >
+            {[4, 6, 8, 10].map(n => <option key={n} value={n}>{n} boards</option>)}
+          </select>
+        </div>
+
         <div className="sm:col-span-2">
           <label className="block text-[11px] font-bold text-gray-700 mb-1">Scoring model</label>
           <select
@@ -137,6 +167,14 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
         <div className="flex items-start gap-2">
           <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-emerald-700" />
           <div>
+            {value.numberOfSets > 1 && (
+              <div className="mb-1.5 font-semibold">
+                {value.numberOfSets} sets of {value.boardsPerSet} boards is{' '}
+                <strong>{value.numberOfSets * value.boardsPerSet} boards</strong>. A set is won on the
+                points scored inside it and the match on sets, so a player can score fewer points
+                overall and still win.
+              </div>
+            )}
             {remaining ? (
               <>
                 A board where the winner clears their coins, the loser has <strong>4</strong> left and the

@@ -28,6 +28,7 @@ SUITES = [
     "test_preview_parity",
     "test_queen",
     "test_boardscoring",
+    "test_sets",
     "test_toss",
     "test_groups",
     "test_import",
@@ -41,6 +42,7 @@ SUITES = [
 ]
 
 PASS_MARKERS = ("RESULTS: 0 failure(s)",
+                "ALL SET CHECKS PASSED",
                 "ALL PREVIEW-PARITY CHECKS PASSED", "ALL END-TO-END CHECKS PASSED",
                 "ALL ARCHITECTURE CHECKS PASSED", "ALL DOUBLES CHECKS PASSED",
                 "ALL EDGE-CASE SCENARIOS PASSED")

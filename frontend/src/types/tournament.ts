@@ -53,7 +53,20 @@ export interface Registration {
 
 export type Side = 'player1' | 'player2' | 'none';
 
+export interface MatchSet {
+  setNumber: number;
+  status: 'pending' | 'in_progress' | 'completed';
+  boardsCompleted: number;
+  boardsExpected: number;
+  player1Points: number;
+  player2Points: number;
+  winnerId?: string | null;
+  winnerName?: string | null;
+}
+
 export interface BoardScore {
+  /** Board numbers restart in each set, so a board is (set, number). */
+  setNumber?: number;
   boardNumber: number;
   status: BoardStatus;
   /** The final points for the board, after queen and penalties. */
@@ -141,6 +154,20 @@ export interface Match {
   winnerId?: string;
   winnerName?: string;
   resultConfirmed: boolean;
+
+  // Sets. A match with one set behaves exactly as a flat board list.
+  numberOfSets?: number;
+  player1SetsWon?: number;
+  player2SetsWon?: number;
+  /** The coin each side plays. Bound to the player id, not the screen side. */
+  player1Color?: 'black' | 'white' | null;
+  player2Color?: 'black' | 'white' | null;
+  /** Display only — swapping never moves player1Id. */
+  sidesSwapped?: boolean;
+  tableNumber?: number | null;
+  refereeId?: string | null;
+  refereeName?: string | null;
+
   tieBreakRequired?: boolean;
   tieBreakRule?: string | null;
   tieBreakResult?: string | null;
@@ -182,6 +209,9 @@ export interface TournamentRules {
   queenAwardTo?: 'coverer' | 'pocketer';
   /** How a tie is resolved once every board has been played. */
   tieBreak?: 'additional_board' | 'sudden_death' | 'most_board_wins' | 'organizer_decision';
+  /** Carromite format: N sets of M boards, won on sets rather than points. */
+  numberOfSets?: number;
+  boardsPerSet?: number;
   matchDurationMinutes: number;
   restTimeMinutes: number;
   /** 1 = one league for everyone; higher splits the league phase into groups. */

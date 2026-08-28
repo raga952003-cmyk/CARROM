@@ -100,6 +100,8 @@ export const AdminDashboard: React.FC = () => {
         // A tournament created before this setting existed has no value, and
         // its confirmed results were decided under the old model.
         scoringMode: r.scoringMode || 'classic',
+        numberOfSets: r.numberOfSets ?? 1,
+        boardsPerSet: r.boardsPerSet ?? (r.maxBoardsPerMatch || 8),
         coinsPerSide: r.coinsPerSide ?? 9,
         queenPoints: r.queenPoints ?? 3,
         queenMustBeCovered: r.queenMustBeCovered !== false,
