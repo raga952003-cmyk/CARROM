@@ -98,6 +98,20 @@ async def health():
             except Exception:
                 pending.append(migration)
 
+        # 007 replaces a function rather than adding a column, so it is probed
+        # by argument list: the old six-argument version cannot take a set.
+        try:
+            supabase_admin.rpc("apply_board_result", {
+                "p_match_id": "00000000-0000-0000-0000-000000000000",
+                "p_board_number": 0, "p_board_patch": {}, "p_match_patch": {},
+                "p_audit": {}, "p_next_board_number": None, "p_set_number": 1,
+            }).execute()
+        except Exception as e:
+            # "board_not_found" means the seven-argument version ran and simply
+            # found nothing, which is exactly what a zero UUID should do.
+            if "board_not_found" not in str(e) and "insufficient_privilege" not in str(e):
+                pending.append("007_apply_board_result_sets")
+
     return {
         "status": "ok" if not pending else "degraded",
         "pending_migrations": pending,

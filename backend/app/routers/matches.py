@@ -21,6 +21,7 @@ from app.utils.idempotency import IdempotencyGuard, get_idempotency_key
 from typing import Dict, Any
 from datetime import datetime, timezone
 import json
+import time
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
@@ -61,17 +62,28 @@ _BOARD_DETAIL_COLUMNS = (
     "p1_penalty", "p2_penalty", "base_points", "queen_bonus",
     "scoring_warnings", "locked", "confirmed_by", "confirmed_at",
 )
-_board_detail_available: Dict[str, bool] = {}
+_board_detail_available: Dict[str, Any] = {}
+_PROBE_RETRY_SECONDS = 30
 
 
 def board_detail_available(admin_db) -> bool:
-    """Whether migration 005 has been applied. Probed once per process."""
-    if "value" not in _board_detail_available:
-        try:
-            admin_db.table("boards").select("board_winner").limit(1).execute()
-            _board_detail_available["value"] = True
-        except Exception:
-            _board_detail_available["value"] = False
+    """
+    Whether migration 005 has been applied.
+
+    A negative answer is re-checked, because caching it for the life of the
+    process meant applying the migration changed nothing until a restart.
+    """
+    cached = _board_detail_available.get("value")
+    if cached is True:
+        return True
+    if cached is False and time.monotonic() - _board_detail_available.get("at", 0) < _PROBE_RETRY_SECONDS:
+        return False
+    try:
+        admin_db.table("boards").select("board_winner").limit(1).execute()
+        _board_detail_available["value"] = True
+    except Exception:
+        _board_detail_available["value"] = False
+        _board_detail_available["at"] = time.monotonic()
     return _board_detail_available["value"]
 
 
@@ -493,6 +505,7 @@ async def submit_board(
                 ) + degraded_note,
             },
             next_board_number=next_board_number if has_next else None,
+            set_number=set_number if total_sets > 1 else None,
         )
 
         response = serialize_board(board_row) if board_row else {"status": "ok"}

@@ -31,6 +31,7 @@ from app.services.state_machine import (
     set_tournament_status,
 )
 from typing import List, Dict, Any, Optional
+import time
 import uuid
 import logging
 import secrets
@@ -155,16 +156,27 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> Lis
 # Migration 006 adds the set columns. Until it is applied a match is a flat
 # list of boards exactly as before, so the columns are simply not written
 # rather than the whole fixture generation failing on an unknown column.
-_sets_supported: Dict[str, bool] = {}
+
+# A missing column is cached only briefly. Caching "not supported" forever
+# meant applying a migration did nothing at all until someone happened to
+# restart the API — the feature stayed dark and the health check said fine.
+# A column that exists cannot stop existing, so a positive result is kept.
+_PROBE_RETRY_SECONDS = 30
+_sets_supported: Dict[str, Any] = {}
 
 
 def sets_supported(admin_db) -> bool:
-    if "value" not in _sets_supported:
-        try:
-            admin_db.table("boards").select("set_number").limit(1).execute()
-            _sets_supported["value"] = True
-        except Exception:
-            _sets_supported["value"] = False
+    cached = _sets_supported.get("value")
+    if cached is True:
+        return True
+    if cached is False and time.monotonic() - _sets_supported.get("at", 0) < _PROBE_RETRY_SECONDS:
+        return False
+    try:
+        admin_db.table("boards").select("set_number").limit(1).execute()
+        _sets_supported["value"] = True
+    except Exception:
+        _sets_supported["value"] = False
+        _sets_supported["at"] = time.monotonic()
     return _sets_supported["value"]
 
 

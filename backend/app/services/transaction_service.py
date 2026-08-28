@@ -89,6 +89,7 @@ def apply_board_result(
     match_patch: Dict[str, Any],
     audit: Dict[str, Any],
     next_board_number: Optional[int] = None,
+    set_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Board row + audit row + match aggregates + next board, in one transaction."""
     try:
@@ -99,6 +100,9 @@ def apply_board_result(
             "p_match_patch": match_patch,
             "p_audit": audit,
             "p_next_board_number": next_board_number,
+            # Board numbers restart each set, so the set is part of the board's
+            # identity; without it the lock matches every set at once.
+            "p_set_number": set_number or 1,
         }).execute())
         _mark(True)
         return result.data or {}
@@ -107,21 +111,25 @@ def apply_board_result(
             raise
         _mark(False)
         return _apply_board_result_fallback(
-            admin_db, match_id, board_number, board_patch, match_patch, audit, next_board_number
+            admin_db, match_id, board_number, board_patch, match_patch, audit,
+            next_board_number, set_number,
         )
 
 
 def _apply_board_result_fallback(
-    admin_db, match_id, board_number, board_patch, match_patch, audit, next_board_number
+    admin_db, match_id, board_number, board_patch, match_patch, audit, next_board_number,
+    set_number=None,
 ) -> Dict[str, Any]:
-    previous = admin_db.table("boards").select("*").eq("match_id", match_id).eq(
-        "board_number", board_number
-    ).execute().data
+    def board_query(q):
+        q = q.eq("match_id", match_id).eq("board_number", board_number)
+        # Only narrow by set when the match is played in sets; the column does
+        # not exist on databases before migration 006.
+        return q.eq("set_number", set_number) if set_number else q
+
+    previous = board_query(admin_db.table("boards").select("*")).execute().data
     prev = previous[0] if previous else {}
 
-    updated = admin_db.table("boards").update(board_patch).eq("match_id", match_id).eq(
-        "board_number", board_number
-    ).execute()
+    updated = board_query(admin_db.table("boards").update(board_patch)).execute()
 
     admin_db.table("score_audit_logs").insert({
         "match_id": match_id,
@@ -139,9 +147,12 @@ def _apply_board_result_fallback(
     admin_db.table("matches").update(match_patch).eq("id", match_id).execute()
 
     if next_board_number is not None and match_patch.get("status") != "completed":
-        admin_db.table("boards").update({"status": "in_progress"}).eq(
+        q = admin_db.table("boards").update({"status": "in_progress"}).eq(
             "match_id", match_id
-        ).eq("board_number", next_board_number).eq("status", "pending").execute()
+        ).eq("board_number", next_board_number).eq("status", "pending")
+        if set_number:
+            q = q.eq("set_number", set_number)
+        q.execute()
 
     return updated.data[0] if updated.data else {}
 
