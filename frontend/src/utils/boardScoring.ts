@@ -35,7 +35,21 @@ export const emptyObservation: BoardObservation = {
  * Mirrors the backend `board_result()` so the umpire sees the score before
  * saving. The server recomputes it and stays authoritative; this is a preview.
  */
-export function previewBoard(obs: BoardObservation, rules: Partial<TournamentRules>) {
+export interface SideNames {
+  player1: string;
+  player2: string;
+}
+
+const SIDE_LABELS: SideNames = { player1: 'Player 1', player2: 'Player 2' };
+
+export function previewBoard(
+  obs: BoardObservation,
+  rules: Partial<TournamentRules>,
+  names: SideNames = SIDE_LABELS,
+) {
+  // A warning is read by the umpire mid-match, so it names the player rather
+  // than the field the value happens to be stored in.
+  const who = (side: Side) => (side === 'none' ? 'nobody' : names[side]);
   const queenPoints = rules.queenPoints ?? 3;
   const coinValue = rules.coinValue ?? 1;
   const mustCover = rules.queenMustBeCovered !== false;
@@ -45,7 +59,7 @@ export function previewBoard(obs: BoardObservation, rules: Partial<TournamentRul
   let base = 0;
   if (obs.winner !== 'none' && obs.coinsRemainingWith !== 'none') {
     if (obs.coinsRemainingWith === obs.winner) {
-      warnings.push('The winner is also marked as holding the coins left on the board — no base points.');
+      warnings.push(`${who(obs.winner)} is marked as both the board winner and the side holding the coins left — no base points.`);
     } else {
       base = Math.max(0, obs.coinsRemaining);
     }
@@ -68,8 +82,8 @@ export function previewBoard(obs: BoardObservation, rules: Partial<TournamentRul
       // Worth saying out loud: it explains a bonus landing on the side that
       // did not sink the queen, which otherwise reads as a mistake.
       warnings.push(
-        `${obs.queenPocketedBy} pocketed the queen but ${obs.queenCoveredBy} covered it — ` +
-        `the ${queenPoints} points went to ${queenSide}.`
+        `${who(obs.queenPocketedBy)} pocketed the queen but ${who(obs.queenCoveredBy)} covered it — ` +
+        `the ${queenPoints} points went to ${who(queenSide)}.`
       );
     }
   } else if (queenStatus === 'returned') {

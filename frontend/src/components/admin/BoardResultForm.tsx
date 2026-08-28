@@ -66,7 +66,8 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
   const p2 = match.player2Name.split(' ')[0];
   const coinsPerSide = rules.coinsPerSide ?? 9;
   const set = (patch: Partial<BoardObservation>) => onChange({ ...value, ...patch });
-  const result = previewBoard(value, rules);
+  const result = previewBoard(value, rules,
+    { player1: match.player1Name, player2: match.player2Name });
 
   return (
     <div className="space-y-3 text-xs">
