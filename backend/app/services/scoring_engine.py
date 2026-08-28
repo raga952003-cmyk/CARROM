@@ -245,10 +245,14 @@ def calculate_points_table(
         r["scoreDiff"] = r["scoreFor"] - r["scoreAgainst"]
         r["form"] = r["form"][-5:]  # Keep last 5
 
-    # Sort tiebreakers: 1. Points, 2. boardDiff, 3. scoreDiff, 4. scoreFor, 5. name
+    # Points, then matches won, then board difference, then score difference.
+    # Matches won sits second because two players level on points have not
+    # necessarily won the same number of matches — a draw and a win pay
+    # differently — and beating people is the more direct claim.
     def sort_key(r):
         return (
             -r["points"],
+            -r["won"],
             -r["boardDiff"],
             -r["scoreDiff"],
             -r["scoreFor"],
@@ -365,6 +369,12 @@ def board_result(
     rules = rules or {}
     coins_per_side = int(_rule(rules, "coinsPerSide", "coins_per_side", 9))
     queen_points = int(_rule(rules, "queenPoints", "queen_points", 3))
+    # What one coin is worth. 1 in standard carrom, but the spec is explicit
+    # that it belongs in the tournament rules rather than in the arithmetic.
+    try:
+        coin_value = int(_rule(rules, "coinValue", "coin_value", 1))
+    except (TypeError, ValueError):
+        coin_value = 1
     must_cover = bool(_rule(rules, "queenMustBeCovered", "queen_must_be_covered", True))
     # Who the queen pays: whoever covered it, or whoever sank it.
     award_to = _rule(rules, "queenAwardTo", "queen_award_to", "coverer")
@@ -450,7 +460,7 @@ def board_result(
     # ---- assemble ---------------------------------------------------------
     points = {"player1": 0, "player2": 0}
     if winner in SIDES:
-        points[winner] += base
+        points[winner] += base * coin_value
     if queen_side in SIDES:
         points[queen_side] += queen_bonus
 
@@ -464,7 +474,7 @@ def board_result(
         "player1_score": points["player1"],
         "player2_score": points["player2"],
         "board_winner": winner,
-        "base_points": base,
+        "base_points": base * coin_value,
         "queen_bonus": queen_bonus,
         "queen_awarded_to": queen_side or "none",
         "queen_status": queen_status,
@@ -504,6 +514,21 @@ def set_layout(match: Dict[str, Any], rules: Optional[Dict[str, Any]] = None) ->
     return sets, per_set
 
 
+
+def _board_winner_of(board: Dict[str, Any]) -> Optional[str]:
+    """The side that won a board: what was recorded, or the higher score."""
+    declared = _field(board, "boardWinner", "board_winner")
+    if declared in SIDES:
+        return declared
+    p1 = _field(board, "player1Score", "player1_score", 0) or 0
+    p2 = _field(board, "player2Score", "player2_score", 0) or 0
+    if p1 > p2:
+        return "player1"
+    if p2 > p1:
+        return "player2"
+    return None
+
+
 def summarise_sets(
     match: Dict[str, Any],
     boards: List[Dict[str, Any]],
@@ -516,6 +541,7 @@ def summarise_sets(
     an older match reads as a single set and scores exactly as it always did.
     """
     total_sets, per_set = set_layout(match, rules)
+    set_rule = _rule(rules or {}, "setWinnerRule", "set_winner_rule", "total_points")
     p1_id = _field(match, "player1Id", "player1_id")
     p2_id = _field(match, "player2Id", "player2_id")
     p1_name = _field(match, "player1Name", "player1_name")
@@ -543,9 +569,24 @@ def summarise_sets(
 
         winner_id = winner_name = None
         if complete:
-            if p1 > p2:
+            # Which side took the set is a tournament rule, not an assumption.
+            # Winning most boards and scoring most points can disagree — three
+            # narrow boards against one landslide — and different associations
+            # settle that differently.
+            if set_rule == "board_wins":
+                w1 = sum(1 for b in members
+                         if b.get("status") == "completed"
+                         and _board_winner_of(b) == "player1")
+                w2 = sum(1 for b in members
+                         if b.get("status") == "completed"
+                         and _board_winner_of(b) == "player2")
+                lead1, lead2 = w1, w2
+            else:
+                lead1, lead2 = p1, p2
+
+            if lead1 > lead2:
                 winner_id, winner_name = p1_id, p1_name
-            elif p2 > p1:
+            elif lead2 > lead1:
                 winner_id, winner_name = p2_id, p2_name
 
         rows.append({
@@ -575,7 +616,22 @@ def apply_set_results(
     """
     updated = recalculate_match_scores(match, boards, rules)
     total_sets, _ = set_layout(match, rules)
+    set_rule = _rule(rules or {}, "setWinnerRule", "set_winner_rule", "total_points")
+
     if total_sets <= 1:
+        # A best-of-1 is still a set, so the set rule decides it. Only worth
+        # re-deciding when the rule is not the points default, or an existing
+        # tournament would change behaviour under it.
+        if set_rule == "total_points":
+            return updated
+        row = summarise_sets(match, boards, rules)[0]
+        if row["status"] != "completed":
+            return updated
+        updated["winnerId"] = row["winnerId"]
+        updated["winnerName"] = row["winnerName"]
+        updated["status"] = "completed" if row["winnerId"] else updated.get("status", "live")
+        if row["winnerId"]:
+            updated["matchCompletedAt"] = datetime.utcnow().isoformat()
         return updated
 
     sets = summarise_sets(match, boards, rules)
@@ -588,8 +644,23 @@ def apply_set_results(
     updated["player1SetsWon"] = p1_sets
     updated["player2SetsWon"] = p2_sets
 
-    # Every set is played out: the match is not called on a set lead, for the
-    # same reason a set is not called on a board lead.
+    # Best of N: once a side has more sets than the rest can yield, the match
+    # is over and the remaining sets are not played. This is not the same as
+    # the board rule inside a set — every board of a set IS played out, because
+    # a set is decided on its total, not on a running board lead.
+    needed = (total_sets // 2) + 1
+    if p1_sets >= needed or p2_sets >= needed:
+        won_by_1 = p1_sets >= needed
+        updated["winnerId"] = p1_id if won_by_1 else p2_id
+        updated["winnerName"] = _field(
+            match, "player1Name" if won_by_1 else "player2Name",
+            "player1_name" if won_by_1 else "player2_name")
+        updated["status"] = "completed"
+        updated["matchCompletedAt"] = datetime.utcnow().isoformat()
+        updated["tieBreakRequired"] = False
+        updated["setsUnplayed"] = sum(1 for s in sets if s["status"] == "pending")
+        return updated
+
     if all(s["status"] == "completed" for s in sets):
         if p1_sets > p2_sets:
             updated["winnerId"] = p1_id

@@ -212,6 +212,10 @@ export interface TournamentRules {
   /** Carromite format: N sets of M boards, won on sets rather than points. */
   numberOfSets?: number;
   boardsPerSet?: number;
+  /** What one coin is worth. 1 in standard carrom. */
+  coinValue?: number;
+  /** How a set is decided: on total points, or on boards won. */
+  setWinnerRule?: 'total_points' | 'board_wins';
   matchDurationMinutes: number;
   restTimeMinutes: number;
   /** 1 = one league for everyone; higher splits the league phase into groups. */

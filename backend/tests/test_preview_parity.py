@@ -32,6 +32,9 @@ RULE_SETS = [
     {"coinsPerSide": 9, "queenPoints": 3},
     {"coinsPerSide": 9, "queenPoints": 5, "queenAwardTo": "pocketer"},
     {"coinsPerSide": 12, "queenPoints": 1, "queenMustBeCovered": False},
+    # A coin worth more than one point: the preview and the server must agree
+    # on the multiplier as well as on the count.
+    {"coinsPerSide": 9, "queenPoints": 3, "coinValue": 2},
 ]
 
 ENTRY = """

@@ -102,6 +102,8 @@ export const AdminDashboard: React.FC = () => {
         scoringMode: r.scoringMode || 'classic',
         numberOfSets: r.numberOfSets ?? 1,
         boardsPerSet: r.boardsPerSet ?? (r.maxBoardsPerMatch || 8),
+        coinValue: r.coinValue ?? 1,
+        setWinnerRule: r.setWinnerRule || 'total_points',
         coinsPerSide: r.coinsPerSide ?? 9,
         queenPoints: r.queenPoints ?? 3,
         queenMustBeCovered: r.queenMustBeCovered !== false,

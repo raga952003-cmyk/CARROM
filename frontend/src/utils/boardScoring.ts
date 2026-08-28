@@ -37,6 +37,7 @@ export const emptyObservation: BoardObservation = {
  */
 export function previewBoard(obs: BoardObservation, rules: Partial<TournamentRules>) {
   const queenPoints = rules.queenPoints ?? 3;
+  const coinValue = rules.coinValue ?? 1;
   const mustCover = rules.queenMustBeCovered !== false;
   const awardTo = rules.queenAwardTo ?? 'coverer';
   const warnings: string[] = [];
@@ -76,10 +77,11 @@ export function previewBoard(obs: BoardObservation, rules: Partial<TournamentRul
   }
 
   const pts: Record<'player1' | 'player2', number> = { player1: 0, player2: 0 };
-  if (obs.winner !== 'none') pts[obs.winner] += base;
+  if (obs.winner !== 'none') pts[obs.winner] += base * coinValue;
   if (queenSide !== 'none') pts[queenSide] += queenBonus;
   pts.player1 = Math.max(0, pts.player1 - Math.max(0, obs.p1Penalty));
   pts.player2 = Math.max(0, pts.player2 - Math.max(0, obs.p2Penalty));
 
-  return { p1: pts.player1, p2: pts.player2, base, queenBonus, queenSide, queenStatus, warnings };
+  return { p1: pts.player1, p2: pts.player2, base: base * coinValue,
+           queenBonus, queenSide, queenStatus, warnings };
 }

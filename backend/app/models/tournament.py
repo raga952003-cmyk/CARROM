@@ -37,6 +37,11 @@ class TournamentRulesSchema(BaseCamelModel):
     # on total points. 1 set keeps the original flat-board behaviour.
     number_of_sets: Optional[int] = None
     boards_per_set: Optional[int] = None
+    # What one coin is worth, and how a set is decided. Both belong in the
+    # rules rather than the arithmetic: associations differ, and a set won
+    # on boards can go to the other player than a set won on points.
+    coin_value: Optional[int] = None
+    set_winner_rule: Optional[str] = None   # total_points | board_wins
 
 class PosterConfigSchema(BaseCamelModel):
     theme_style: str = "emerald_gold"

@@ -7,6 +7,8 @@ export interface ScoringRules {
   numberOfSets: number;
   /** Boards inside one set. */
   boardsPerSet: number;
+  coinValue: number;
+  setWinnerRule: 'total_points' | 'board_wins';
   coinsPerSide: number;
   queenPoints: number;
   queenMustBeCovered: boolean;
@@ -18,6 +20,8 @@ export const defaultScoringRules: ScoringRules = {
   scoringMode: 'remaining_coins',
   numberOfSets: 1,
   boardsPerSet: 8,
+  coinValue: 1,
+  setWinnerRule: 'total_points',
   coinsPerSide: 9,
   queenPoints: 3,
   queenMustBeCovered: true,
@@ -96,6 +100,34 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             </option>
             <option value="classic">Each player scores the coins they pocketed</option>
           </select>
+        </div>
+
+        <div className="sm:col-span-2">
+          <label className="block text-[11px] font-bold text-gray-700 mb-1">
+            How a set is won
+          </label>
+          <select
+            value={value.setWinnerRule}
+            onChange={e => set({ setWinnerRule: e.target.value as ScoringRules['setWinnerRule'] })}
+            className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
+          >
+            <option value="total_points">Most points across the set</option>
+            <option value="board_wins">Most boards won in the set</option>
+          </select>
+          <p className="text-[10px] text-gray-500 mt-1">
+            These can disagree — three narrow boards against one landslide.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-[11px] font-bold text-gray-700 mb-1">Coin value</label>
+          <input
+            type="number"
+            min={1}
+            value={value.coinValue}
+            onChange={e => set({ coinValue: Math.max(1, parseInt(e.target.value) || 1) })}
+            className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
+          />
         </div>
 
         <div>
