@@ -19,7 +19,16 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 import logging
 
+from app.config import settings
+
 logger = logging.getLogger("uvicorn.error")
+
+if not settings.ENFORCE_TOURNAMENT_OWNERSHIP:
+    logger.warning(
+        "Tournament ownership is not enforced: any admin account can manage, "
+        "score and delete every tournament. Set ENFORCE_TOURNAMENT_OWNERSHIP=true "
+        "to restrict each tournament to its owner."
+    )
 
 MANAGER = "manager"
 SCORER = "scorer"
@@ -92,6 +101,17 @@ def describe_access(admin_db, tournament: Dict[str, Any], profile: Dict[str, Any
         return {"isOwner": False, "role": MANAGER if is_admin else None,
                 "canManage": is_admin, "canScore": is_admin,
                 "enforced": False, "status": None}
+
+    # Policy, as opposed to the migration probe below: on a single-operator
+    # deployment every admin is the same person, and being told a tournament
+    # "is owned by Sets Admin; request access to help run it" is an obstacle
+    # with nobody on the other end to grant it. Note this widens access for
+    # admins only -- a player still falls through to the ordinary checks.
+    if is_admin and not settings.ENFORCE_TOURNAMENT_OWNERSHIP:
+        is_owner = bool(owner_id and user_id and str(owner_id) == str(user_id))
+        return {"isOwner": is_owner, "role": MANAGER,
+                "canManage": True, "canScore": True,
+                "enforced": False, "status": "owner" if is_owner else "unenforced"}
 
     if owner_id is None and ownership_enforced() is False:
         return unenforced()

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   Plus, 
   Trophy, 
@@ -34,6 +34,8 @@ import { StandingsSections } from '../common/StandingsSections';
 import { OperationsBar } from './OperationsBar';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
 import { ManagePlayersTab } from './ManagePlayersTab';
+import { useNotify } from '../../context/NotificationContext';
+import { accessService, PERMISSIVE_ACCESS, TournamentAccess } from '../../services/accessService';
 
 export const AdminDashboard: React.FC = () => {
   const { 
@@ -48,6 +50,16 @@ export const AdminDashboard: React.FC = () => {
     deleteTournament
   } = useTournament();
 
+  const notify = useNotify();
+
+  // What this admin may actually do here. Asked once per tournament so the
+  // screen can hide controls that would only ever come back 403 -- a refused
+  // request is written to the browser console by the network layer itself,
+  // before any JavaScript can intervene, so the only way to be rid of that
+  // line is not to send the request.
+  const [access, setAccess] = useState<TournamentAccess>(PERMISSIVE_ACCESS);
+  const [busy, setBusy] = useState(false);
+
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isPosterModalOpen, setIsPosterModalOpen] = useState(false);
@@ -57,6 +69,51 @@ export const AdminDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'fixtures' | 'registrations' | 'standings' | 'knockout' | 'overview' | 'players'>('fixtures');
 
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
+
+  // Re-asked whenever the selected tournament changes. A failure here must not
+  // lock the operator out of their own screen, so the assumption on error is
+  // permissive and the server still has the final say on every action.
+  useEffect(() => {
+    let cancelled = false;
+    const id = currentTournament?.id;
+    if (!id) { setAccess(PERMISSIVE_ACCESS); return; }
+    accessService.myAccessFor(id)
+      .then(a => { if (!cancelled) setAccess(a); })
+      .catch(() => { if (!cancelled) setAccess(PERMISSIVE_ACCESS); });
+    return () => { cancelled = true; };
+  }, [currentTournament?.id]);
+
+  const removeTournament = async () => {
+    if (!currentTournament || busy) return;
+    const ok = window.confirm(
+      `Are you sure you want to delete the tournament "${currentTournament.name}"? ` +
+      `This action CANNOT be undone and will delete all board matches and registered players!`
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await deleteTournament(currentTournament.id);
+      notify.success(`Deleted "${currentTournament.name}".`);
+    } catch (e) {
+      // Previously this rejection escaped into the void: a red console line and
+      // a button that appeared to do nothing.
+      notify.report(e, 'Could not delete the tournament.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const publish = async () => {
+    if (!currentTournament || busy) return;
+    setBusy(true);
+    try {
+      await publishTournament(currentTournament.id);
+    } catch (e) {
+      notify.report(e, 'Could not publish the tournament.');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const [isEditingRules, setIsEditingRules] = useState(false);
   const [scoringForm, setScoringForm] = useState<ScoringRules>(defaultScoringRules);
@@ -350,21 +407,24 @@ export const AdminDashboard: React.FC = () => {
                     <span>Edit Details</span>
                   </button>
 
+                  {/* Hidden rather than disabled when the server would refuse:
+                      an admin who cannot delete this tournament has no use for
+                      the control, and pressing it would only log a 403. */}
+                  {access.canManage && (
                   <button
-                    onClick={async () => {
-                      if (window.confirm(`Are you sure you want to delete the tournament "${currentTournament.name}"? This action CANNOT be undone and will delete all board matches and registered players!`)) {
-                        await deleteTournament(currentTournament.id);
-                      }
-                    }}
+                    onClick={removeTournament}
+                    disabled={busy}
                     className="px-3.5 py-2 bg-red-50 hover:bg-red-100 text-red-800 text-xs font-bold rounded-xl border border-red-300 flex items-center gap-1.5 transition-colors shadow-xs"
                   >
                     <Trash2 className="w-3.5 h-3.5 text-red-600" />
                     <span>Delete</span>
                   </button>
+                  )}
 
                   {currentTournament.status === 'draft' && (
                     <button
-                      onClick={() => publishTournament(currentTournament.id)}
+                      onClick={publish}
+                      disabled={busy}
                       className="px-4 py-2 bg-[#D4A72C] hover:opacity-90 text-[#0B5D3B] text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5"
                     >
                       <Share2 className="w-3.5 h-3.5" />

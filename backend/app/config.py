@@ -26,6 +26,20 @@ class Settings(BaseSettings):
     # Comma-separated list of allowed browser origins, used outside development.
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
 
+    # Whether a tournament's owner is the only admin who may manage it.
+    #
+    # Off by default, because this deployment is run by one organiser and the
+    # ownership check was blocking them from their own screens with "request
+    # access to help run it" -- from an account that could not grant it.
+    #
+    # The tradeoff is real: with this off, ANY account holding the admin role
+    # can manage, score and delete EVERY tournament in the database. Turn it on
+    # (ENFORCE_TOURNAMENT_OWNERSHIP=true) before letting a second organisation
+    # share this instance. It never affects players, who are refused either way.
+    ENFORCE_TOURNAMENT_OWNERSHIP: bool = os.getenv(
+        "ENFORCE_TOURNAMENT_OWNERSHIP", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
 

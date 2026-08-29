@@ -8,6 +8,7 @@ looking for a scoring bug that was not there. Now the request re-authenticates
 once and retries, and anything still failing is a real defect.
 """
 import os
+import sys
 import time
 
 import requests
@@ -16,6 +17,37 @@ BASE = os.getenv("CARROM_API", "http://127.0.0.1:8000") + "/api"
 
 # Filled in by remember(); used to recover a refused token.
 _creds = {}
+
+
+def require_write_opt_in() -> None:
+    """
+    Refuse to run unless the operator has said, explicitly, that this database
+    is expendable.
+
+    These harnesses do not use fixtures or a scratch schema: they sign up real
+    accounts and write real tournaments through the live API, against whatever
+    database that API is pointed at. Pointed at production -- which is the
+    default, because CARROM_API defaults to a local server usually configured
+    with production credentials -- they leave permanent residue.
+
+    That is not hypothetical. This is how "Sets Admin", "Board Admin" and a
+    "Sets 1 6b3a11" tournament ended up in the live database, where the tournament
+    could not be deleted because a throwaway account owned it.
+
+    An environment variable is a low bar, but it is a deliberate one, and it
+    turns an accident into a decision.
+    """
+    if os.getenv("CARROM_ALLOW_DB_WRITES") == "1":
+        return
+    sys.stderr.write(
+        "\nRefusing to run: these harnesses create real accounts and tournaments\n"
+        "in whatever database {} is backed by.\n\n"
+        "If that database is expendable, opt in explicitly:\n"
+        "    CARROM_ALLOW_DB_WRITES=1 python tests/run_all.py\n\n"
+        "Never set it against production. Residue from a previous run had to be\n"
+        "cleaned out of the live database by hand.\n".format(BASE)
+    )
+    raise SystemExit(2)
 
 
 def remember(email, password, role="admin"):

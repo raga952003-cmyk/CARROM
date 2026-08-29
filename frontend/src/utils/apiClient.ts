@@ -37,6 +37,22 @@ if (typeof window !== 'undefined') {
 }
 
 /** Thrown when the page tore the request down; callers should stay quiet. */
+/**
+ * An API failure that still carries its HTTP status.
+ *
+ * Everything the API rejects arrives as one of these, so a caller can tell a
+ * 403 (this account may not do that) from a 500 (the server broke) without
+ * matching on message text, which changes whenever the wording is improved.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 export class NavigationAbortError extends Error {
   readonly isNavigationAbort = true;
   constructor() {
@@ -191,15 +207,15 @@ class ApiClient {
             }
           }
           this.endSession(detail || 'Session expired. Please sign in again.');
-          throw new Error(detail || 'Session expired. Please sign in again.');
+          throw new ApiError(detail || 'Session expired. Please sign in again.', 401);
         }
         if (response.status === 403) {
-          throw new Error(detail || 'Access denied. Insufficient permissions.');
+          throw new ApiError(detail || 'Access denied. Insufficient permissions.', 403);
         }
         if (response.status === 404) {
-          throw new Error(detail || 'Resource not found.');
+          throw new ApiError(detail || 'Resource not found.', 404);
         }
-        throw new Error(detail || `HTTP Error: ${response.status}`);
+        throw new ApiError(detail || `HTTP Error: ${response.status}`, response.status);
       }
 
       // Handle 204 No Content
