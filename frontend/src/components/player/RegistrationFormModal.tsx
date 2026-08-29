@@ -41,7 +41,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   const [phone, setPhone] = useState(asPlayer?.phone || '');
   const [email, setEmail] = useState(currentUser?.email || '');
   const [club, setClub] = useState(asPlayer?.club || '');
-  const [city, setCity] = useState(asPlayer?.city || tournament.city || 'Pune');
+  const [city, setCity] = useState(asPlayer?.city || tournament.city || '');
 
   // Doubles Team Fields. These start empty on purpose: pre-filled sample values
   // were being submitted verbatim, registering a fictitious partner.
@@ -245,7 +245,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                     onChange={e => setTeamName(e.target.value)}
                     required
                     className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
-                    placeholder="e.g. Pune Striker Kings"
+                    placeholder="e.g. Striker Kings"
                   />
                 </div>
               )}
@@ -344,7 +344,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                     value={city}
                     onChange={e => setCity(e.target.value)}
                     className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
-                    placeholder="e.g. Pune"
+                    placeholder="City"
                   />
                 </div>
               </div>

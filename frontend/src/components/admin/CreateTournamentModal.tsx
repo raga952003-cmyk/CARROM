@@ -34,7 +34,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   const [category, setCategory] = useState<'singles' | 'doubles' | 'both'>('both');
   const [format, setFormat] = useState<TournamentFormat>('league_knockout');
   const [venue, setVenue] = useState('City Sports Arena');
-  const [city, setCity] = useState('Pune');
+  const [city, setCity] = useState('');
   const [numberOfBoards, setNumberOfBoards] = useState(4);
   const [entryFee, setEntryFee] = useState(500);
   const [prizePool, setPrizePool] = useState('₹50,000 + Trophies');
@@ -182,7 +182,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                   value={name}
                   onChange={e => setName(e.target.value)}
                   className="w-full text-xs px-3 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B] focus:border-transparent font-medium"
-                  placeholder="e.g. Pune Carrom Championship 2026"
+                  placeholder="e.g. Annual Carrom Championship 2026"
                   required
                 />
               </div>
@@ -261,7 +261,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                     value={city}
                     onChange={e => setCity(e.target.value)}
                     className="w-full text-xs px-3 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
-                    placeholder="e.g. Pune"
+                    placeholder="City"
                   />
                 </div>
               </div>

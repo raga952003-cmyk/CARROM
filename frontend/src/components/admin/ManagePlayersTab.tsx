@@ -30,7 +30,7 @@ export const ManagePlayersTab: React.FC = () => {
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [club, setClub] = useState('');
-  const [city, setCity] = useState('Pune');
+  const [city, setCity] = useState('');
   const [rating, setRating] = useState(1500);
   const [seed, setSeed] = useState<number | undefined>(undefined);
 
@@ -47,7 +47,7 @@ export const ManagePlayersTab: React.FC = () => {
     setEmail('');
     setPhone('');
     setClub('');
-    setCity('Pune');
+    setCity('');
     setRating(1500);
     setSeed(undefined);
     setIsModalOpen(true);
@@ -59,7 +59,7 @@ export const ManagePlayersTab: React.FC = () => {
     setEmail(p.email || '');
     setPhone(p.phone || '');
     setClub(p.club || '');
-    setCity(p.city || 'Pune');
+    setCity(p.city || '');
     setRating(p.rating || 1500);
     setSeed(p.seed);
     setIsModalOpen(true);
@@ -188,7 +188,7 @@ export const ManagePlayersTab: React.FC = () => {
                       </div>
                       <div className="text-[10px] text-gray-500 flex items-center gap-1">
                         <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
-                        <span>{player.city || 'Pune'}</span>
+                        <span>{player.city || '—'}</span>
                       </div>
                     </td>
 

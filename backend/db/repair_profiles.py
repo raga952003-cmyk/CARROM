@@ -46,7 +46,7 @@ def main(apply: bool) -> int:
             # Only 'admin' and 'player' are valid; anything else is a player.
             "role": "admin" if md.get("role") == "admin" else "player",
             "club": md.get("club") or "Independent",
-            "city": md.get("city") or "Pune",
+            "city": md.get("city"),
             "rating": md.get("rating") or 1500,
             "phone": md.get("phone"),
         })

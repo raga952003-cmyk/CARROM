@@ -87,7 +87,7 @@ def _profile_from_token(user) -> dict:
         "role": app_meta.get("role") or user_meta.get("role") or "player",
         "rating": user_meta.get("rating") or 1500,
         "club": user_meta.get("club") or "Independent",
-        "city": user_meta.get("city") or "Pune",
+        "city": user_meta.get("city"),
     }
 
 

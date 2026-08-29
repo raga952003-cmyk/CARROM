@@ -51,7 +51,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const [addMode, setAddMode] = useState<'select' | 'create'>('select');
   const [newName, setNewName] = useState('');
   const [newClub, setNewClub] = useState('');
-  const [newCity, setNewCity] = useState('Pune');
+  const [newCity, setNewCity] = useState('');
   const [newRating, setNewRating] = useState('1500');
   const [newSeed, setNewSeed] = useState('');
 
@@ -109,7 +109,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const resetAddForm = () => {
     setNewName('');
     setNewClub('');
-    setNewCity('Pune');
+    setNewCity('');
     setNewRating('1500');
     setNewSeed('');
     setTeamName('');
@@ -136,7 +136,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
           const newPlayerId = await createPlayerAccount({
             name: newName.trim(),
             club: newClub || 'Independent',
-            city: newCity || 'Pune',
+            city: newCity || undefined,
             rating: Number(newRating) || 1500,
             seed: newSeed ? Number(newSeed) : undefined
           });
@@ -144,7 +144,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
             id: newPlayerId,
             name: newName.trim(),
             club: newClub || 'Independent',
-            city: newCity || 'Pune',
+            city: newCity || undefined,
             rating: Number(newRating) || 1500,
             seed: newSeed ? Number(newSeed) : undefined
           } as Player);
@@ -574,7 +574,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                           type="text"
                           value={newCity}
                           onChange={e => setNewCity(e.target.value)}
-                          placeholder="e.g. Pune"
+                          placeholder="City"
                           className="w-full p-2 border border-gray-200 rounded-lg bg-white text-xs"
                         />
                       </div>

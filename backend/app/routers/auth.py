@@ -152,7 +152,7 @@ async def login(data: LoginSchema):
                 "role": role,
                 "rating": 1500,
                 "club": "Independent",
-                "city": "Pune"
+                "city": None
             }
         else:
             profile_data = profile_response.data[0]

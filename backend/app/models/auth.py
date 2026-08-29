@@ -7,7 +7,7 @@ class SignUpSchema(BaseModel):
     name: str
     role: str = "player"  # "player" or "admin"
     club: Optional[str] = "Independent"
-    city: Optional[str] = "Pune"
+    city: Optional[str] = None
     phone: Optional[str] = None
     rating: Optional[int] = 1500
 

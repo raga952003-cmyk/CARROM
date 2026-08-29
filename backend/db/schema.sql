@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     name TEXT NOT NULL,
     avatar TEXT,
     club TEXT DEFAULT 'Independent',
-    city TEXT DEFAULT 'Pune',
+    city TEXT,
     rating INTEGER DEFAULT 1500 CHECK (rating >= 0),
     phone TEXT,
     email TEXT,

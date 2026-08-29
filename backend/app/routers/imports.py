@@ -167,7 +167,7 @@ async def confirm_bulk_import(
                 continue
 
             club = entry.get("club") or "Independent"
-            city = entry.get("city") or "Pune"
+            city = entry.get("city")
             rating = int(entry.get("rating") or 1500)
 
             matched = _find_profile(admin_db, name, entry.get("email"), by_email, by_name)

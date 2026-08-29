@@ -6,7 +6,7 @@ class PlayerSchema(BaseModel):
     name: str
     avatar: Optional[str] = None
     club: Optional[str] = "Independent"
-    city: Optional[str] = "Pune"
+    city: Optional[str] = None
     rating: Optional[int] = 1500
     seed: Optional[int] = None
     phone: Optional[str] = None

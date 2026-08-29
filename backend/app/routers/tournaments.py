@@ -388,7 +388,7 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
                             "name": data.partner_name,
                             "role": "player",
                             "club": profile.get("club", "Independent"),
-                            "city": profile.get("city", "Pune")
+                            "city": profile.get("city")
                         }
                     })
                     admin_db.auth.admin.update_user_by_id(

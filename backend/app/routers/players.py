@@ -68,7 +68,7 @@ async def create_player(data: PlayerSchema, admin = Depends(verify_admin)):
         profile_update = {
             "name": data.name,
             "club": data.club or "Independent",
-            "city": data.city or "Pune",
+            "city": data.city,
             "rating": data.rating or 1500,
             "phone": data.phone
         }

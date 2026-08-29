@@ -36,7 +36,7 @@ export const AuthPortal: React.FC = () => {
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [club, setClub] = useState('');
-  const [city, setCity] = useState('Pune');
+  const [city, setCity] = useState('');
   const [securityCode, setSecurityCode] = useState('');
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
@@ -265,7 +265,7 @@ export const AuthPortal: React.FC = () => {
                             value={city}
                             onChange={e => setCity(e.target.value)}
                             className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
-                            placeholder="Pune"
+                            placeholder="City"
                           />
                         </div>
                       </div>

@@ -106,7 +106,7 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
               type: p.type === 'doubles' ? 'doubles' : 'singles',
               name: p.name || 'Unnamed Player',
               club: p.club || 'Independent',
-              city: p.city || 'Pune',
+              city: p.city || undefined,
               rating: p.rating || 1500,
               seed: p.seed ?? null,
               email: p.email ?? null,
@@ -141,7 +141,7 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
               type: 'singles' as const,
               name: p.name || 'Unnamed Player',
               club: p.club || 'Independent',
-              city: p.city || 'Pune',
+              city: p.city || undefined,
               rating: p.rating || 1500,
               seed: p.seed || null,
               selected: true
@@ -162,7 +162,7 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
           type: 'singles' as const,
           name: parts[0]?.trim() || `Player ${idx + 1}`,
           club: parts[1]?.trim() || 'Independent',
-          city: parts[2]?.trim() || 'Pune',
+          city: parts[2]?.trim() || undefined,
           rating: parseInt(parts[3]) || 1500 + Math.floor(Math.random() * 200),
           seed: parts[4] ? parseInt(parts[4]) : null,
           selected: true

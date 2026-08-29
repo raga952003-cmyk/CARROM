@@ -96,7 +96,7 @@ async def parse_participants(data: ParseRequest, admin = Depends(verify_admin)):
     prompt = (
         "You are a data extraction assistant. Parse this raw list of carrom "
         "players into structured entries.\n"
-        "1. Extract name, club (default 'Independent'), city (default 'Pune'), "
+        "1. Extract name, club (default 'Independent'), city (leave blank if absent), "
         "rating (default 1500) and seed (integer or null).\n"
         "2. Strip numbering prefixes like '1.' or '2)', stray symbols and header rows.\n"
         "3. If only a name is present, use the defaults for the rest.\n\n"

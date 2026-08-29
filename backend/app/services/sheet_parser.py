@@ -239,7 +239,7 @@ def parse_participants(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], List[str
 
         emp = _emp(row[cols["emp"]]) if cols["emp"] and cols["emp"] in row.index else None
         club = _cell(row, cols["club"], "Independent")
-        city = _cell(row, cols["city"], "Pune")
+        city = _cell(row, cols["city"], "")
         rating = _number(row, cols["rating"], 1500, errors,
                          f"Row {line} ({name}): rating is not a number, defaulted to 1500.")
         seed = _number(row, cols["seed"], None, errors,
@@ -274,7 +274,7 @@ def parse_participants(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], List[str
         return {
             "name": person["name"], "empId": person.get("empId"),
             "club": person.get("club") or "Independent",
-            "city": person.get("city") or "Pune",
+            "city": person.get("city") or None,
             "rating": person.get("rating") or 1500,
             "email": person.get("email"), "phone": person.get("phone"),
             "selected": True, **extra,
