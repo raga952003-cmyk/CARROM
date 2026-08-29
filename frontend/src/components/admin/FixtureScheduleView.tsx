@@ -41,9 +41,28 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   } = useTournament();
 
   const [viewMode, setViewMode] = useState<'rounds' | 'boards'>('rounds');
-  const [restMinutes, setRestMinutes] = useState(10);
+  // A one-minute turnaround is a real option: on a small draw the boards
+  // are free again as soon as the previous pair stand up.
+  const [restMinutes, setRestMinutes] = useState(1);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [isAddMatchOpen, setIsAddMatchOpen] = useState(false);
+  // Generating deletes the existing draw before writing the new one, so a
+  // second click while the first is running erases what it has just written.
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState('');
+
+  const runGenerate = async () => {
+    if (isGenerating) return;
+    setIsGenerating(true);
+    setGenerateError('');
+    try {
+      await generateFixturesForTournament(tournament.id);
+    } catch (e: any) {
+      setGenerateError(e?.message || 'Could not generate fixtures.');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
   const [selectedRoundFilter, setSelectedRoundFilter] = useState<string>('all');
 
   const allMatches = tournament.matches || [];
@@ -118,6 +137,8 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                   onChange={e => setRestMinutes(parseInt(e.target.value))}
                   className="bg-transparent font-bold text-gray-800 focus:outline-hidden"
                 >
+                  <option value={1}>1 min</option>
+                  <option value={2}>2 mins</option>
                   <option value={5}>5 mins</option>
                   <option value={10}>10 mins</option>
                   <option value={15}>15 mins</option>
@@ -128,22 +149,24 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
               {!hasMatches ? (
                 <button
                   id="generate-fixtures-btn"
-                  onClick={() => generateFixturesForTournament(tournament.id)}
+                  onClick={runGenerate}
+                  disabled={isGenerating}
                   className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5"
                 >
                   <Sparkles className="w-4 h-4 text-[#D4A72C]" />
-                  <span>Generate Fixtures</span>
+                  <span>{isGenerating ? 'Generating…' : 'Generate Fixtures'}</span>
                 </button>
               ) : (
                 <>
                   <button
                     id="generate-fixtures-btn"
-                    onClick={() => generateFixturesForTournament(tournament.id)}
+                    onClick={runGenerate}
+                  disabled={isGenerating}
                     className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#0B5D3B] text-xs font-bold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1.5"
                     title="Regenerate pairings & match bracket"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Generate Fixtures</span>
+                    <span>{isGenerating ? 'Generating…' : 'Generate Fixtures'}</span>
                   </button>
 
                   {!tournament.scheduledPublished && (
@@ -241,11 +264,12 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           </p>
           {role === 'admin' && (
             <button
-              onClick={() => generateFixturesForTournament(tournament.id)}
+              onClick={runGenerate}
+                  disabled={isGenerating}
               className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md inline-flex items-center gap-2"
             >
               <Sparkles className="w-4 h-4 text-[#D4A72C]" />
-              <span>Generate Automatic Fixtures</span>
+              <span>{isGenerating ? 'Generating…' : 'Generate Automatic Fixtures'}</span>
             </button>
           )}
         </div>
@@ -501,6 +525,12 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {generateError && (
+        <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800">
+          {generateError}
         </div>
       )}
 

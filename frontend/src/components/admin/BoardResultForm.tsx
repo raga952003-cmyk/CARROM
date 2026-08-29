@@ -72,6 +72,7 @@ interface BoardResultFormProps {
  */
 const SimpleBoardForm: React.FC<BoardResultFormProps> = ({ match, rules, value, onChange }) => {
   const coinsPerSide = rules.coinsPerSide ?? 9;
+  const maxCoins = (rules as any).maxCoinsOnBoard ?? 15;
   const p1 = match.player1Name;
   const p2 = match.player2Name;
 
@@ -123,7 +124,7 @@ const SimpleBoardForm: React.FC<BoardResultFormProps> = ({ match, rules, value, 
           <span>Coins Remaining on Board</span>
         </label>
         <div className="flex flex-wrap gap-1.5">
-          {Array.from({ length: coinsPerSide + 1 }, (_, n) => n).map(n => (
+          {Array.from({ length: maxCoins + 1 }, (_, n) => n).map(n => (
             <button
               key={n}
               type="button"
@@ -163,6 +164,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
   const p1 = match.player1Name.split(' ')[0];
   const p2 = match.player2Name.split(' ')[0];
   const coinsPerSide = rules.coinsPerSide ?? 9;
+  const maxCoins = (rules as any).maxCoinsOnBoard ?? 15;
   const set = (patch: Partial<BoardObservation>) => onChange({ ...value, ...patch });
   const result = previewBoard(value, rules,
     { player1: match.player1Name, player2: match.player2Name });
@@ -223,7 +225,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
           <div className="mt-2">
             <span className="block text-[11px] font-semibold text-gray-600 mb-1">How many coins?</span>
             <div className="flex flex-wrap gap-1">
-              {Array.from({ length: coinsPerSide + 1 }, (_, n) => n).map(n => (
+              {Array.from({ length: maxCoins + 1 }, (_, n) => n).map(n => (
                 <button
                   key={n}
                   type="button"
@@ -242,7 +244,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
         )}
 
         <p className="text-[10px] text-gray-500 mt-1.5">
-          The board winner scores these coins. {coinsPerSide} coins a side.
+          The board winner scores these coins.
         </p>
       </div>
 

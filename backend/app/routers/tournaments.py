@@ -167,6 +167,33 @@ _PROBE_RETRY_SECONDS = 30
 _sets_supported: Dict[str, Any] = {}
 
 
+# Generating a draw deletes every existing match before writing the new ones.
+# Two runs at once therefore erase each other's work: the second delete removes
+# what the first has inserted so far, both keep inserting, and the tournament
+# ends up with duplicate match numbers and matches the UI is still pointing at
+# that no longer exist ("Match not found" on the next action).
+# In-process, so it guards a single server. On a serverless platform each
+# request may land on a different instance and this will not see the other run
+# — the real protections there are that the draw now takes about a second
+# instead of minutes, and that the button disables while it is running.
+_generating: Dict[str, float] = {}
+_GENERATE_LOCK_SECONDS = 300
+
+
+def _claim_generation(tournament_id: str) -> bool:
+    """True if this caller may generate; False if a run is already under way."""
+    now = time.monotonic()
+    started = _generating.get(tournament_id)
+    if started is not None and now - started < _GENERATE_LOCK_SECONDS:
+        return False
+    _generating[tournament_id] = now
+    return True
+
+
+def _release_generation(tournament_id: str) -> None:
+    _generating.pop(tournament_id, None)
+
+
 def sets_supported(admin_db) -> bool:
     cached = _sets_supported.get("value")
     if cached is True:
@@ -458,9 +485,17 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
 @router.post("/{id}/fixtures")
 async def generate_fixtures(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
+    if not _claim_generation(id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Fixtures are already being generated for this tournament. "
+                "Wait for that to finish before starting another draw."
+            ),
+        )
     try:
         t = require_tournament_access(admin_db, id, admin, "tournament.fixtures")
-        
+
         # Load approved registrations
         reg_res = admin_db.table("registrations").select("*, player:profiles(*), team:teams(*)").eq("tournament_id", id).eq("status", "approved").execute()
         regs = reg_res.data
@@ -548,6 +583,8 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
         admin_db.table("matches").delete().eq("tournament_id", id).execute()
 
         # Insert new matches & boards
+        match_rows: List[Dict[str, Any]] = []
+        board_rows: List[Dict[str, Any]] = []
         for match in matches:
             match_payload = {
                 "id": str(uuid.uuid4()),  # Convert string mock IDs to true UUIDs
@@ -578,11 +615,15 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
             if number_of_sets > 1:
                 match_payload["number_of_sets"] = number_of_sets
 
-            inserted_match = admin_db.table("matches").insert(match_payload).execute()
-            match_id = inserted_match.data[0]["id"]
-            match["db_uuid"] = match_id  # Save reference for bracket linking
+            # The id is generated here, so the boards can be built now and the
+            # whole draw written in a handful of round trips instead of one per
+            # row. A 63-match draw was 63 match inserts plus 500-odd board
+            # inserts, which took long enough that organisers clicked Generate
+            # again and got a second draw on top of the first.
+            match_id = match_payload["id"]
+            match["db_uuid"] = match_id
+            match_rows.append(match_payload)
 
-            # Create boards
             for board in match["boards"]:
                 set_number = board.get("setNumber", 1)
                 board_payload = {
@@ -595,7 +636,35 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
                 }
                 if number_of_sets > 1:
                     board_payload["set_number"] = set_number
-                admin_db.table("boards").insert(board_payload).execute()
+                board_rows.append(board_payload)
+
+        def insert_in_chunks(table: str, rows: List[Dict[str, Any]], size: int = 200) -> None:
+            for start in range(0, len(rows), size):
+                admin_db.table(table).insert(rows[start:start + size]).execute()
+
+        try:
+            insert_in_chunks("matches", match_rows)
+            insert_in_chunks("boards", board_rows)
+        except Exception as e:
+            # A board whose match has vanished mid-write means another draw ran
+            # at the same time and deleted it. The in-process guard cannot see a
+            # run on a different serverless instance, so this is the backstop:
+            # say what happened instead of surfacing a raw constraint violation.
+            if "boards_match_id_fkey" in str(e) or "23503" in str(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Another draw was generated for this tournament while this "
+                        "one was being written, so this draw was abandoned. "
+                        "Reload the fixtures and generate once more if they look wrong."
+                    ),
+                )
+            raise
+        logger.info(
+            "Fixtures for %s: %d matches, %d boards written in %d request(s).",
+            id, len(match_rows), len(board_rows),
+            -(-len(match_rows) // 200) + -(-len(board_rows) // 200),
+        )
 
         # Update knockout parent references with database-assigned UUIDs
         if format_type in ("knockout", "league_knockout", "hybrid"):
@@ -635,6 +704,10 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        # Released whether the draw succeeded or failed, so a failure does not
+        # lock the tournament out of ever generating again.
+        _release_generation(id)
 
 @router.post("/{id}/schedule")
 async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depends(verify_admin)):
