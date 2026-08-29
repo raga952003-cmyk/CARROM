@@ -9,6 +9,7 @@ export interface ScoringRules {
   boardsPerSet: number;
   coinValue: number;
   setWinnerRule: 'total_points' | 'board_wins';
+  boardEntryMode: 'simple' | 'detailed';
   coinsPerSide: number;
   queenPoints: number;
   queenMustBeCovered: boolean;
@@ -22,6 +23,7 @@ export const defaultScoringRules: ScoringRules = {
   boardsPerSet: 8,
   coinValue: 1,
   setWinnerRule: 'total_points',
+  boardEntryMode: 'simple',
   coinsPerSide: 9,
   queenPoints: 3,
   queenMustBeCovered: true,
@@ -100,6 +102,24 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             </option>
             <option value="classic">Each player scores the coins they pocketed</option>
           </select>
+        </div>
+
+        <div className="sm:col-span-2">
+          <label className="block text-[11px] font-bold text-gray-700 mb-1">
+            What the scorer enters per board
+          </label>
+          <select
+            value={value.boardEntryMode}
+            onChange={e => set({ boardEntryMode: e.target.value as ScoringRules['boardEntryMode'] })}
+            className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
+          >
+            <option value="simple">Who finished, and coins left on the board</option>
+            <option value="detailed">Also the queen and penalties</option>
+          </select>
+          <p className="text-[10px] text-gray-500 mt-1">
+            Simple is two taps a board. Choose the longer sheet only if this
+            tournament actually scores a queen bonus or penalties.
+          </p>
         </div>
 
         <div className="sm:col-span-2">

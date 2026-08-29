@@ -42,6 +42,9 @@ class TournamentRulesSchema(BaseCamelModel):
     # on boards can go to the other player than a set won on points.
     coin_value: Optional[int] = None
     set_winner_rule: Optional[str] = None   # total_points | board_wins
+    # What the scorer is asked for on a board: 'simple' is who finished
+    # and the coins left; 'detailed' adds the queen and penalties.
+    board_entry_mode: Optional[str] = None
 
 class PosterConfigSchema(BaseCamelModel):
     theme_style: str = "emerald_gold"

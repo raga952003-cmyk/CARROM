@@ -377,8 +377,12 @@ async def submit_board(
             # board are three separate facts and none is inferred from another.
             outcome = board_result(
                 winner=data.board_winner or "none",
-                p1_coins_pocketed=data.p1_coins_pocketed or 0,
-                p2_coins_pocketed=data.p2_coins_pocketed or 0,
+                # Passed through as-is: the engine treats None as "not counted"
+                # and skips the cross-check. Coercing it to 0 here made every
+                # board look like nobody had pocketed anything, so the check
+                # compared against a full board and warned on every entry.
+                p1_coins_pocketed=data.p1_coins_pocketed,
+                p2_coins_pocketed=data.p2_coins_pocketed,
                 coins_remaining_with=data.coins_remaining_with,
                 coins_remaining=data.coins_remaining,
                 queen_pocketed_by=data.queen_pocketed_by or data.queen_claimed_by,

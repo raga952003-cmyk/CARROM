@@ -216,6 +216,12 @@ export interface TournamentRules {
   coinValue?: number;
   /** How a set is decided: on total points, or on boards won. */
   setWinnerRule?: 'total_points' | 'board_wins';
+  /**
+   * What the scorer is asked for on a board.
+   * 'simple'   — who finished, and how many coins were left. Nothing else.
+   * 'detailed' — adds the queen (pocketed by / covered by) and penalties.
+   */
+  boardEntryMode?: 'simple' | 'detailed';
   matchDurationMinutes: number;
   restTimeMinutes: number;
   /** 1 = one league for everyone; higher splits the league phase into groups. */

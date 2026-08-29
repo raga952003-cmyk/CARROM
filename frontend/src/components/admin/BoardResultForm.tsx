@@ -61,7 +61,105 @@ interface BoardResultFormProps {
  * whose coins are left — each answered on its own. The score is the
  * consequence, shown live so it can be checked before it is saved.
  */
+/**
+ * The simple board sheet: who finished, how many coins were left, and what
+ * that scores.
+ *
+ * The full sheet asks four questions and shows a running explanation. Most
+ * tournaments do not play with a queen bonus or penalties, and for them all
+ * that detail is four ways to get the entry wrong. This asks two questions and
+ * shows the answer.
+ */
+const SimpleBoardForm: React.FC<BoardResultFormProps> = ({ match, rules, value, onChange }) => {
+  const coinsPerSide = rules.coinsPerSide ?? 9;
+  const p1 = match.player1Name;
+  const p2 = match.player2Name;
+
+  // The coins left on the board are the loser's, so naming the winner is
+  // enough — the umpire never has to say whose they are.
+  const setWinner = (winner: Side) =>
+    onChange({
+      ...value,
+      winner,
+      coinsRemainingWith: winner === 'none' ? 'none' : (winner === 'player1' ? 'player2' : 'player1'),
+      queenPocketedBy: 'none',
+      queenCoveredBy: 'none',
+      p1Penalty: 0,
+      p2Penalty: 0,
+    });
+
+  const setCoins = (n: number) => onChange({ ...value, coinsRemaining: n });
+  const result = previewBoard(value, rules, { player1: p1, player2: p2 });
+  const points = value.winner === 'player1' ? result.p1 : value.winner === 'player2' ? result.p2 : 0;
+
+  return (
+    <div className="space-y-4 text-xs">
+      <div>
+        <label className="font-bold text-gray-800 mb-1.5 flex items-center gap-1">
+          <Flame className="w-3.5 h-3.5 text-emerald-700" />
+          <span>Finished By</span>
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          {([['player1', p1], ['player2', p2]] as [Side, string][]).map(([side, name]) => (
+            <button
+              key={side}
+              type="button"
+              onClick={() => setWinner(side)}
+              className={`py-3 px-2 rounded-xl text-center font-bold text-sm border-2 transition-all truncate ${
+                value.winner === side
+                  ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]'
+                  : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <label className="font-bold text-gray-800 mb-1.5 flex items-center gap-1">
+          <Circle className="w-3.5 h-3.5 text-sky-700" />
+          <span>Coins Remaining on Board</span>
+        </label>
+        <div className="flex flex-wrap gap-1.5">
+          {Array.from({ length: coinsPerSide + 1 }, (_, n) => n).map(n => (
+            <button
+              key={n}
+              type="button"
+              onClick={() => setCoins(n)}
+              className={`w-9 h-9 rounded-lg text-sm font-bold border-2 transition-all ${
+                value.coinsRemaining === n
+                  ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]'
+                  : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="p-4 rounded-xl bg-[#0B5D3B] text-white text-center">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-200">
+          Total Points
+        </div>
+        <div className="text-4xl font-black tabular-nums mt-0.5">{points}</div>
+        <div className="text-[11px] text-emerald-200 mt-0.5 truncate">
+          {value.winner === 'none'
+            ? 'Choose who finished the board'
+            : `to ${value.winner === 'player1' ? p1 : p2}`}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, value, onChange }) => {
+  if ((rules as any).boardEntryMode !== 'detailed') {
+    return <SimpleBoardForm match={match} rules={rules} value={value} onChange={onChange} />;
+  }
+
   const p1 = match.player1Name.split(' ')[0];
   const p2 = match.player2Name.split(' ')[0];
   const coinsPerSide = rules.coinsPerSide ?? 9;
