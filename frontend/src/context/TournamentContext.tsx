@@ -174,7 +174,20 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   activeMatchRef.current = activeMatch;
   activeTournamentIdRef.current = activeTournamentId;
 
+  // Realtime changes, the fallback interval and every explicit call all reach
+  // refreshData. Without a guard they overlap, so one page reload aborted five
+  // copies of the same request and logged five identical failures.
+  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const lastRefreshError = useRef<string>('');
+
   const refreshData = async () => {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const run = doRefresh().finally(() => { refreshInFlight.current = null; });
+    refreshInFlight.current = run;
+    return run;
+  };
+
+  const doRefresh = async () => {
     try {
       // 1. Fetch Tournaments
       const tournamentsData = await tournamentService.getAllTournaments();
@@ -197,6 +210,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       setNotifications(notificationsData);
 
       // 4. Reload active match if it exists
+      lastRefreshError.current = '';
+
       const openMatch = activeMatchRef.current;
       if (openMatch) {
         const freshT = tournamentsData.find(t => t.id === openMatch.tournamentId);
@@ -209,10 +224,15 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       // An expired session already triggers a sign-out through
       // AUTH_EXPIRED_EVENT; logging every polled failure just floods the
       // console with the same message.
+      // A request torn down by navigation is not a failure, and an expired
+      // session already signs out through AUTH_EXPIRED_EVENT.
+      if (error?.isNavigationAbort) return;
       const message = error?.message || '';
-      if (!/sign in again|Not authenticated|expired/i.test(message)) {
-        console.error('Failed to refresh data from Python Backend:', error);
-      }
+      if (/sign in again|Not authenticated|expired/i.test(message)) return;
+      // Polling means the same outage reports itself every cycle; say it once.
+      if (message === lastRefreshError.current) return;
+      lastRefreshError.current = message;
+      console.error('Failed to refresh data from Python Backend:', error);
     }
   };
 

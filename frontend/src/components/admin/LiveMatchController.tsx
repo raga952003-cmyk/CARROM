@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Play, 
   Pause, 
@@ -62,6 +62,19 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   // board lookup has to be qualified by it.
   const [activeSet, setActiveSet] = useState<number>(1);
   const setBoards = match.boards.filter(b => (b.setNumber || 1) === activeSet);
+
+  // When every board of the current set is in, move to the next set that still
+  // has boards. Without this the scorer reaches 4 of 4 with no Submit button
+  // left and no indication that two more sets are waiting behind a tab.
+  useEffect(() => {
+    if (totalSets <= 1) return;
+    const done = setBoards.length > 0 && setBoards.every(b => b.status === 'completed');
+    if (!done) return;
+    const nextSet = Array.from({ length: totalSets }, (_, i) => i + 1)
+      .find(n => n > activeSet &&
+        match.boards.some(b => (b.setNumber || 1) === n && b.status !== 'completed'));
+    if (nextSet) setActiveSet(nextSet);
+  }, [totalSets, activeSet, match.boards]);
 
   const [activeBoardNumber, setActiveBoardNumber] = useState<number>(() => {
     const inProgress = setBoards.find(b => b.status === 'in_progress');

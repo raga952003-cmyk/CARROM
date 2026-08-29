@@ -23,6 +23,28 @@ const EXPIRY_KEY = 'auth_expires_at';
  * the app still believed it was signed in, and the refresh loop then retried
  * forever against an empty token.
  */
+/**
+ * A request killed because the page is going away is not a failure worth
+ * reporting. Navigating or reloading rejects every in-flight fetch with a
+ * TypeError, which otherwise reached the user as "your change was not saved"
+ * and filled the console on every single page transition.
+ */
+let pageIsUnloading = false;
+if (typeof window !== 'undefined') {
+  const markUnloading = () => { pageIsUnloading = true; };
+  window.addEventListener('pagehide', markUnloading);
+  window.addEventListener('beforeunload', markUnloading);
+}
+
+/** Thrown when the page tore the request down; callers should stay quiet. */
+export class NavigationAbortError extends Error {
+  readonly isNavigationAbort = true;
+  constructor() {
+    super('Request cancelled because the page was navigating away.');
+    this.name = 'NavigationAbortError';
+  }
+}
+
 export const AUTH_EXPIRED_EVENT = 'carrom:auth-expired';
 
 class ApiClient {
@@ -192,6 +214,9 @@ class ApiClient {
       // unreachable and the user saw a bare "Failed to fetch" instead of being
       // told their change was not saved.
       if (error instanceof TypeError || !navigator.onLine) {
+        if (pageIsUnloading) {
+          throw new NavigationAbortError();
+        }
         throw new Error(
           navigator.onLine
             ? 'Could not reach the server. Your change was not saved — try again.'
