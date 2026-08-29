@@ -103,3 +103,21 @@ class RegistrationCreateSchema(BaseCamelModel):
     partner_phone: Optional[str] = None
     partner_email: Optional[str] = None
     notes: Optional[str] = None
+
+
+class ManualMatchSchema(BaseCamelModel):
+    """
+    One fixture added by hand.
+
+    Generated draws cover everyone entered when the draw was made. A player who
+    joins after that, a rematch ordered by the referee, or a play-off the format
+    does not produce all need a single match created on its own without
+    redrawing the tournament and losing the results already recorded.
+    """
+    stage: str = "league"                 # 'league' | 'knockout'
+    round_name: str = "League"            # what the round is called on screen
+    player1_id: str
+    player2_id: str
+    board_number: Optional[int] = None
+    scheduled_date: Optional[str] = None
+    scheduled_time: Optional[str] = None

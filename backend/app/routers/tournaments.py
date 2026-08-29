@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
-from app.models.tournament import TournamentCreateSchema, TournamentUpdateSchema, RegistrationCreateSchema
+from app.models.tournament import (
+    TournamentCreateSchema, TournamentUpdateSchema, RegistrationCreateSchema, ManualMatchSchema,
+)
 from app.utils.security import get_user_profile, verify_admin
 from app.utils.serializers import (
     serialize_tournament,
@@ -736,6 +738,124 @@ async def publish_schedule(id: str, admin = Depends(verify_admin)):
             "status": "success",
             "message": f"Schedule published and notified {delivered} participant(s)."
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{id}/matches")
+async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(verify_admin)):
+    """
+    Add a single fixture to a tournament that already has a draw.
+
+    Regenerating fixtures rebuilds every match and discards the boards already
+    scored, so it is not an option once play has started. This creates one match
+    beside the existing ones, with the boards and sets the tournament's own
+    rules call for.
+    """
+    admin_db = get_admin_db()
+    try:
+        t = require_tournament_access(admin_db, id, admin, "tournament.manage")
+
+        if data.player1_id == data.player2_id:
+            raise HTTPException(status_code=422, detail="A player cannot be fixtured against themselves.")
+        if data.stage not in ("league", "knockout"):
+            raise HTTPException(status_code=422, detail="Stage must be 'league' or 'knockout'.")
+
+        # Both sides have to be in this tournament, and approved.
+        regs = admin_db.table("registrations").select(
+            "*, player:profiles(*), team:teams(*)"
+        ).eq("tournament_id", id).eq("status", "approved").execute().data or []
+
+        entrants: Dict[str, Dict[str, Any]] = {}
+        for r in regs:
+            if r["type"] == "singles" and r.get("player"):
+                entrants[r["player"]["id"]] = {"name": r["player"]["name"], "type": "singles"}
+            elif r["type"] == "doubles" and r.get("team"):
+                entrants[r["team"]["id"]] = {"name": r["team"]["name"], "type": "doubles"}
+
+        for slot, pid in (("Player 1", data.player1_id), ("Player 2", data.player2_id)):
+            if pid not in entrants:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{slot} is not an approved entrant in this tournament.",
+                )
+        p1, p2 = entrants[data.player1_id], entrants[data.player2_id]
+        if p1["type"] != p2["type"]:
+            raise HTTPException(
+                status_code=422,
+                detail="A singles player cannot be fixtured against a doubles team.",
+            )
+
+        rules = t.get("rules") or {}
+        max_boards = int(rules.get("maxBoardsPerMatch") or 3)
+        number_of_sets = int(rules.get("numberOfSets") or 1)
+        boards_per_set = int(rules.get("boardsPerSet") or max_boards)
+        if not sets_supported(admin_db):
+            number_of_sets = 1
+        if number_of_sets > 1:
+            max_boards = boards_per_set
+
+        existing = admin_db.table("matches").select("match_number, round_index").eq(
+            "tournament_id", id).execute().data or []
+        next_number = max((m.get("match_number") or 0) for m in existing) + 1 if existing else 1
+        round_index = max((m.get("round_index") or 0) for m in existing) if existing else 0
+
+        match_payload = {
+            "id": str(uuid.uuid4()),
+            "tournament_id": id,
+            "match_number": next_number,
+            "round_name": data.round_name or ("Knockout" if data.stage == "knockout" else "League"),
+            # Sits at the end of the draw so it never reorders existing rounds.
+            "round_index": round_index,
+            "stage": data.stage,
+            "type": p1["type"],
+            "player1_id": data.player1_id,
+            "player2_id": data.player2_id,
+            "player1_name": p1["name"],
+            "player2_name": p2["name"],
+            "board_number": data.board_number or 1,
+            "status": "scheduled",
+            "max_boards": max_boards,
+            "target_points": rules.get("targetScore", 29),
+            # Marked so it is distinguishable from a drawn fixture later.
+            "bracket_position": {"manual": True, "addedBy": admin.get("name")},
+        }
+        if data.scheduled_date:
+            match_payload["scheduled_date"] = data.scheduled_date
+        if data.scheduled_time:
+            match_payload["scheduled_time"] = data.scheduled_time
+        if number_of_sets > 1:
+            match_payload["number_of_sets"] = number_of_sets
+
+        created = admin_db.table("matches").insert(match_payload).execute()
+        match_id = created.data[0]["id"]
+
+        for set_number in range(1, number_of_sets + 1):
+            for board_number in range(1, max_boards + 1):
+                board = {
+                    "match_id": match_id,
+                    "board_number": board_number,
+                    "status": "in_progress" if (set_number == 1 and board_number == 1) else "pending",
+                    "player1_score": 0,
+                    "player2_score": 0,
+                }
+                if number_of_sets > 1:
+                    board["set_number"] = set_number
+                admin_db.table("boards").insert(board).execute()
+
+        record_audit(
+            admin_db, actor=admin, action="match.added_manually",
+            entity_type="match", entity_id=match_id,
+            new_state={"round": match_payload["round_name"],
+                       "player1": p1["name"], "player2": p2["name"]},
+            request_context={"tournament_id": id},
+        )
+
+        rows = admin_db.table("matches").select("*").eq("id", match_id).execute().data
+        boards = admin_db.table("boards").select("*").eq("match_id", match_id).order("board_number").execute().data
+        return serialize_match(rows[0], boards or [])
     except HTTPException:
         raise
     except Exception as e:

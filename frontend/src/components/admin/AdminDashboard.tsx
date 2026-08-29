@@ -331,11 +331,6 @@ export const AdminDashboard: React.FC = () => {
                 </div>
 
                 <div className="flex items-center space-x-3 shrink-0">
-                  <div className="text-right hidden sm:block">
-                    <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Tournament Automation</p>
-                    <p className="text-sm font-bold text-[#2E7D32]">84% Operations Automated</p>
-                  </div>
-
                   <button
                     onClick={() => {
                       setSelectedTournamentForPoster(currentTournament);

@@ -15,12 +15,14 @@ import {
   ShieldCheck, 
   ArrowRight,
   Send,
-  Eye
+  Eye,
+  Plus
 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MatchTimer } from './MatchTimer';
+import { AddMatchModal } from './AddMatchModal';
 
 interface FixtureScheduleViewProps {
   tournament: Tournament;
@@ -41,6 +43,7 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const [viewMode, setViewMode] = useState<'rounds' | 'boards'>('rounds');
   const [restMinutes, setRestMinutes] = useState(10);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
+  const [isAddMatchOpen, setIsAddMatchOpen] = useState(false);
   const [selectedRoundFilter, setSelectedRoundFilter] = useState<string>('all');
 
   const allMatches = tournament.matches || [];
@@ -165,6 +168,17 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                       <span>Publish Schedule</span>
                     </button>
                   )}
+
+                  {/* Regenerating the draw discards every board already scored,
+                      so a late entrant needs one fixture added, not a redraw. */}
+                  <button
+                    id="add-match-btn"
+                    onClick={() => setIsAddMatchOpen(true)}
+                    className="px-4 py-2 bg-white hover:bg-gray-50 text-[#0B5D3B] border border-[#0B5D3B] text-xs font-bold rounded-xl transition-all flex items-center gap-1.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Match</span>
+                  </button>
                 </>
               )}
             </>
@@ -488,6 +502,14 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
             </div>
           ))}
         </div>
+      )}
+
+      {isAddMatchOpen && (
+        <AddMatchModal
+          tournament={tournament}
+          onClose={() => setIsAddMatchOpen(false)}
+          onAdded={() => setIsAddMatchOpen(false)}
+        />
       )}
 
       {/* Confirmation Modal to Publish Schedule */}

@@ -97,6 +97,16 @@ interface TournamentContextType {
   rejectRegistration: (tournamentId: string, regId: string) => Promise<void>;
   
   // Match & Board Live Controls
+  /** Add one fixture to a draw already in play, without redrawing it. */
+  addManualMatch: (tournamentId: string, match: {
+    stage: 'league' | 'knockout';
+    roundName: string;
+    player1Id: string;
+    player2Id: string;
+    boardNumber?: number;
+    scheduledDate?: string;
+    scheduledTime?: string;
+  }) => Promise<void>;
   recordToss: (matchId: string, toss: {
     coinResult?: string | null;
     tossWinnerId?: string | null;
@@ -501,6 +511,11 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   };
 
   // Match operations
+  const addManualMatch = async (tournamentId: string, match: any) => {
+    await apiClient.post(`/tournaments/${tournamentId}/matches`, match);
+    await refreshData();
+  };
+
   const recordToss = async (matchId: string, toss: any) => {
     await apiClient.post(`/matches/${matchId}/toss`, toss);
   };
@@ -635,6 +650,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         registerForTournament,
         approveRegistration,
         rejectRegistration,
+        addManualMatch,
         recordToss,
         startMatch,
         pauseMatch,

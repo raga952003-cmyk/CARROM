@@ -91,10 +91,6 @@ const TournamentApp: React.FC = () => {
               <ShieldCheck className="w-3.5 h-3.5" />
               <span>Conflict-Free Engine Active</span>
             </span>
-            <span>·</span>
-            <span className="flex items-center gap-1 text-gray-400">
-              <span>84% Operations Automated</span>
-            </span>
           </div>
         </div>
       </footer>
