@@ -1,10 +1,19 @@
+# Vercel installs from this file. Anything imported at runtime must be named
+# here even if it arrives locally as somebody else's transitive dependency —
+# email-validator did exactly that, so EmailStr worked on this machine and the
+# serverless function crashed on import.
 fastapi>=0.100.0
 uvicorn>=0.22.0
-pydantic>=2.0.0
+pydantic[email]>=2.0.0
+email-validator>=2.0.0
 pydantic-settings>=2.0.0
+# Arrives via pydantic-settings today; named here so it cannot vanish
+# when that changes.
+python-dotenv>=1.0.0
 supabase>=1.0.3
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 openpyxl>=3.1.2
 pandas>=2.0.0
 python-multipart>=0.0.6
+httpx>=0.24.0
