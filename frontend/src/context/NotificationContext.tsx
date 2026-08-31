@@ -125,7 +125,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
       // Kept for debugging, but only while developing. In production the
       // operator already has the toast, and a console line per failure is the
       // very noise this exists to remove.
-      if (import.meta.env.DEV) console.warn('[handled rejection]', reason);
+      if ((import.meta as any).env?.DEV) console.warn('[handled rejection]', reason);
     };
 
     const onError = (event: ErrorEvent) => {

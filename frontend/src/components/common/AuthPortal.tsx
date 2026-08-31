@@ -13,8 +13,7 @@ import {
   ArrowRight,
   UserPlus,
   Unlock,
-  AlertTriangle,
-  CheckCircle2
+  AlertTriangle
 } from 'lucide-react';
 import { useTournament } from '../../context/TournamentContext';
 
@@ -114,33 +113,23 @@ export const AuthPortal: React.FC = () => {
           </p>
         </div>
 
-        {/* Supabase Connection Status Card */}
-        <div className={`p-3.5 rounded-2xl border text-xs flex items-start gap-3 shadow-xs ${
-          isConfigured 
-            ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
-            : 'bg-amber-50 border-amber-200 text-amber-900'
-        }`}>
-          {isConfigured ? (
-            <>
-              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-bold block">Connected to Live Database</span>
-                Your logins and registrations are securely stored in your Supabase project in real-time.
-              </div>
-            </>
-          ) : (
-            <>
-              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-bold block">Running in Demo Mode (Local Storage)</span>
-                Supabase URL & Key not detected in `.env`. Credentials and changes are stored locally in your browser. 
-                <span className="block mt-1 text-[10px] text-amber-700 italic">
-                  To connect your Supabase project, write your keys in the `.env` file.
-                </span>
-              </div>
-            </>
-          )}
-        </div>
+        {/* Shown only when the app is NOT wired up. A working connection is the
+            expected state and needs no announcement; saying so on the sign-in
+            page told the operator something they already assumed and put the
+            word "Supabase" in front of players. The misconfigured case stays,
+            because that one is actionable. */}
+        {!isConfigured && (
+          <div className="p-3.5 rounded-2xl border text-xs flex items-start gap-3 shadow-xs bg-amber-50 border-amber-200 text-amber-900">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold block">Running in Demo Mode (Local Storage)</span>
+              Supabase URL &amp; Key not detected in `.env`. Credentials and changes are stored locally in your browser.
+              <span className="block mt-1 text-[10px] text-amber-700 italic">
+                To connect your Supabase project, write your keys in the `.env` file.
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Main Tabbed Card */}
         <div className="bg-white rounded-3xl border border-gray-200/80 shadow-lg overflow-hidden">
