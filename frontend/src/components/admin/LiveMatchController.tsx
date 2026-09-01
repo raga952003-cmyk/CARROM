@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Pause, RotateCcw, CheckCircle2, Clock, Trophy, AlertCircle, AlertTriangle, ShieldAlert, Sparkles, History, Check, Edit3, X, ArrowLeft, Crown, Flame, Award, Plus, UserX } from 'lucide-react';
+import { Play, Pause, RotateCcw, CheckCircle2, Clock, Trophy, AlertCircle, AlertTriangle, ShieldAlert, Sparkles, History, Check, Edit3, X, ArrowLeft, Crown, Flame, Award, Plus, UserX, Trash2, Loader2 } from 'lucide-react';
 import { WalkoverModal } from './WalkoverModal';
+import { useNotify } from '../../context/NotificationContext';
+import { apiClient } from '../../utils/apiClient';
 import confetti from 'canvas-confetti';
 import { Tournament, Match, BoardScore } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
@@ -70,7 +72,40 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [isSubmitScoreModalOpen, setIsSubmitScoreModalOpen] = useState(false);
   const [isEditAuditModalOpen, setIsEditAuditModalOpen] = useState(false);
   const [isConfirmResultModalOpen, setIsConfirmResultModalOpen] = useState(false);
+  const notify = useNotify();
   const [isWalkoverModalOpen, setIsWalkoverModalOpen] = useState(false);
+  const [removingBoards, setRemovingBoards] = useState(false);
+
+  // Only offer it when there is actually something to remove: a trailing run
+  // of boards with no play on them, and at least one board left over.
+  const allBoards = match.boards || [];
+  const hasUnplayedTail = (() => {
+    if (allBoards.length <= 1) return false;
+    const last = allBoards[allBoards.length - 1];
+    return !!last && last.status !== 'completed'
+      && !(last.player1Score || 0) && !(last.player2Score || 0);
+  })();
+
+  const removeUnplayedBoards = async () => {
+    if (removingBoards) return;
+    const n = allBoards.length;
+    if (!window.confirm(
+      `Remove the boards at the end of this match that were never played?
+
+` +
+      `This match currently has ${n} boards. Boards with a score on them are kept.`
+    )) return;
+    setRemovingBoards(true);
+    try {
+      const res: any = await apiClient.delete(`/matches/${match.id}/boards/unplayed`);
+      notify.success(res?.message || 'Removed the unplayed boards.');
+      await refreshData();
+    } catch (e) {
+      notify.report(e, 'Could not remove the unplayed boards.');
+    } finally {
+      setRemovingBoards(false);
+    }
+  };
   const [selectedBoardForScore, setSelectedBoardForScore] = useState<number>(1);
 
   // Score Input form state
@@ -490,6 +525,22 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>Add Board</span>
+              </button>
+            )}
+            {/* Add Board has no undo, and under remaining-coins scoring an
+                unplayed board leaves the match permanently undecided, so
+                there has to be a way back. */}
+            {role === 'admin' && !match.resultConfirmed && hasUnplayedTail && (
+              <button
+                onClick={removeUnplayedBoards}
+                disabled={removingBoards}
+                className="px-3 py-1.5 bg-white hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-xl border border-gray-300 shadow-xs transition-colors flex items-center gap-1 disabled:opacity-40"
+                title="Remove boards at the end that were never played"
+              >
+                {removingBoards
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <Trash2 className="w-3.5 h-3.5 text-gray-500" />}
+                <span>Remove unplayed</span>
               </button>
             )}
           </div>

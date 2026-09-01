@@ -205,14 +205,97 @@ async def add_board(id: str, admin = Depends(verify_admin)):
             "player2_score": 0
         }
         res = admin_db.table("boards").insert(board_payload).execute()
-        
-        # Increase max boards count on match
-        admin_db.table("matches").update({"max_boards": count + 1}).eq("id", id).execute()
+
+        # max_boards is deliberately NOT raised here.
+        #
+        # It is the configured length of the match, and the win condition is a
+        # majority of it. Raising it on every added board meant each extra board
+        # moved the finish line further away: a match with 8 boards clicked up
+        # to 28 needed 15 board wins instead of 5, and under remaining-coins
+        # scoring -- which requires every board to be played -- it could never
+        # be completed at all. An extra board is a tie-break board, not a longer
+        # match.
         return serialize_board(res.data[0])
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.delete("/{id}/boards/unplayed")
+async def remove_unplayed_boards(id: str, admin = Depends(verify_admin)):
+    """
+    Drop trailing boards that were never played.
+
+    Add Board is one click and there is nothing to undo it, so a match can end
+    up carrying boards nobody intends to play. Under remaining-coins scoring
+    that is not cosmetic: the match completes only when EVERY board is
+    completed, so a handful of stray rows leaves it permanently undecided and
+    the result impossible to confirm.
+
+    Only trailing boards go, so the numbering stays contiguous, and only ones
+    with no play on them: nothing completed, nothing scored, nothing locked. A
+    match is left with at least one board.
+    """
+    admin_db = get_admin_db()
+    try:
+        _authorise_match(admin_db, id, admin, "match.add_board")
+
+        boards = admin_db.table("boards").select("*").eq(
+            "match_id", id).order("board_number").execute().data or []
+        if not boards:
+            raise HTTPException(status_code=404, detail="This match has no boards.")
+
+        def untouched(b) -> bool:
+            return (
+                b.get("status") != "completed"
+                and not b.get("locked")
+                and not (b.get("player1_score") or 0)
+                and not (b.get("player2_score") or 0)
+                and (b.get("board_winner") or "none") == "none"
+            )
+
+        # Walk back from the end and stop at the first board with play on it.
+        removable = []
+        for b in reversed(boards):
+            if len(boards) - len(removable) <= 1 or not untouched(b):
+                break
+            removable.append(b)
+
+        if not removable:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Nothing to remove: the last board has been played, or only "
+                    "one board is left."
+                ),
+            )
+
+        for b in removable:
+            admin_db.table("boards").delete().eq("id", b["id"]).execute()
+
+        remaining = len(boards) - len(removable)
+        # Bring the configured length back in line with what is actually there,
+        # so the win condition matches the match being played.
+        admin_db.table("matches").update({"max_boards": remaining}).eq("id", id).execute()
+
+        record_audit(
+            admin_db, actor=admin, action="match.remove_unplayed_boards",
+            entity_type="match", entity_id=id,
+            previous_state={"boards": len(boards)},
+            new_state={"boards": remaining, "removed": len(removable)},
+        )
+        return {
+            "status": "success",
+            "removed": len(removable),
+            "boardsRemaining": remaining,
+            "message": "Removed {} unplayed board(s); this match is now {} board(s).".format(
+                len(removable), remaining),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.put("/{id}/boards/{board_number}")
 async def update_board(
