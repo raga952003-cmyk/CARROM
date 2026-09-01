@@ -1,20 +1,5 @@
 import React, { useState } from 'react';
-import { 
-  Users, 
-  Search, 
-  UserPlus, 
-  Edit3, 
-  Trash2, 
-  X, 
-  Check, 
-  ShieldAlert, 
-  Award,
-  Building,
-  MapPin,
-  Mail,
-  Phone,
-  Flame
-} from 'lucide-react';
+import { Users, Search, UserPlus, Edit3, Trash2, X, Check, ShieldAlert } from 'lucide-react';
 import { Player } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 
@@ -158,17 +143,13 @@ export const ManagePlayersTab: React.FC = () => {
             <thead className="bg-gray-50 text-gray-600 font-semibold border-b border-gray-200">
               <tr>
                 <th className="px-4 py-3">Player Details</th>
-                <th className="px-3 py-3">Club & City</th>
-                <th className="px-3 py-3">Rating / Seed</th>
-                <th className="px-3 py-3">Contact Email</th>
-                <th className="px-3 py-3">Phone</th>
                 <th className="px-4 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {filteredPlayers.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="text-center py-10 text-gray-500">
+                  <td colSpan={2} className="text-center py-10 text-gray-500">
                     <Users className="w-8 h-8 mx-auto text-gray-300 mb-2" />
                     No players found in database.
                   </td>
@@ -181,48 +162,6 @@ export const ManagePlayersTab: React.FC = () => {
                       <div className="text-[10px] text-gray-400 font-mono">ID: {player.id}</div>
                     </td>
                     
-                    <td className="px-3 py-3">
-                      <div className="flex items-center gap-1">
-                        <Building className="w-3 h-3 text-gray-400 shrink-0" />
-                        <span>{player.club || 'Independent'}</span>
-                      </div>
-                      <div className="text-[10px] text-gray-500 flex items-center gap-1">
-                        <MapPin className="w-3 h-3 text-gray-400 shrink-0" />
-                        <span>{player.city || '—'}</span>
-                      </div>
-                    </td>
-
-                    <td className="px-3 py-3">
-                      <div className="font-bold text-emerald-800 flex items-center gap-1">
-                        <Flame className="w-3.5 h-3.5 text-amber-500" />
-                        <span>{player.rating || 1500} pts</span>
-                      </div>
-                      {player.seed !== undefined && (
-                        <div className="text-[10px] text-[#D4A72C] font-semibold flex items-center gap-0.5">
-                          <Award className="w-3 h-3" />
-                          <span>AICF Seed #{player.seed}</span>
-                        </div>
-                      )}
-                    </td>
-
-                    <td className="px-3 py-3 text-gray-600">
-                      <div className="flex items-center gap-1.5">
-                        <Mail className="w-3.5 h-3.5 text-gray-400" />
-                        <span className="truncate max-w-[150px]">{player.email || 'N/A'}</span>
-                      </div>
-                    </td>
-
-                    <td className="px-3 py-3 text-gray-600">
-                      {player.phone ? (
-                        <div className="flex items-center gap-1">
-                          <Phone className="w-3.5 h-3.5 text-gray-400" />
-                          <span>{player.phone}</span>
-                        </div>
-                      ) : (
-                        <span className="text-gray-400">N/A</span>
-                      )}
-                    </td>
-
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end space-x-1.5">
                         <button
