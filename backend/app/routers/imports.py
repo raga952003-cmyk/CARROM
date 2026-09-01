@@ -2,16 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
 from app.services.access_control import require_tournament_access
-from app.services.sheet_parser import parse_participants
+from app.services.sheet_parser import read_sheet, parse_participants
 from app.services.audit_service import record_audit
 from app.routers.tournaments import generate_fixtures, generate_schedule, publish_schedule
 from typing import Any, Dict, List, Optional, Tuple
-# pandas is imported where it is used, not here.
-#
-# main.py loads this router at startup, so a module-level import made
-# every cold start of the serverless function pay 1.3 seconds for a
-# library two endpoints need once per tournament. Measured on this
-# machine: pandas 1,344 ms, and openpyxl behind it another 1,783 ms.
 import io
 import json
 import uuid
@@ -43,12 +37,7 @@ async def import_excel_file(
 
     try:
         content = await file.read()
-        import pandas as pd
-
-        if filename.lower().endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
-        else:
-            df = pd.read_excel(io.BytesIO(content))
+        df = read_sheet(content, filename)
     except HTTPException:
         raise
     except Exception as e:

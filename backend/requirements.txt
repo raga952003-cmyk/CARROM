@@ -20,7 +20,14 @@ python-dotenv>=1.0.0
 supabase==2.28.3
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
-openpyxl>=3.1.2
-pandas>=2.0.0
+# openpyxl reads the .xlsx uploads; the standard library reads .csv.
+#
+# pandas used to do both. It was three calls -- read_csv, read_excel and
+# isna -- and it cost 60 MB, dragged in 31 MB of numpy, and from version
+# 3.0 another 84 MB of pyarrow as a hard dependency. Because the pin was
+# `pandas>=2.0.0`, that 3.0 release arrived on its own and took the
+# serverless bundle to 229 MB against a 225 MB ceiling, so every
+# deployment failed. See app/services/sheet_parser.read_sheet.
+openpyxl>=3.1.0
 python-multipart>=0.0.6
 httpx>=0.24.0

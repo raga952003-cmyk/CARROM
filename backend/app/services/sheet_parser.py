@@ -18,13 +18,9 @@ unreliable ("Srinivasan" is listed as partner "Srinivasan Big"), so an emp id
 is turned into a deterministic email, which makes matching and re-import
 dedupe exact without needing a schema change.
 """
+import io
+
 from typing import Any, Dict, List, Optional, Set, Tuple
-# Imported lazily inside the helpers that need it: this module is reached
-# from a router that main.py loads at startup, and pandas costs over a
-# second to import on a cold serverless function.
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    import pandas as pd
 
 # Values that mean "nothing here", not a real name.
 BLANKS = {"", "na", "n/a", "n.a", "none", "nil", "-", "--", "nan", "null", "tbd"}
@@ -71,15 +67,12 @@ PARTNER_EMP_CANDIDATES = ["partner emp id", "partner employee id", "partner id",
 
 def _text(value: Any) -> Optional[str]:
     """Cell text, or None when the cell is blank or a placeholder like 'NA'."""
-    import pandas as pd
-
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+    if value is None:
         return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
+    # NaN, which openpyxl can hand back for an empty numeric cell. It is the one
+    # float that is not equal to itself, and pd.isna is what this used to be.
+    if isinstance(value, float) and value != value:
+        return None
     text = str(value).strip()
     if text.lower() in BLANKS:
         return None
@@ -186,7 +179,115 @@ def _number(row, col, default, errors, label):
         return default
 
 
-def parse_participants(df: "pd.DataFrame") -> Tuple[List[Dict[str, Any]], List[str], Dict[str, Any]]:
+class Row:
+    """
+    One sheet row, addressable by column name.
+
+    Stands in for a pandas Series so parse_participants below needs no changes:
+    it uses `row[column]` and `row.index`, and nothing else.
+    """
+    __slots__ = ("_values", "index")
+
+    def __init__(self, values: Dict[str, Any], columns: List[str]):
+        self._values = values
+        self.index = columns
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values.get(key)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._values
+
+
+class Sheet:
+    """
+    A parsed spreadsheet: column names and rows.
+
+    This replaced pandas. pandas was used for exactly three things -- read_csv,
+    read_excel and isna -- and cost 60 MB itself, 31 MB of numpy, and from
+    version 3.0 another 84 MB of pyarrow as a hard dependency. That took the
+    serverless bundle to 229 MB against a 225 MB ceiling and stopped every
+    deployment; it also cost 1.3 seconds on every cold start. openpyxl, already
+    a dependency at 1.8 MB, reads xlsx, and the standard library reads csv.
+    """
+    __slots__ = ("_columns", "rows")
+
+    def __init__(self, columns: List[str], rows: List[Dict[str, Any]]):
+        self._columns = list(columns)
+        self.rows = rows
+
+    @property
+    def columns(self) -> List[str]:
+        return self._columns
+
+    @columns.setter
+    def columns(self, new_columns: List[str]) -> None:
+        """
+        Renaming the columns renames them on the rows too.
+
+        parse_participants normalises the headers with `df.columns = [...]`, and
+        a pandas DataFrame keys its rows BY the columns, so that one assignment
+        moved both. Keeping the two independent looked harmless and made every
+        lookup afterwards miss: the parser found the columns it wanted and then
+        read None out of every cell.
+        """
+        new_columns = list(new_columns)
+        if len(new_columns) == len(self._columns):
+            mapping = dict(zip(self._columns, new_columns))
+            self.rows = [{mapping.get(k, k): v for k, v in row.items()}
+                         for row in self.rows]
+        self._columns = new_columns
+
+    def iterrows(self):
+        for i, values in enumerate(self.rows):
+            yield i, Row(values, self._columns)
+
+
+def read_sheet(content: bytes, filename: str) -> Sheet:
+    """Read an uploaded .csv, .xlsx or .xls into a Sheet."""
+    name = (filename or "").lower()
+
+    if name.endswith(".csv"):
+        import csv
+        # utf-8-sig so a spreadsheet exported from Excel does not put a BOM on
+        # the first column name and make it unmatchable.
+        text = content.decode("utf-8-sig", errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        try:
+            header = next(reader)
+        except StopIteration:
+            return Sheet([], [])
+        columns = [str(c or "").strip() for c in header]
+        rows = []
+        for raw in reader:
+            if not any((c or "").strip() for c in raw):
+                continue
+            rows.append({columns[i]: (raw[i] if i < len(raw) else None)
+                         for i in range(len(columns))})
+        return Sheet(columns, rows)
+
+    from openpyxl import load_workbook
+    # read_only for speed, data_only so a formula cell yields its value rather
+    # than "=SUM(...)".
+    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    it = ws.iter_rows(values_only=True)
+    try:
+        header = next(it)
+    except StopIteration:
+        return Sheet([], [])
+    columns = [str(c).strip() if c is not None else "" for c in header]
+    rows = []
+    for raw in it:
+        if raw is None or not any(c is not None and str(c).strip() for c in raw):
+            continue
+        rows.append({columns[i]: (raw[i] if i < len(raw) else None)
+                     for i in range(len(columns))})
+    wb.close()
+    return Sheet(columns, rows)
+
+
+def parse_participants(df: Sheet) -> Tuple[List[Dict[str, Any]], List[str], Dict[str, Any]]:
     """
     Returns (entries, errors, meta).
 
