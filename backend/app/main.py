@@ -1,3 +1,5 @@
+import time
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -64,6 +66,45 @@ app.include_router(audit.router, prefix="/api")
 async def root():
     return {"message": "Welcome to the Carrom Arena Tournament Engine API."}
 
+# Cached migration state. None until probed; [] means everything is applied,
+# which cannot regress without a deployment, so it is kept for good.
+_pending_cache = None
+_pending_checked_at = 0.0
+_PENDING_RECHECK_SECONDS = 30
+
+
+def _health_payload(pending, rpc_state, idem_state, owner_state,
+                    client_ok, admin_ok):
+    """The health response, so the cached path returns the same shape."""
+    return {
+        "status": "ok" if not pending else "degraded",
+        "pending_migrations": pending,
+        "migrations": (
+            "all applied" if not pending
+            else "DEGRADED - apply: " + ", ".join("db/migrations/%s.sql" % m for m in pending)
+        ),
+        "env": settings.API_ENV,
+        "database_client": client_ok,
+        "database_admin_client": admin_ok,
+        "transactional_writes": (
+            "unknown (not exercised yet)" if rpc_state is None
+            else "atomic" if rpc_state
+            else "DEGRADED - apply db/migrations/002_serverless_architecture.sql"
+        ),
+        "idempotency": (
+            "unknown (not exercised yet)" if idem_state is None
+            else "active" if idem_state
+            else "DEGRADED - apply db/migrations/002_serverless_architecture.sql"
+        ),
+        "tournament_ownership": (
+            "unknown (not exercised yet)" if owner_state is None
+            else "enforced" if owner_state
+            else "DEGRADED - any admin can manage any tournament; "
+                 "apply db/migrations/003_ownership_and_access.sql"
+        ),
+    }
+
+
 @app.get("/api/health")
 async def health():
     """
@@ -83,6 +124,23 @@ async def health():
     # than crashing when its migration is missing, which is right in the middle
     # of a tournament and wrong at deploy time: without this the app comes up
     # green while quietly not recording tosses or board detail.
+    # Cached, because a schema does not change without a deployment.
+    #
+    # These probes are six sequential Supabase round trips, and from a
+    # serverless function each costs a couple of hundred milliseconds: /health
+    # was measured at 2.2 seconds to return about nothing. Anything polling it
+    # paid that every time. A positive result is kept for the life of the
+    # process; a negative one is re-checked, so applying a migration takes
+    # effect without a redeploy.
+    global _pending_cache, _pending_checked_at
+    now = time.monotonic()
+    if _pending_cache == [] and _pending_checked_at:
+        return _health_payload([], rpc_state, idem_state, owner_state,
+                               supabase_client is not None, supabase_admin is not None)
+    if _pending_cache is not None and now - _pending_checked_at < _PENDING_RECHECK_SECONDS:
+        return _health_payload(_pending_cache, rpc_state, idem_state, owner_state,
+                               supabase_client is not None, supabase_admin is not None)
+
     pending = []
     if supabase_admin is not None:
         probes = (
@@ -113,30 +171,7 @@ async def health():
             if "board_not_found" not in str(e) and "insufficient_privilege" not in str(e):
                 pending.append("007_apply_board_result_sets")
 
-    return {
-        "status": "ok" if not pending else "degraded",
-        "pending_migrations": pending,
-        "migrations": (
-            "all applied" if not pending
-            else "DEGRADED - apply: " + ", ".join("db/migrations/%s.sql" % m for m in pending)
-        ),
-        "env": settings.API_ENV,
-        "database_client": supabase_client is not None,
-        "database_admin_client": supabase_admin is not None,
-        "transactional_writes": (
-            "unknown (not exercised yet)" if rpc_state is None
-            else "atomic" if rpc_state
-            else "DEGRADED - apply db/migrations/002_serverless_architecture.sql"
-        ),
-        "idempotency": (
-            "unknown (not exercised yet)" if idem_state is None
-            else "active" if idem_state
-            else "DEGRADED - apply db/migrations/002_serverless_architecture.sql"
-        ),
-        "tournament_ownership": (
-            "unknown (not exercised yet)" if owner_state is None
-            else "enforced" if owner_state
-            else "DEGRADED - any admin can manage any tournament; "
-                 "apply db/migrations/003_ownership_and_access.sql"
-        ),
-    }
+    _pending_cache = pending
+    _pending_checked_at = time.monotonic()
+    return _health_payload(pending, rpc_state, idem_state, owner_state,
+                           supabase_client is not None, supabase_admin is not None)

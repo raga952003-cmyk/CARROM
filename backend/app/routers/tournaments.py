@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from app.database import get_db, get_admin_db
 from app.models.tournament import (
     TournamentCreateSchema, TournamentUpdateSchema, RegistrationCreateSchema, ManualMatchSchema,
@@ -131,7 +131,16 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]],
 
     tournament_ids = [t["id"] for t in tournament_rows]
 
-    # --- Registrations (+ hydrated doubles partners) -----------------------
+    # Sequential on purpose.
+    #
+    # Six round trips in a row is most of why this read takes seconds from a
+    # serverless function, and running them on threads did make it faster --
+    # but supabase-py shares one httpx client, and two requests over the same
+    # HTTP/2 connection intermittently died with "Server disconnected". Two runs
+    # passed and the third crashed. An occasional 500 in the middle of a
+    # tournament is a far worse trade than a slower page, and making it safe
+    # means a client per thread, which trades the round trips for connection
+    # setup. The payload trimming below is where the real win came from.
     reg_rows = _select_all(
         lambda: supabase.table("registrations")
         .select("*, player:profiles(*), team:teams(*)")
@@ -142,7 +151,6 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]],
     for raw, serialized in zip(reg_rows, _hydrate_registrations(supabase, reg_rows, include_contact)):
         regs_by_tournament.setdefault(raw["tournament_id"], []).append(serialized)
 
-    # --- Matches, boards and score audit trail -----------------------------
     match_rows = _select_all(
         lambda: supabase.table("matches").select("*")
         .in_("tournament_id", tournament_ids).order("match_number")
@@ -250,7 +258,7 @@ def sets_supported(admin_db) -> bool:
 
 
 @router.get("")
-async def get_tournaments(viewer = Depends(get_optional_profile)):
+async def get_tournaments(response: Response, viewer = Depends(get_optional_profile)):
     # Reads run with the service client: this API layer performs its own
     # authorisation, and a missing RLS policy would otherwise return an empty
     # list rather than an error. RLS still governs direct client access,
@@ -267,6 +275,21 @@ async def get_tournaments(viewer = Depends(get_optional_profile)):
         is_admin = bool(viewer and viewer.get("role") == "admin")
         if not is_admin:
             rows = [t for t in rows if t.get("status") != "draft"]
+            # Let the edge answer repeat reads.
+            #
+            # The spectator board polls this every 20 seconds and it is the
+            # slowest endpoint in the app. Ten seconds at the CDN turns most of
+            # those polls into an edge hit instead of a cold function plus six
+            # Supabase round trips, and stale-while-revalidate means the one
+            # request that does miss still gets served immediately.
+            #
+            # Anonymous responses only, and Vary on Authorization: an admin's
+            # payload carries contact details and must never be handed to
+            # somebody else by a cache.
+            response.headers["Cache-Control"] = "public, s-maxage=10, stale-while-revalidate=30"
+        else:
+            response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vary"] = "Authorization"
 
         # Hydrated here because the dashboard reads tournament.matches and
         # tournament.registrations straight off the list response.

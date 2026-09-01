@@ -200,27 +200,30 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
 
   const doRefresh = async () => {
     try {
-      // 1. Fetch Tournaments
-      const tournamentsData = await tournamentService.getAllTournaments();
+      // Four independent reads, issued together.
+      //
+      // They used to run one after another: tournaments (3.5s on the deployed
+      // API), then players, then teams, then notifications — about five seconds
+      // of waterfall for four requests that never needed each other. Now the
+      // wait is the slowest one rather than the sum, and this whole function
+      // re-runs on every realtime change, so the saving lands on every board
+      // an umpire scores rather than only on first load.
+      const [tournamentsData, playersData, teamsData, notificationsData] = await Promise.all([
+        tournamentService.getAllTournaments(),
+        apiClient.get<Player[]>('/players'),
+        tournamentService.getTeams(),
+        apiClient.get<TournamentNotification[]>('/notifications'),
+      ]);
+
       setTournaments(tournamentsData);
-      
       if (tournamentsData.length > 0 && !activeTournamentIdRef.current) {
         setActiveTournamentId(tournamentsData[0].id);
       }
-
-      // 2. Fetch Players Directory
-      const playersData = await apiClient.get<Player[]>('/players');
       setAllPlayers(playersData);
-
-      // 2b. Fetch doubles teams so partner pickers have something to show
-      const teamsData = await tournamentService.getTeams();
       setAllTeams(teamsData as Team[]);
-
-      // 3. Fetch Notifications
-      const notificationsData = await apiClient.get<TournamentNotification[]>('/notifications');
       setNotifications(notificationsData);
 
-      // 4. Reload active match if it exists
+      // Reload the open match from the data just fetched.
       lastRefreshError.current = '';
 
       const openMatch = activeMatchRef.current;
