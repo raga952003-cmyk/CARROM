@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Pause, RotateCcw, CheckCircle2, Clock, Trophy, AlertCircle, AlertTriangle, ShieldAlert, Sparkles, History, Check, Edit3, X, ArrowLeft, Crown, Flame, Award, Plus, UserX, Trash2, Loader2 } from 'lucide-react';
 import { WalkoverModal } from './WalkoverModal';
+import { Avatar } from '../common/Avatar';
 import { useNotify } from '../../context/NotificationContext';
 import { apiClient } from '../../utils/apiClient';
 import confetti from 'canvas-confetti';
@@ -36,6 +37,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     updateBoardScore, 
     confirmMatchResult,
     refreshData,
+    allPlayers,
     role
   } = useTournament();
 
@@ -76,6 +78,15 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [isWalkoverModalOpen, setIsWalkoverModalOpen] = useState(false);
   const [removingBoards, setRemovingBoards] = useState(false);
   const [decidingTie, setDecidingTie] = useState(false);
+
+  // The match row carries names but not pictures, and player1Details is only
+  // ever filled by the local engine, so the picture is looked up by id from the
+  // roster the context already holds.
+  const avatarFor = (playerId?: string | null): string | undefined => {
+    if (!playerId) return undefined;
+    const p = (allPlayers || []).find(x => x.id === playerId);
+    return (p as any)?.avatar || undefined;
+  };
 
   // A level match under remaining-coins scoring has no winner and cannot be
   // confirmed. Until this existed the screen simply showed nothing and the
@@ -376,8 +387,18 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             <div className={`md:col-span-3 p-5 rounded-2xl border text-center transition-all ${
               match.winnerId === match.player1Id ? 'border-[#D4A72C] bg-amber-50/30 shadow-sm' : 'border-gray-200 bg-gray-50/50'
             }`}>
-              <div className="w-12 h-12 rounded-full bg-[#0B5D3B] text-white flex items-center justify-center font-bold text-lg mx-auto mb-2 shadow-sm border-2 border-white">
-                1
+              <div className="relative w-12 h-12 mx-auto mb-2">
+                <Avatar
+                  name={match.player1Name}
+                  src={avatarFor(match.player1Id)}
+                  size={48}
+                  className="shadow-sm border-2 border-white"
+                />
+                {/* The side number still matters — it is how the boards, the
+                    toss and the score columns refer to them. */}
+                <span className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-[#0B5D3B] text-white text-[10px] font-bold flex items-center justify-center border-2 border-white">
+                  1
+                </span>
               </div>
               <h3 className="font-bold text-lg sm:text-xl text-gray-900 truncate">
                 {match.player1Name}
@@ -422,8 +443,16 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             <div className={`md:col-span-3 p-5 rounded-2xl border text-center transition-all ${
               match.winnerId === match.player2Id ? 'border-[#D4A72C] bg-amber-50/30 shadow-sm' : 'border-gray-200 bg-gray-50/50'
             }`}>
-              <div className="w-12 h-12 rounded-full bg-[#202522] text-white flex items-center justify-center font-bold text-lg mx-auto mb-2 shadow-sm border-2 border-white">
-                2
+              <div className="relative w-12 h-12 mx-auto mb-2">
+                <Avatar
+                  name={match.player2Name}
+                  src={avatarFor(match.player2Id)}
+                  size={48}
+                  className="shadow-sm border-2 border-white"
+                />
+                <span className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-[#202522] text-white text-[10px] font-bold flex items-center justify-center border-2 border-white">
+                  2
+                </span>
               </div>
               <h3 className="font-bold text-lg sm:text-xl text-gray-900 truncate">
                 {match.player2Name}

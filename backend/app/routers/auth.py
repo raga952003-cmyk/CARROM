@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.database import get_db, get_admin_db
-from app.models.auth import SignUpSchema, LoginSchema, RefreshSchema
+from app.models.auth import (
+    SignUpSchema, LoginSchema, RefreshSchema,
+    ProfileUpdateSchema, PasswordChangeSchema, EmailChangeSchema,
+)
 from app.utils.security import get_user_profile, get_current_user
 from app.utils.serializers import serialize_player
 from typing import Dict, Any
@@ -190,6 +193,132 @@ async def get_me(profile: Dict[str, Any] = Depends(get_current_user)):
         "name": profile.user_metadata.get("name") or "User",
         "role": profile.app_metadata.get("role") or "player"
     }
+
+
+# Roughly 300 KB of base64, which is a generous 256x256 JPEG. The browser
+# resizes before sending; this is the backstop for anything that does not.
+MAX_AVATAR_CHARS = 300_000
+
+
+@router.put("/me")
+async def update_me(data: ProfileUpdateSchema,
+                    profile: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Change your own profile.
+
+    Deliberately narrow: name, club, city, phone and avatar. Role is not here
+    and never will be -- that is what let anyone make themselves an admin
+    through the sign-up form. Email and password have their own endpoints
+    below, because both need the current password.
+    """
+    admin_db = get_admin_db()
+
+    patch: Dict[str, Any] = {}
+    for field in ("name", "club", "city", "phone"):
+        value = getattr(data, field)
+        if value is not None:
+            patch[field] = value.strip() or None
+
+    if data.avatar is not None:
+        avatar = data.avatar.strip()
+        if avatar == "":
+            patch["avatar"] = None            # Explicitly removing the picture.
+        else:
+            if not avatar.startswith("data:image/"):
+                raise HTTPException(
+                    status_code=422,
+                    detail="The picture must be an image.",
+                )
+            if len(avatar) > MAX_AVATAR_CHARS:
+                raise HTTPException(
+                    status_code=413,
+                    detail="That picture is too large. Choose a smaller one.",
+                )
+            patch["avatar"] = avatar
+
+    if patch.get("name") == "":
+        raise HTTPException(status_code=422, detail="A name is required.")
+    if not patch:
+        raise HTTPException(status_code=422, detail="Nothing to change.")
+
+    try:
+        res = admin_db.table("profiles").update(patch).eq("id", profile.id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Profile not found.")
+        # The name is mirrored into auth metadata, which other places read.
+        if "name" in patch:
+            admin_db.auth.admin.update_user_by_id(
+                profile.id, attributes={"user_metadata": {"name": patch["name"]}}
+            )
+        return serialize_player(res.data[0])
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Profile update failed for {profile.id}: {str(e)}")
+        raise HTTPException(status_code=400, detail="Could not save those changes.")
+
+
+def _verify_password(email: str, password: str) -> None:
+    """Confirm the caller knows the current password, or raise 403."""
+    try:
+        get_db().auth.sign_in_with_password({"email": email, "password": password})
+    except Exception:
+        raise HTTPException(
+            status_code=403,
+            detail="That is not your current password.",
+        )
+
+
+@router.post("/password")
+async def change_password(data: PasswordChangeSchema,
+                          profile: Dict[str, Any] = Depends(get_current_user)):
+    """
+    Change your own password.
+
+    The current one is required. A stolen or forgotten-unlocked session should
+    not be enough to lock the real owner out of their account.
+    """
+    if data.new_password == data.current_password:
+        raise HTTPException(
+            status_code=422,
+            detail="The new password is the same as the current one.",
+        )
+    _verify_password(profile.email, data.current_password)
+    try:
+        get_admin_db().auth.admin.update_user_by_id(
+            profile.id, attributes={"password": data.new_password}
+        )
+    except Exception as e:
+        logger.error(f"Password change failed for {profile.id}: {str(e)}")
+        raise HTTPException(status_code=400, detail="Could not change the password.")
+    return {"status": "success",
+            "message": "Password changed. Your other sessions stay signed in."}
+
+
+@router.post("/email")
+async def change_email(data: EmailChangeSchema,
+                       profile: Dict[str, Any] = Depends(get_current_user)):
+    """Change the address you sign in with. Requires the current password."""
+    new_email = str(data.new_email).strip().lower()
+    if new_email == (profile.email or "").lower():
+        raise HTTPException(status_code=422, detail="That is already your email address.")
+    _verify_password(profile.email, data.current_password)
+
+    admin_db = get_admin_db()
+    taken = admin_db.table("profiles").select("id").eq("email", new_email).execute().data or []
+    if taken:
+        raise HTTPException(status_code=409, detail="Another account already uses that address.")
+
+    try:
+        admin_db.auth.admin.update_user_by_id(
+            profile.id, attributes={"email": new_email, "email_confirm": True}
+        )
+        admin_db.table("profiles").update({"email": new_email}).eq("id", profile.id).execute()
+    except Exception as e:
+        logger.error(f"Email change failed for {profile.id}: {str(e)}")
+        raise HTTPException(status_code=400, detail="Could not change the email address.")
+    return {"status": "success",
+            "message": "Email changed. Use the new address next time you sign in."}
 
 
 @router.post("/refresh")

@@ -1,18 +1,7 @@
 import React, { useState } from 'react';
-import { 
-  Trophy, 
-  User, 
-  ShieldAlert, 
-  Bell, 
-  PlusCircle, 
-  RotateCcw, 
-  Sparkles,
-  ChevronDown,
-  CheckCircle2,
-  Calendar,
-  Layers,
-  LogOut
-} from 'lucide-react';
+import { Trophy, User, ShieldAlert, Bell, PlusCircle, RotateCcw, Sparkles, ChevronDown, CheckCircle2, Calendar, Layers, LogOut, Settings } from 'lucide-react';
+import { Avatar } from './Avatar';
+import { ProfileSettings } from './ProfileSettings';
 import { useTournament } from '../../context/TournamentContext';
 
 interface HeaderProps {
@@ -29,6 +18,7 @@ export const Header: React.FC<HeaderProps> = ({
   const { 
     role, 
     currentUser,
+    refreshCurrentUser,
     signOutUser,
     tournaments, 
     activeTournamentId, 
@@ -37,10 +27,14 @@ export const Header: React.FC<HeaderProps> = ({
     realtimeStatus
   } = useTournament();
 
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   const [isPlayerMenuOpen, setIsPlayerMenuOpen] = useState(false);
   const [isTourMenuOpen, setIsTourMenuOpen] = useState(false);
 
   return (
+    <>
     <header id="app-header" className="sticky top-0 z-40 bg-[#0B5D3B] text-white shadow-md border-b border-[#ffffff22]">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 sm:h-20">
@@ -141,19 +135,58 @@ export const Header: React.FC<HeaderProps> = ({
               push the page wider than the viewport. */}
           <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
             
-            {/* Logged in User Profile */}
-            <div className="flex items-center gap-2 bg-emerald-950/70 py-1.5 px-1.5 sm:px-3 rounded-xl border border-emerald-800/80 shadow-inner shrink-0">
-              <div className="w-5 h-5 rounded-full bg-[#D4A72C] text-[#202522] flex items-center justify-center font-bold text-xs shrink-0">
-                {(currentUser?.name || 'U').charAt(0)}
-              </div>
-              <div className="text-left leading-none hidden sm:block">
-                <div className="text-[11px] font-bold text-white truncate max-w-[100px]">
-                  {currentUser?.name || 'User'}
+            {/* Logged in User Profile — now a way in to your own account */}
+            <div className="relative shrink-0">
+              <button
+                id="profile-menu-btn"
+                onClick={() => setProfileMenuOpen(o => !o)}
+                aria-haspopup="menu"
+                aria-expanded={profileMenuOpen}
+                className="flex items-center gap-2 bg-emerald-950/70 hover:bg-emerald-900/80 py-1.5 px-1.5 sm:px-3 rounded-xl border border-emerald-800/80 shadow-inner transition-colors"
+              >
+                <Avatar name={currentUser?.name} src={(currentUser as any)?.avatar} size={22} />
+                <div className="text-left leading-none hidden sm:block">
+                  <div className="text-[11px] font-bold text-white truncate max-w-[100px]">
+                    {currentUser?.name || 'User'}
+                  </div>
+                  <div className="text-[8px] text-[#D4A72C] font-semibold uppercase tracking-wider mt-0.5">
+                    {role === 'admin' ? 'Federation Admin' : 'Competitor'}
+                  </div>
                 </div>
-                <div className="text-[8px] text-[#D4A72C] font-semibold uppercase tracking-wider mt-0.5">
-                  {role === 'admin' ? 'Federation Admin' : 'Competitor'}
-                </div>
-              </div>
+                <ChevronDown className="w-3 h-3 text-emerald-300 hidden sm:block" />
+              </button>
+
+              {profileMenuOpen && (
+                <>
+                  {/* Click anywhere else to dismiss, which is what people expect
+                      of a menu and what a bare dropdown never does. */}
+                  <div className="fixed inset-0 z-40" onClick={() => setProfileMenuOpen(false)} />
+                  <div
+                    role="menu"
+                    className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-2xl border border-gray-200 z-50 overflow-hidden"
+                  >
+                    <div className="px-4 py-3 bg-[#F8F6F0] border-b border-gray-200 flex items-center gap-2.5">
+                      <Avatar name={currentUser?.name} src={(currentUser as any)?.avatar} size={36} />
+                      <div className="min-w-0">
+                        <div className="text-sm font-bold text-gray-900 truncate">
+                          {currentUser?.name || 'User'}
+                        </div>
+                        <div className="text-[11px] text-gray-500 truncate">
+                          {(currentUser as any)?.email}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      role="menuitem"
+                      onClick={() => { setProfileMenuOpen(false); setSettingsOpen(true); }}
+                      className="w-full px-4 py-2.5 text-left text-sm font-medium text-gray-800 hover:bg-gray-50 flex items-center gap-2.5"
+                    >
+                      <Settings className="w-4 h-4 text-gray-500" />
+                      Settings
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Sign Out Button */}
@@ -218,5 +251,14 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
     </header>
+
+      {settingsOpen && currentUser && (
+        <ProfileSettings
+          user={currentUser as any}
+          onClose={() => setSettingsOpen(false)}
+          onSaved={() => refreshCurrentUser()}
+        />
+      )}
+    </>
   );
 };

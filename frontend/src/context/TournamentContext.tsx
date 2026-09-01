@@ -143,6 +143,7 @@ interface TournamentContextType {
   // Utilities
   resetToSampleData: () => void;
   refreshData: () => Promise<void>;
+  refreshCurrentUser: () => Promise<void>;
   /** Points table computed server-side from official results (spec 74). */
   fetchStandings: (tournamentId: string) => Promise<StandingsRow[]>;
   /** The same tables split by category, and by group where one exists. */
@@ -283,6 +284,17 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     const timer = setInterval(tick, 60000);
     return () => clearInterval(timer);
   }, [isAuthenticated]);
+
+  const refreshCurrentUser = async () => {
+    try {
+      const user = await authService.getCurrentUser();
+      setCurrentUserState(toCurrentUser(user));
+      setRoleState(user.role as UserRole);
+    } catch {
+      // A failed refresh must not sign anyone out mid-tournament; the existing
+      // user object stays, and the next real request will surface any problem.
+    }
+  };
 
   // Sync auth on mount
   useEffect(() => {
@@ -635,6 +647,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         signUpUser,
         signInUser,
         signOutUser,
+        refreshCurrentUser,
         createTournament,
         updateTournament,
         deleteTournament,
