@@ -483,7 +483,9 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.post("/{id}/fixtures")
-async def generate_fixtures(id: str, admin = Depends(verify_admin)):
+async def generate_fixtures(id: str, force: bool = Query(False,
+                            description="Discard results already recorded and redraw anyway."),
+                            admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     if not _claim_generation(id):
         raise HTTPException(
@@ -583,7 +585,26 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
         for i, m in enumerate(matches, start=1):
             m["matchNumber"] = i
 
-        # Clear existing matches first (cascade deletes boards)
+        # Regenerating replaces the draw, and this delete cascades to every
+        # board and every score on it. That is fine before play starts and
+        # catastrophic after: the button sits beside Auto-Schedule and Publish,
+        # and one misplaced click would erase a day's results with no undo.
+        existing = admin_db.table("matches").select(
+            "id, result_confirmed, status"
+        ).eq("tournament_id", id).execute().data or []
+        confirmed = [m for m in existing if m.get("result_confirmed")]
+        completed = [m for m in existing if m.get("status") == "completed"]
+        if (confirmed or completed) and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This draw already has {} confirmed and {} completed match(es), and "
+                    "regenerating deletes every match and every board score with them. "
+                    "Add a match instead if someone joined late, or confirm you want the "
+                    "results discarded."
+                ).format(len(confirmed), len(completed)),
+            )
+
         admin_db.table("matches").delete().eq("tournament_id", id).execute()
 
         # Insert new matches & boards

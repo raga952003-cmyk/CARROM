@@ -116,7 +116,12 @@ def _create_profile(admin_db, name: str, email: Optional[str], club: str, city: 
 async def confirm_bulk_import(
     tournamentId: str = Form(...),
     players_json: str = Form(...),
-    autoGenerate: bool = Form(True),
+    # Defaulted OFF. It used to default to True while the browser never sent a
+    # value, so importing one late entrant silently regenerated the whole draw
+    # -- deleting every board already played -- and republished the schedule to
+    # every participant. Rebuilding a draw is not a side effect of adding a
+    # player to it.
+    autoGenerate: bool = Form(False),
     admin = Depends(verify_admin),
 ):
     """

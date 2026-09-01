@@ -30,9 +30,19 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   const [p1, setP1] = useState(0);
   const [p2, setP2] = useState(0);
   const [queen, setQueen] = useState<'player1' | 'player2' | 'none'>('none');
+  // Defaults to covered, which is the ordinary case: a queen that was
+  // pocketed and not covered has to be returned to the board.
+  const [queenCovered, setQueenCovered] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
+  // Declared here, with the rest, because two early returns sit between this
+  // point and where it used to live. Hooks must run in the same order on every
+  // render: the first render has no tournament loaded and took the `!tournament`
+  // branch after nine hooks, then the render after the data arrived reached the
+  // tenth -- and React tears the screen down with "Rendered more hooks than
+  // during the previous render". That is the umpire's phone, mid-match.
+  const [obs, setObs] = useState<BoardObservation>(emptyObservation);
 
   // Matches on this board that still need playing, in running order.
   const queue = useMemo(() => {
@@ -98,7 +108,6 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
 
   const rules: any = tournament.rules || {};
   const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
-  const [obs, setObs] = useState<BoardObservation>(emptyObservation);
 
   const decided = match.status === 'completed' || !!match.winnerId;
   // The setter is passed, not a plain callback: each tap must derive from the
@@ -235,6 +244,33 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                   </button>
                 ))}
               </div>
+              {/* Without this the queen was always submitted as uncovered, and
+                  apply_queen_points scores an uncovered queen as zero -- so a
+                  queen taken on the phone was silently worth nothing, while the
+                  label above promised it counted when covered. */}
+              {queen !== 'none' && (
+                <div className="mt-2">
+                  <div className="text-xs font-bold text-gray-600 mb-1.5">
+                    Was it covered?
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([[true, 'Covered'], [false, 'Not covered']] as const).map(([value, label]) => (
+                      <button
+                        key={String(value)}
+                        type="button"
+                        onClick={() => setQueenCovered(value)}
+                        className={`py-2 px-1 rounded-xl border text-xs font-bold ${
+                          queenCovered === value
+                            ? 'bg-[#0B5D3B] border-[#0B5D3B] text-white'
+                            : 'bg-white border-gray-200 text-gray-600'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
               </>
             )}
@@ -262,7 +298,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                 } else {
                   await submitBoardScore(tournament.id, match.id, activeBoard.boardNumber, {
                     p1Score: p1, p2Score: p2,
-                    queenClaimedBy: queen, queenCovered: false,
+                    queenClaimedBy: queen, queenCovered,
                     auditReason: 'Board mode',
                   });
                   setP1(0); setP2(0); setQueen('none');
