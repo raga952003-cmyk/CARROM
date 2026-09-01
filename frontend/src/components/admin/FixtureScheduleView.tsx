@@ -515,7 +515,9 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
 
                         {m.resultConfirmed && (
                           <div className="mt-1 text-[10px] text-emerald-700 font-bold">
-                            Final: {m.player1BoardWins} - {m.player2BoardWins} (Winner: {m.winnerName})
+                            {m.walkover
+                              ? <>Walkover to {m.winnerName}{m.walkoverReason ? ` — ${m.walkoverReason}` : ''}</>
+                              : <>Final: {m.player1BoardWins} - {m.player2BoardWins} (Winner: {m.winnerName})</>}
                           </div>
                         )}
                       </div>

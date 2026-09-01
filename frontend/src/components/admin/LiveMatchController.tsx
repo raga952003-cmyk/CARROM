@@ -328,6 +328,17 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             }`}>
               {isLive ? 'LIVE' : match.status.toUpperCase()}
             </span>
+            {/* A walkover has a winner and no boards, which reads exactly like a
+                played match nobody bothered to score. Saying so is the whole
+                point of recording it as one. */}
+            {match.walkover && (
+              <span
+                className="px-2 py-0.5 rounded text-xs font-black uppercase tracking-wider bg-[#D4A72C] text-[#202522]"
+                title={match.walkoverReason || undefined}
+              >
+                Walkover
+              </span>
+            )}
             <span className="font-bold text-sm sm:text-base tracking-tight text-white">
               Match #{match.matchNumber} — {match.roundName} — Board #{match.boardNumber}
             </span>
@@ -440,6 +451,20 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
           </div>
         </div>
+
+        {match.walkover && (
+          <div className="mx-4 mt-3 p-3 rounded-2xl bg-[#F8F6F0] border border-[#D4A72C] flex items-start gap-2">
+            <UserX className="w-4 h-4 text-[#B8860B] mt-0.5 shrink-0" />
+            <div className="text-xs text-gray-800">
+              <span className="font-bold">Awarded to {match.winnerName} without being played.</span>
+              {match.walkoverReason && <span> {match.walkoverReason}.</span>}
+              <span className="block text-gray-500 mt-0.5">
+                No coins were scored, so this result does not affect the
+                points-difference tie-break.
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* A level match needs a human, and this is where they are asked. */}
         {match.tieBreakRequired && !match.resultConfirmed && role === 'admin' && (

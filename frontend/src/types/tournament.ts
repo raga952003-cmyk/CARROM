@@ -171,6 +171,10 @@ export interface Match {
   tieBreakRequired?: boolean;
   tieBreakRule?: string | null;
   tieBreakResult?: string | null;
+  /** True when the match was awarded without being played. */
+  walkover?: boolean;
+  /** Why it was awarded — required when recording one, so it is always present. */
+  walkoverReason?: string | null;
   resultConfirmedAt?: string;
   player1BoardWins: number;
   player2BoardWins: number;
