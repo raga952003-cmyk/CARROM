@@ -10,7 +10,14 @@ pydantic-settings>=2.0.0
 # Arrives via pydantic-settings today; named here so it cannot vanish
 # when that changes.
 python-dotenv>=1.0.0
-supabase>=1.0.3
+# Pinned, not floating.
+#
+# `supabase>=1.0.3` meant every deploy installed whatever was newest, so
+# the app could break without a line of code changing -- and it silently
+# moved from 1.x to 2.28. It also drags in storage3, which hard-depends on
+# pyiceberg: 867 ms of cold start, measured, for Supabase Storage this app
+# never touches. Worth revisiting if that dependency is ever dropped.
+supabase==2.28.3
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 openpyxl>=3.1.2

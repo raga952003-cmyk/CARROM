@@ -19,7 +19,12 @@ is turned into a deterministic email, which makes matching and re-import
 dedupe exact without needing a schema change.
 """
 from typing import Any, Dict, List, Optional, Set, Tuple
-import pandas as pd
+# Imported lazily inside the helpers that need it: this module is reached
+# from a router that main.py loads at startup, and pandas costs over a
+# second to import on a cold serverless function.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import pandas as pd
 
 # Values that mean "nothing here", not a real name.
 BLANKS = {"", "na", "n/a", "n.a", "none", "nil", "-", "--", "nan", "null", "tbd"}
@@ -66,6 +71,8 @@ PARTNER_EMP_CANDIDATES = ["partner emp id", "partner employee id", "partner id",
 
 def _text(value: Any) -> Optional[str]:
     """Cell text, or None when the cell is blank or a placeholder like 'NA'."""
+    import pandas as pd
+
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     try:
@@ -179,7 +186,7 @@ def _number(row, col, default, errors, label):
         return default
 
 
-def parse_participants(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], List[str], Dict[str, Any]]:
+def parse_participants(df: "pd.DataFrame") -> Tuple[List[Dict[str, Any]], List[str], Dict[str, Any]]:
     """
     Returns (entries, errors, meta).
 
