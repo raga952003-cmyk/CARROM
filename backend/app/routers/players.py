@@ -78,7 +78,7 @@ async def create_player(data: PlayerSchema, admin = Depends(verify_admin)):
             admin_db, actor=admin, action="player.create",
             entity_type="player", entity_id=auth_user.user.id, new_state=res.data[0],
         )
-        return serialize_player(res.data[0])
+        return serialize_player(res.data[0], include_contact=True)
     except HTTPException:
         raise
     except Exception as e:
@@ -104,7 +104,7 @@ async def update_player(id: str, data: PlayerSchema, admin = Depends(verify_admi
             entity_type="player", entity_id=id,
             previous_state=before[0] if before else None, new_state=res.data[0],
         )
-        return serialize_player(res.data[0])
+        return serialize_player(res.data[0], include_contact=True)
     except HTTPException:
         raise
     except Exception as e:

@@ -3,7 +3,7 @@ from app.database import get_db, get_admin_db
 from app.models.tournament import (
     TournamentCreateSchema, TournamentUpdateSchema, RegistrationCreateSchema, ManualMatchSchema,
 )
-from app.utils.security import get_user_profile, verify_admin
+from app.utils.security import get_user_profile, verify_admin, get_optional_profile
 from app.utils.serializers import (
     serialize_tournament,
     serialize_registration,
@@ -79,7 +79,8 @@ def _select_all(query_factory, page: int = 1000) -> List[Dict[str, Any]]:
         offset += page
 
 
-def _hydrate_registrations(supabase, reg_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _hydrate_registrations(supabase, reg_rows: List[Dict[str, Any]],
+                           include_contact: bool = False) -> List[Dict[str, Any]]:
     """
     Attach both player profiles to every doubles registration's team.
 
@@ -112,11 +113,12 @@ def _hydrate_registrations(supabase, reg_rows: List[Dict[str, Any]]) -> List[Dic
         if team:
             team["player1"] = profiles_by_id.get(team.get("player1_id"))
             team["player2"] = profiles_by_id.get(team.get("player2_id"))
-        hydrated.append(serialize_registration(reg))
+        hydrated.append(serialize_registration(reg, include_contact))
     return hydrated
 
 
-def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]],
+                         include_contact: bool = False) -> List[Dict[str, Any]]:
     """
     Attach registrations, matches, boards and audit history to tournament rows.
 
@@ -137,7 +139,7 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> Lis
     )
 
     regs_by_tournament: Dict[str, List[Dict[str, Any]]] = {}
-    for raw, serialized in zip(reg_rows, _hydrate_registrations(supabase, reg_rows)):
+    for raw, serialized in zip(reg_rows, _hydrate_registrations(supabase, reg_rows, include_contact)):
         regs_by_tournament.setdefault(raw["tournament_id"], []).append(serialized)
 
     # --- Matches, boards and score audit trail -----------------------------
@@ -248,7 +250,7 @@ def sets_supported(admin_db) -> bool:
 
 
 @router.get("")
-async def get_tournaments():
+async def get_tournaments(viewer = Depends(get_optional_profile)):
     # Reads run with the service client: this API layer performs its own
     # authorisation, and a missing RLS policy would otherwise return an empty
     # list rather than an error. RLS still governs direct client access,
@@ -258,20 +260,23 @@ async def get_tournaments():
         res = supabase.table("tournaments").select("*").order("created_at", desc=True).execute()
         # Hydrated here because the dashboard reads tournament.matches and
         # tournament.registrations straight off the list response.
-        return _hydrate_tournaments(supabase, res.data or [])
+        # Contact details reach the organiser, never the public board.
+        is_admin = bool(viewer and viewer.get("role") == "admin")
+        return _hydrate_tournaments(supabase, res.data or [], is_admin)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/{id}")
-async def get_tournament(id: str):
+async def get_tournament(id: str, viewer = Depends(get_optional_profile)):
     supabase = get_admin_db()
     try:
         t_res = supabase.table("tournaments").select("*").eq("id", id).execute()
         if not t_res.data:
             raise HTTPException(status_code=404, detail="Tournament not found")
-        return _hydrate_tournaments(supabase, t_res.data)[0]
+        is_admin = bool(viewer and viewer.get("role") == "admin")
+        return _hydrate_tournaments(supabase, t_res.data, is_admin)[0]
     except HTTPException:
         raise
     except Exception as e:
@@ -389,14 +394,15 @@ async def delete_tournament(id: str, admin = Depends(verify_admin)):
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/{id}/registrations")
-async def get_tournament_registrations(id: str):
+async def get_tournament_registrations(id: str, viewer = Depends(get_optional_profile)):
     supabase = get_admin_db()
     try:
         # Ordered so the registrations list does not reshuffle between refreshes.
         res = supabase.table("registrations").select(
             "*, player:profiles(*), team:teams(*)"
         ).eq("tournament_id", id).order("registered_at").order("id").execute()
-        return _hydrate_registrations(supabase, res.data or [])
+        is_admin = bool(viewer and viewer.get("role") == "admin")
+        return _hydrate_registrations(supabase, res.data or [], is_admin)
     except HTTPException:
         raise
     except Exception as e:

@@ -27,7 +27,7 @@ def _session_response(session, profile_data) -> Dict[str, Any]:
         "expires_at": getattr(session, "expires_at", None),
         "expires_in": getattr(session, "expires_in", None),
         "token_type": "bearer",
-        "user": serialize_player(profile_data),
+        "user": serialize_player(profile_data, include_contact=True),
     }
 
 
@@ -186,7 +186,7 @@ async def get_me(profile: Dict[str, Any] = Depends(get_current_user)):
     supabase = get_db()
     res = supabase.table("profiles").select("*").eq("id", profile.id).execute()
     if res.data:
-        return serialize_player(res.data[0])
+        return serialize_player(res.data[0], include_contact=True)
     return {
         "id": profile.id,
         "email": profile.email,
@@ -250,7 +250,7 @@ async def update_me(data: ProfileUpdateSchema,
             admin_db.auth.admin.update_user_by_id(
                 profile.id, attributes={"user_metadata": {"name": patch["name"]}}
             )
-        return serialize_player(res.data[0])
+        return serialize_player(res.data[0], include_contact=True)
     except HTTPException:
         raise
     except Exception as e:

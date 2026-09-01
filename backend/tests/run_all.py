@@ -39,6 +39,7 @@ API = os.getenv("CARROM_API", "http://127.0.0.1:8000")
 SUITES = [
     "test_access",
     "test_preview_parity",
+    "test_privacy",
     "test_queen",
     "test_boardscoring",
     "test_sets",
@@ -55,6 +56,7 @@ SUITES = [
 ]
 
 PASS_MARKERS = ("RESULTS: 0 failure(s)",
+                "ALL PRIVACY CHECKS PASSED",
                 "ALL SET CHECKS PASSED",
                 "ALL PREVIEW-PARITY CHECKS PASSED", "ALL END-TO-END CHECKS PASSED",
                 "ALL ARCHITECTURE CHECKS PASSED", "ALL DOUBLES CHECKS PASSED",

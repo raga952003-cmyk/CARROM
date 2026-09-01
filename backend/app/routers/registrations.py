@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from app.database import get_db, get_admin_db
-from app.utils.security import verify_admin
+from app.utils.security import verify_admin, get_optional_profile
 from app.services.access_control import require_tournament_access
 from app.utils.serializers import serialize_registration
 from app.services.notification_service import fan_out_notification
@@ -75,7 +75,7 @@ async def approve_registration(id: str, admin = Depends(verify_admin)):
             tournament_id=registration["tournament_id"],
             recipient_ids=_recipients_for(registration, admin_db),
         )
-        return serialize_registration(registration)
+        return serialize_registration(registration, include_contact=True)
     except HTTPException:
         raise
     except Exception as e:
@@ -103,7 +103,7 @@ async def reject_registration(id: str, admin = Depends(verify_admin)):
             tournament_id=registration["tournament_id"],
             recipient_ids=_recipients_for(registration, admin_db),
         )
-        return serialize_registration(registration)
+        return serialize_registration(registration, include_contact=True)
     except HTTPException:
         raise
     except Exception as e:
@@ -111,7 +111,7 @@ async def reject_registration(id: str, admin = Depends(verify_admin)):
 
 
 @router.get("/{id}")
-async def get_registration(id: str):
+async def get_registration(id: str, viewer = Depends(get_optional_profile)):
     supabase = get_admin_db()
     try:
         res = supabase.table("registrations").select(
@@ -119,7 +119,8 @@ async def get_registration(id: str):
         ).eq("id", id).execute()
         if not res.data:
             raise HTTPException(status_code=404, detail="Registration not found.")
-        return serialize_registration(res.data[0])
+        is_admin = bool(viewer and viewer.get("role") == "admin")
+        return serialize_registration(res.data[0], is_admin)
     except HTTPException:
         raise
     except Exception as e:

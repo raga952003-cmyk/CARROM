@@ -31,13 +31,18 @@ PRIVATE_PLAYER_FIELDS = {"phone", "email"}
 
 
 def serialize_player(row: Optional[Dict[str, Any]],
-                     include_contact: bool = True) -> Optional[Dict[str, Any]]:
+                     include_contact: bool = False) -> Optional[Dict[str, Any]]:
     """
-    A player profile.
+    A player profile. Contact details are withheld unless asked for.
 
-    `include_contact=False` drops phone and email. The public directory used
-    to return whole profile rows, which published every participant's mobile
-    number and email address to anyone who could reach the API.
+    The default used to be True, so every path leaked unless it remembered not
+    to -- and the registration paths did not remember. Migration 011 closed
+    this at the database, but these routes read through the service-role
+    client, which bypasses RLS entirely, so an anonymous caller could still
+    read twenty email addresses and a mobile number out of
+    /api/tournaments/{id}/registrations and out of the public board's own
+    payload. A default that has to be overridden to be safe is the wrong way
+    round.
     """
     if not row:
         return None
@@ -46,15 +51,16 @@ def serialize_player(row: Optional[Dict[str, Any]],
     return camelize({k: v for k, v in row.items() if k not in PRIVATE_PLAYER_FIELDS})
 
 
-def serialize_team(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def serialize_team(row: Optional[Dict[str, Any]],
+                   include_contact: bool = False) -> Optional[Dict[str, Any]]:
     """Teams carry hydrated player1/player2 objects when the caller joined them."""
     if not row:
         return None
     team = camelize(row)
     if row.get("player1"):
-        team["player1"] = serialize_player(row["player1"])
+        team["player1"] = serialize_player(row["player1"], include_contact)
     if row.get("player2"):
-        team["player2"] = serialize_player(row["player2"])
+        team["player2"] = serialize_player(row["player2"], include_contact)
     return team
 
 
@@ -62,10 +68,18 @@ def serialize_board(row: Dict[str, Any]) -> Dict[str, Any]:
     return camelize(row)
 
 
-def serialize_registration(row: Dict[str, Any]) -> Dict[str, Any]:
+def serialize_registration(row: Dict[str, Any],
+                           include_contact: bool = False) -> Dict[str, Any]:
+    """
+    An entry, with the entrant hydrated.
+
+    An organiser needs a way to ring an entrant, so contact details are
+    available -- but only to an admin who asked for them, never to whoever
+    happens to open the public board.
+    """
     reg = camelize(row)
-    reg["player"] = serialize_player(row.get("player"))
-    reg["team"] = serialize_team(row.get("team"))
+    reg["player"] = serialize_player(row.get("player"), include_contact)
+    reg["team"] = serialize_team(row.get("team"), include_contact)
     return reg
 
 
