@@ -921,11 +921,25 @@ END $$;
 -- (admins are already covered by admin_all_profiles, which is FOR ALL).
 DROP POLICY IF EXISTS select_profiles ON public.profiles;
 
-CREATE POLICY select_own_profile ON public.profiles
-    FOR SELECT USING (auth.uid() = id);
+-- Guarded the way 006 guards its policies. CREATE POLICY has no IF NOT EXISTS,
+-- so without this a second run of the bundle stops here with
+-- "policy select_own_profile for table profiles already exists" -- which is
+-- what "safe to re-run" at the top of this file is supposed to mean.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies
+                   WHERE tablename = 'profiles' AND policyname = 'select_own_profile') THEN
+        CREATE POLICY select_own_profile ON public.profiles
+            FOR SELECT USING (auth.uid() = id);
+    END IF;
+END $$;
 
 -- The public directory: who is playing, without how to contact them.
-CREATE OR REPLACE VIEW public.public_profiles
+-- Dropped first rather than CREATE OR REPLACE, which refuses any change to the
+-- column list and would strand this migration the day a column is added here.
+DROP VIEW IF EXISTS public.public_profiles;
+
+CREATE VIEW public.public_profiles
 WITH (security_invoker = false) AS
     SELECT id, name, avatar, club, city, rating, role, created_at
     FROM public.profiles;
