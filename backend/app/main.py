@@ -91,6 +91,7 @@ async def health():
             ("004_match_toss", "matches", "toss_choice"),
             ("005_board_detail", "boards", "board_winner"),
             ("006_sets_and_sides", "boards", "set_number"),
+            ("010_walkover", "matches", "walkover_by"),
         )
         for migration, table, column in probes:
             try:

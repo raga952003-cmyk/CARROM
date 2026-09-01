@@ -1,25 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Play, 
-  Pause, 
-  RotateCcw, 
-  CheckCircle2, 
-  Clock, 
-  Trophy, 
-  AlertCircle, 
-  AlertTriangle,
-  ShieldAlert, 
-  Sparkles, 
-  History, 
-  Check, 
-  Edit3, 
-  X, 
-  ArrowLeft,
-  Crown,
-  Flame,
-  Award,
-  Plus
-} from 'lucide-react';
+import { Play, Pause, RotateCcw, CheckCircle2, Clock, Trophy, AlertCircle, AlertTriangle, ShieldAlert, Sparkles, History, Check, Edit3, X, ArrowLeft, Crown, Flame, Award, Plus, UserX } from 'lucide-react';
+import { WalkoverModal } from './WalkoverModal';
 import confetti from 'canvas-confetti';
 import { Tournament, Match, BoardScore } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
@@ -52,6 +33,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     submitBoardScore, 
     updateBoardScore, 
     confirmMatchResult,
+    refreshData,
     role
   } = useTournament();
 
@@ -88,6 +70,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [isSubmitScoreModalOpen, setIsSubmitScoreModalOpen] = useState(false);
   const [isEditAuditModalOpen, setIsEditAuditModalOpen] = useState(false);
   const [isConfirmResultModalOpen, setIsConfirmResultModalOpen] = useState(false);
+  const [isWalkoverModalOpen, setIsWalkoverModalOpen] = useState(false);
   const [selectedBoardForScore, setSelectedBoardForScore] = useState<number>(1);
 
   // Score Input form state
@@ -271,7 +254,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         {/* Match Header Bar */}
         <div className="bg-[#202522] text-white px-6 py-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center space-x-3">
-            <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
+            <span className={`px-2 py-0.5 rounded text-xs font-black uppercase tracking-wider ${
               isLive
                 ? 'bg-[#FF4444] text-white animate-pulse'
                 : isCompleted
@@ -292,7 +275,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         </div>
 
         {notice && (
-          <div className="px-4 sm:px-6 py-2 bg-amber-50 border-b border-amber-200 flex items-start gap-2 text-[11px] text-amber-900">
+          <div className="px-4 sm:px-6 py-2 bg-amber-50 border-b border-amber-200 flex items-start gap-2 text-sm text-amber-900">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
             <span className="flex-1">{notice}</span>
             {onDismissNotice && (
@@ -302,8 +285,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         )}
 
         {match.tossWinnerName && (
-          <div className="px-4 sm:px-6 py-2 bg-emerald-50 border-b border-emerald-200 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-emerald-900">
-            <span className="font-bold uppercase tracking-wider text-[10px]">Toss</span>
+          <div className="px-4 sm:px-6 py-2 bg-emerald-50 border-b border-emerald-200 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-emerald-900">
+            <span className="font-bold uppercase tracking-wider text-xs">Toss</span>
             <span><strong>{match.tossWinnerName}</strong> won{match.tossCoinResult ? ` (${match.tossCoinResult})` : ''}</span>
             <span className="capitalize">and chose <strong>{match.tossChoice || 'strike'}</strong></span>
           </div>
@@ -329,7 +312,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
               <div className="mt-4 flex items-center justify-center space-x-6 pt-3 border-t border-gray-200">
                 <div>
-                  <div className="text-[10px] uppercase font-bold text-gray-400">
+                  <div className="text-xs uppercase font-bold text-gray-400">
                     {totalSets > 1 ? 'Sets Won' : 'Board Wins'}
                   </div>
                   <div className="text-3xl font-black text-[#0B5D3B]">
@@ -338,7 +321,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 </div>
                 <div className="h-8 w-px bg-gray-200" />
                 <div>
-                  <div className="text-[10px] uppercase font-bold text-gray-400">Total Points</div>
+                  <div className="text-xs uppercase font-bold text-gray-400">Total Points</div>
                   <div className="text-3xl font-black text-gray-900">{match.player1TotalPoints}</div>
                 </div>
               </div>
@@ -349,7 +332,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               <div className="w-10 h-10 rounded-full bg-[#F8F6F0] border border-[#D4A72C] flex items-center justify-center text-xs font-black text-[#0B5D3B] shadow-xs">
                 VS
               </div>
-              <div className="text-[10px] uppercase font-bold text-gray-400 mt-2">
+              <div className="text-xs uppercase font-bold text-gray-400 mt-2">
                 {totalSets > 1
                   ? `${totalSets} Sets × ${boardsPerSet} Boards`
                   : `Best of ${match.maxBoards} Boards`}
@@ -375,7 +358,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
               <div className="mt-4 flex items-center justify-center space-x-6 pt-3 border-t border-gray-200">
                 <div>
-                  <div className="text-[10px] uppercase font-bold text-gray-400">
+                  <div className="text-xs uppercase font-bold text-gray-400">
                     {totalSets > 1 ? 'Sets Won' : 'Board Wins'}
                   </div>
                   <div className="text-3xl font-black text-[#0B5D3B]">
@@ -384,7 +367,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 </div>
                 <div className="h-8 w-px bg-gray-200" />
                 <div>
-                  <div className="text-[10px] uppercase font-bold text-gray-400">Total Points</div>
+                  <div className="text-xs uppercase font-bold text-gray-400">Total Points</div>
                   <div className="text-3xl font-black text-gray-900">{match.player2TotalPoints}</div>
                 </div>
               </div>
@@ -424,6 +407,18 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             </div>
 
             {/* Confirm Match Result CTA */}
+            <div className="flex items-center gap-2">
+            {!match.resultConfirmed && !isCompleted && (
+              <button
+                id="walkover-btn"
+                onClick={() => setIsWalkoverModalOpen(true)}
+                className="px-4 py-2.5 bg-white hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-lg border border-gray-300 shadow-xs transition-all flex items-center gap-1.5"
+                title="A player did not arrive, retired, or conceded"
+              >
+                <UserX className="w-4 h-4 text-gray-500" />
+                <span>Walkover</span>
+              </button>
+            )}
             {!match.resultConfirmed && (
               <button
                 id="confirm-match-result-btn"
@@ -434,6 +429,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 <span>Confirm Final Result</span>
               </button>
             )}
+            </div>
           </div>
         )}
       </div>
@@ -446,7 +442,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               <Trophy className="w-6 h-6 text-amber-600" />
             </div>
             <div>
-              <div className="text-[11px] font-extrabold uppercase tracking-wider text-amber-950">
+              <div className="text-sm font-extrabold uppercase tracking-wider text-amber-950">
                 Official Result Confirmed
               </div>
               <div className="text-base font-bold">
@@ -539,7 +535,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                     <div>
                       <div className="font-bold text-xs text-gray-900 flex items-center gap-2">
                         <span>Board {board.boardNumber}</span>
-                        <span className={`text-[10px] px-2 py-0.2 rounded-md font-bold uppercase ${
+                        <span className={`text-xs px-2 py-0.2 rounded-md font-bold uppercase ${
                           isBoardCompleted ? 'bg-emerald-100 text-emerald-800' :
                           isBoardInProgress ? 'bg-amber-100 text-amber-800' :
                           'bg-gray-100 text-gray-600'
@@ -547,7 +543,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                           {board.status.replace('_', ' ')}
                         </span>
                       </div>
-                      <div className="text-[11px] text-gray-500 mt-0.5">
+                      <div className="text-sm text-gray-500 mt-0.5">
                         {isBoardCompleted ? (
                           <span className="text-emerald-800 font-semibold">
                             Winner: {boardWinner} · Diff: {Math.abs(board.player1Score - board.player2Score)} pts
@@ -566,7 +562,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                     
                     {/* P1 Score */}
                     <div className="text-center">
-                      <div className="text-[9px] uppercase text-gray-400 font-bold truncate max-w-[80px]">
+                      <div className="text-xs uppercase text-gray-400 font-bold truncate max-w-[80px]">
                         {match.player1Name.split(' ')[0]}
                       </div>
                       <div className={`text-lg font-black ${
@@ -580,7 +576,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
                     {/* P2 Score */}
                     <div className="text-center">
-                      <div className="text-[9px] uppercase text-gray-400 font-bold truncate max-w-[80px]">
+                      <div className="text-xs uppercase text-gray-400 font-bold truncate max-w-[80px]">
                         {match.player2Name.split(' ')[0]}
                       </div>
                       <div className={`text-lg font-black ${
@@ -592,7 +588,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
                     {/* Queen details */}
                     {board.queenClaimedBy && board.queenClaimedBy !== 'none' && (
-                      <div className="border-l border-gray-100 pl-3 flex items-center gap-1 text-[10px] text-amber-800 font-bold">
+                      <div className="border-l border-gray-100 pl-3 flex items-center gap-1 text-xs text-amber-800 font-bold">
                         <Crown className="w-3 h-3 text-[#D4A72C]" />
                         <span>Queen Covered (+3)</span>
                       </div>
@@ -645,11 +641,11 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 <div>
                   <span className="font-semibold text-gray-900">Board {item.boardNumber}: </span>
                   <span>Changed from ({item.previousScore.player1} - {item.previousScore.player2}) to ({item.newScore.player1} - {item.newScore.player2})</span>
-                  <div className="text-[10px] text-gray-400 mt-0.5">
+                  <div className="text-xs text-gray-400 mt-0.5">
                     Reason: "{item.reason}" · By {item.adminName}
                   </div>
                 </div>
-                <span className="text-[10px] text-gray-400">
+                <span className="text-xs text-gray-400">
                   {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                 </span>
               </div>
@@ -706,7 +702,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                           key={side}
                           type="button"
                           onClick={() => setFinishedBy(side as any)}
-                          className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all truncate ${
+                          className={`py-1.5 rounded-lg text-center font-bold text-sm border transition-all truncate ${
                             finishedBy === side
                               ? (side === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
                               : 'bg-white text-gray-700 border-gray-200'
@@ -761,7 +757,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                             setQueenClaimed(side as any);
                             setQueenCovered(side !== 'none');
                           }}
-                          className={`py-1.5 rounded-lg text-center font-bold text-[11px] border transition-all truncate ${
+                          className={`py-1.5 rounded-lg text-center font-bold text-sm border transition-all truncate ${
                             queenClaimed === side
                               ? (side === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
                               : 'bg-white text-gray-700 border-gray-200'
@@ -830,6 +826,14 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         confirmLabel="Confirm & Update Standings"
         variant="primary"
       />
+
+      {isWalkoverModalOpen && (
+        <WalkoverModal
+          match={match}
+          onClose={() => setIsWalkoverModalOpen(false)}
+          onDone={() => refreshData()}
+        />
+      )}
 
     </div>
   );

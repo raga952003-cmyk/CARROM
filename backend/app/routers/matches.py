@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
 from app.models.match import (
     MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema, TossSchema,
-    MatchSidesSchema,
+    MatchSidesSchema, WalkoverSchema,
 )
 from app.utils.security import get_user_profile, verify_admin
 from app.services.scoring_engine import (
@@ -85,6 +85,42 @@ def board_detail_available(admin_db) -> bool:
         _board_detail_available["value"] = False
         _board_detail_available["at"] = time.monotonic()
     return _board_detail_available["value"]
+
+
+_walkover_available: Dict[str, Any] = {}
+
+
+_WALKOVER_COLUMNS = ("walkover", "walkover_reason", "walkover_by")
+
+
+def walkover_columns(admin_db) -> tuple:
+    """
+    Which of the walkover columns this database actually has.
+
+    Probed one at a time rather than as a set, because some databases already
+    carry `walkover` and `walkover_reason` from before these were tracked in
+    schema.sql while lacking `walkover_by`. Probing any single column would
+    then either report success and let the write fail, or report failure and
+    throw away two columns that were there all along.
+    """
+    cached = _walkover_available.get("value")
+    if cached is not None and (
+        cached == _WALKOVER_COLUMNS
+        or time.monotonic() - _walkover_available.get("at", 0) < _PROBE_RETRY_SECONDS
+    ):
+        return cached
+
+    present = []
+    for column in _WALKOVER_COLUMNS:
+        try:
+            admin_db.table("matches").select(column).limit(1).execute()
+            present.append(column)
+        except Exception:
+            pass
+    found = tuple(present)
+    _walkover_available["value"] = found
+    _walkover_available["at"] = time.monotonic()
+    return found
 
 
 @router.post("/{id}/start")
@@ -620,6 +656,98 @@ async def confirm_match(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{id}/walkover")
+async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_admin)):
+    """
+    Award a match nobody played: a no-show, a retirement, or a concession.
+
+    Before this existed the only way to finish a match was to score boards, so
+    an organiser facing an absent player had to invent scores — which then went
+    into the points table indistinguishable from a real result.
+
+    The match is given a winner, the board wins needed to take it, and the
+    points the rules say a walkover is worth, so the standings need no special
+    case. What it is NOT given is coin points by default: nobody pocketed
+    anything, and inflating score difference with a match that was never played
+    would distort the very tie-break it feeds.
+    """
+    admin_db = get_admin_db()
+    try:
+        match = _authorise_match(admin_db, id, admin, "match.walkover")
+
+        if match.get("result_confirmed"):
+            raise HTTPException(
+                status_code=409,
+                detail="This result is already confirmed. Reopen it before recording a walkover.",
+            )
+
+        p1, p2 = match.get("player1_id"), match.get("player2_id")
+        if data.winner_id not in (p1, p2):
+            raise HTTPException(
+                status_code=422,
+                detail="The winner must be one of the two players in this match.",
+            )
+        if not (data.reason or "").strip():
+            raise HTTPException(status_code=422, detail="A reason is required for a walkover.")
+
+        rules = tournament_rules(admin_db, match.get("tournament_id")) or {}
+        max_boards = match.get("max_boards") or rules.get("maxBoardsPerMatch") or 3
+        # Enough boards to have taken the match, not all of them: a 3-board
+        # match is won 2-0, and recording 3-0 would overstate it.
+        default_wins = (int(max_boards) // 2) + 1
+        board_wins = int(rules.get("walkoverBoardWins", default_wins))
+        points = int(rules.get("walkoverPoints", 0))
+
+        winner_is_p1 = data.winner_id == p1
+        patch = {
+            "status": "completed",
+            "winner_id": data.winner_id,
+            "winner_name": match.get("player1_name") if winner_is_p1 else match.get("player2_name"),
+            "player1_board_wins": board_wins if winner_is_p1 else 0,
+            "player2_board_wins": 0 if winner_is_p1 else board_wins,
+            "player1_total_points": points if winner_is_p1 else 0,
+            "player2_total_points": 0 if winner_is_p1 else points,
+            "match_completed_at": datetime.now(timezone.utc).isoformat(),
+            "walkover": True,
+            "walkover_reason": data.reason.strip(),
+            "walkover_by": admin["id"],
+        }
+
+        # Until migration 010 is applied there is nowhere to record that this
+        # was a walkover. The RESULT is still correct and the tournament can go
+        # on, so the flag is dropped rather than the organiser being blocked
+        # mid-event -- but the response says so, because a walkover that looks
+        # like a played win is exactly the confusion this endpoint exists to end.
+        present = walkover_columns(admin_db)
+        missing = [c for c in _WALKOVER_COLUMNS if c not in present]
+        for key in missing:
+            patch.pop(key, None)
+        # Only the flag itself matters for telling a walkover from a played
+        # win; losing walkover_by costs accountability, not correctness.
+        degraded = "walkover" in missing
+
+        res = admin_db.table("matches").update(patch).eq("id", id).execute()
+
+        record_audit(
+            admin_db, actor=admin, action="match.walkover",
+            entity_type="match", entity_id=id,
+            previous_state={"status": match.get("status"), "winner_id": match.get("winner_id")},
+            new_state={"winner_id": data.winner_id, "reason": data.reason.strip()},
+        )
+
+        out = serialize_match(res.data[0])
+        if degraded:
+            out["warning"] = (
+                "Recorded, but this database cannot yet mark it as a walkover. "
+                "Apply migration 010 so the result is not mistaken for a played win."
+            )
+        return out
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.post("/{id}/toss")
 async def record_toss(id: str, data: TossSchema, admin = Depends(verify_admin)):

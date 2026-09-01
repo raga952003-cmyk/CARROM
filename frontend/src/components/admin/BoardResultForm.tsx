@@ -33,7 +33,7 @@ const Picker: React.FC<PickerProps> = ({
           // another selection — that coupling made real boards, where the loser
           // covers the queen, impossible to record.
           onClick={() => onChange(v)}
-          className={`py-1.5 px-1 rounded-lg text-center font-bold text-[11px] border transition-all truncate ${
+          className={`py-1.5 px-1 rounded-lg text-center font-bold text-sm border transition-all truncate ${
             value === v
               ? (v === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
               : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'
@@ -43,7 +43,7 @@ const Picker: React.FC<PickerProps> = ({
         </button>
       ))}
     </div>
-    {hint && <p className="text-[10px] text-gray-500 mt-1.5">{hint}</p>}
+    {hint && <p className="text-xs text-gray-500 mt-1.5">{hint}</p>}
   </div>
 );
 
@@ -142,11 +142,11 @@ const SimpleBoardForm: React.FC<BoardResultFormProps> = ({ match, rules, value, 
       </div>
 
       <div className="p-4 rounded-xl bg-[#0B5D3B] text-white text-center">
-        <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-200">
+        <div className="text-xs font-bold uppercase tracking-wider text-emerald-200">
           Total Points
         </div>
         <div className="text-4xl font-black tabular-nums mt-0.5">{points}</div>
-        <div className="text-[11px] text-emerald-200 mt-0.5 truncate">
+        <div className="text-sm text-emerald-200 mt-0.5 truncate">
           {value.winner === 'none'
             ? 'Choose who finished the board'
             : `to ${value.winner === 'player1' ? p1 : p2}`}
@@ -210,7 +210,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
               key={v}
               type="button"
               onClick={() => set({ coinsRemainingWith: v, coinsRemaining: v === 'none' ? 0 : value.coinsRemaining })}
-              className={`py-1.5 px-1 rounded-lg text-center font-bold text-[11px] border transition-all truncate ${
+              className={`py-1.5 px-1 rounded-lg text-center font-bold text-sm border transition-all truncate ${
                 value.coinsRemainingWith === v
                   ? (v === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
                   : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'
@@ -223,14 +223,14 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
 
         {value.coinsRemainingWith !== 'none' && (
           <div className="mt-2">
-            <span className="block text-[11px] font-semibold text-gray-600 mb-1">How many coins?</span>
+            <span className="block text-sm font-semibold text-gray-600 mb-1">How many coins?</span>
             <div className="flex flex-wrap gap-1">
               {Array.from({ length: maxCoins + 1 }, (_, n) => n).map(n => (
                 <button
                   key={n}
                   type="button"
                   onClick={() => set({ coinsRemaining: n })}
-                  className={`w-7 h-7 rounded-md text-[11px] font-bold border transition-all ${
+                  className={`w-7 h-7 rounded-md text-sm font-bold border transition-all ${
                     value.coinsRemaining === n
                       ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]'
                       : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
@@ -243,7 +243,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
           </div>
         )}
 
-        <p className="text-[10px] text-gray-500 mt-1.5">
+        <p className="text-xs text-gray-500 mt-1.5">
           The board winner scores these coins.
         </p>
       </div>
@@ -255,7 +255,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
         <div className="grid grid-cols-2 gap-3">
           {([['p1Penalty', match.player1Name], ['p2Penalty', match.player2Name]] as const).map(([key, name]) => (
             <div key={key}>
-              <span className="block text-[11px] font-semibold text-gray-600 mb-1 truncate">{name}</span>
+              <span className="block text-sm font-semibold text-gray-600 mb-1 truncate">{name}</span>
               <input
                 type="number"
                 min={0}
@@ -270,26 +270,26 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
 
       {/* The consequence of the answers above, before anything is saved. */}
       <div className="p-3 rounded-xl bg-[#0B5D3B] text-white">
-        <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-200">Board Score</div>
+        <div className="text-xs font-bold uppercase tracking-wider text-emerald-200">Board Score</div>
         <div className="mt-1 flex items-center justify-between gap-2">
           <div className="min-w-0">
-            <div className="text-[11px] text-emerald-200 truncate">{match.player1Name}</div>
+            <div className="text-sm text-emerald-200 truncate">{match.player1Name}</div>
             <div className="text-2xl font-black tabular-nums">{result.p1}</div>
           </div>
-          <div className="text-[10px] text-emerald-200 text-center shrink-0">
+          <div className="text-xs text-emerald-200 text-center shrink-0">
             base {result.base}
             {result.queenBonus > 0 && <> · queen +{result.queenBonus}</>}
             {(value.p1Penalty > 0 || value.p2Penalty > 0) && <> · penalties applied</>}
           </div>
           <div className="min-w-0 text-right">
-            <div className="text-[11px] text-emerald-200 truncate">{match.player2Name}</div>
+            <div className="text-sm text-emerald-200 truncate">{match.player2Name}</div>
             <div className="text-2xl font-black tabular-nums">{result.p2}</div>
           </div>
         </div>
       </div>
 
       {result.warnings.map((w, i) => (
-        <div key={i} className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2 text-[11px] text-amber-900">
+        <div key={i} className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2 text-sm text-amber-900">
           <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
           <span>{w}</span>
         </div>

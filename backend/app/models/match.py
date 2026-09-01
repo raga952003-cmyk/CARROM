@@ -99,6 +99,18 @@ class TossSchema(BaseCamelModel):
     choice: str = "strike"                     # 'strike' | 'side'
 
 
+class WalkoverSchema(BaseCamelModel):
+    """
+    A result decided off the board: a no-show, a retirement, or a concession.
+
+    The winner is required and the reason is required, because a match nobody
+    played needs to say why on the record — the standings cannot distinguish it
+    from a played win otherwise.
+    """
+    winner_id: str
+    reason: str
+
+
 class MatchSidesSchema(BaseCamelModel):
     """
     Who plays which coin, and which way round the board is drawn.
