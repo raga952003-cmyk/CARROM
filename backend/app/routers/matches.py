@@ -761,26 +761,62 @@ async def confirm_match(
     try:
         m = _authorise_match(admin_db, id, admin, "match.confirm")
 
-        if not m.get("winner_id") and m.get("status") != "completed":
-            # "Finish the remaining boards" is wrong and maddening when every
-            # board has been played and the scores are simply level -- which is
-            # the commonest reason to land here under remaining-coins scoring.
-            if m.get("tie_break_required"):
-                rule = m.get("tie_break_rule") or "organizer_decision"
+        if not m.get("winner_id"):
+            # Finishing a match is the organiser's decision, not arithmetic on
+            # how many board rows happen to exist. A match can be settled after
+            # one board or after eight -- players agree, time runs out, the
+            # boards are needed for the next round -- and the result is whatever
+            # was actually played.
+            #
+            # So confirmation recomputes from the boards rather than trusting
+            # the stored row, and decides on what it finds. This also repairs a
+            # match whose last write did not land: one was sitting at 20-1 with
+            # every board complete and still recorded as live with no winner.
+            boards = admin_db.table("boards").select("*").eq(
+                "match_id", id).order("board_number").execute().data or []
+            rules = tournament_rules(admin_db, m.get("tournament_id")) or {}
+            recomputed = recalculate_match_scores(m, boards, rules)
+
+            p1_points = recomputed["player1TotalPoints"]
+            p2_points = recomputed["player2TotalPoints"]
+            p1_wins = recomputed["player1BoardWins"]
+            p2_wins = recomputed["player2BoardWins"]
+
+            if scoring_mode(rules) == "remaining_coins":
+                lead = p1_points - p2_points
+            else:
+                lead = p1_wins - p2_wins
+
+            if lead == 0:
+                # Genuinely level. That is a tie to be broken, not a match to
+                # be finished -- and it needs a human either way.
+                rule = m.get("tie_break_rule") or (rules.get("tieBreak") or "organizer_decision")
                 how = ("Play a deciding board, or award the match."
                        if rule == "additional_board"
                        else "Award the match to one of the players.")
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "This match finished level at {} points each, so it has no "
-                        "winner yet. {}"
-                    ).format(m.get("player1_total_points"), how),
+                        "This match is level at {} points each ({} board(s) played), "
+                        "so there is no winner to confirm. {}"
+                    ).format(p1_points, len([b for b in boards if b.get("status") == "completed"]), how),
                 )
-            raise HTTPException(
-                status_code=409,
-                detail="This match has no decided winner yet. Finish the remaining boards first.",
-            )
+
+            winner_is_p1 = lead > 0
+            settled = {
+                "status": "completed",
+                "winner_id": m.get("player1_id") if winner_is_p1 else m.get("player2_id"),
+                "winner_name": m.get("player1_name") if winner_is_p1 else m.get("player2_name"),
+                "player1_board_wins": p1_wins,
+                "player2_board_wins": p2_wins,
+                "player1_total_points": p1_points,
+                "player2_total_points": p2_points,
+                "match_completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if board_detail_available(admin_db):
+                settled["tie_break_required"] = False
+            admin_db.table("matches").update(settled).eq("id", id).execute()
+            m = {**m, **settled}
 
         winner_name = m.get("winner_name")
         recipients = resolve_tournament_audience(admin_db, m["tournament_id"])

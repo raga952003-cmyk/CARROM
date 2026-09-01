@@ -1001,7 +1001,19 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         onClose={() => setIsConfirmResultModalOpen(false)}
         onConfirm={handleExecuteConfirmResult}
         title="Confirm Official Match Result?"
-        description={`Confirming will finalize the score (${match.player1TotalPoints} - ${match.player2TotalPoints}) and automatically update tournament points table, player rankings, and advance the winner in the knockout bracket.`}
+        description={(() => {
+          // Finishing a match is the organiser's call, so say plainly how much
+          // was played rather than implying every board must be.
+          const all = match.boards || [];
+          const played = all.filter(b => b.status === 'completed').length;
+          const remaining = all.length - played;
+          return `Confirming settles this match at ${match.player1TotalPoints} - ${match.player2TotalPoints}`
+            + ` on ${played} board${played === 1 ? '' : 's'} played`
+            + (remaining > 0
+                ? `, leaving ${remaining} unplayed. That is fine — the result is what was played.`
+                : '.')
+            + ` The points table, rankings and the knockout bracket update from it.`;
+        })()}
         confirmLabel="Confirm & Update Standings"
         variant="primary"
       />
