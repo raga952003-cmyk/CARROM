@@ -33,6 +33,20 @@ const ROLE_LABEL: Record<AccessRole, string> = {
   scorer: 'Score only',
 };
 
+/**
+ * One name per admin, not a name and an address.
+ *
+ * The email is only appended when two admins share a name, which is the only
+ * moment it tells the reader anything they could not already see. An account
+ * with no name falls back to the address, since something has to identify it.
+ */
+function labelFor(a: GrantableAdmin, all: GrantableAdmin[]): string {
+  const name = (a.name || '').trim();
+  if (!name) return a.email;
+  const sharesName = all.some(o => o.id !== a.id && (o.name || '').trim() === name);
+  return sharesName ? `${name} (${a.email})` : name;
+}
+
 export const TournamentAccessPanel: React.FC<Props> = ({
   tournamentId, tournamentName, access, onChanged, onPendingCount,
 }) => {
@@ -194,7 +208,7 @@ export const TournamentAccessPanel: React.FC<Props> = ({
                 >
                   <option value="">Choose an admin…</option>
                   {admins.map(a => (
-                    <option key={a.id} value={a.id}>{a.name} ({a.email})</option>
+                    <option key={a.id} value={a.id}>{labelFor(a, admins)}</option>
                   ))}
                 </select>
                 <select
