@@ -12,8 +12,6 @@ export const ManagePlayersTab: React.FC = () => {
 
   // Form Fields
   const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [phone, setPhone] = useState('');
   const [club, setClub] = useState('');
   const [city, setCity] = useState('');
   const [rating, setRating] = useState(1500);
@@ -22,15 +20,12 @@ export const ManagePlayersTab: React.FC = () => {
   const filteredPlayers = allPlayers.filter(p => 
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     (p.club && p.club.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (p.city && p.city.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (p.email && p.email.toLowerCase().includes(searchTerm.toLowerCase()))
+    (p.city && p.city.toLowerCase().includes(searchTerm.toLowerCase()))
   );
 
   const handleOpenAdd = () => {
     setEditingPlayer(null);
     setName('');
-    setEmail('');
-    setPhone('');
     setClub('');
     setCity('');
     setRating(1500);
@@ -41,8 +36,6 @@ export const ManagePlayersTab: React.FC = () => {
   const handleOpenEdit = (p: Player) => {
     setEditingPlayer(p);
     setName(p.name);
-    setEmail(p.email || '');
-    setPhone(p.phone || '');
     setClub(p.club || '');
     setCity(p.city || '');
     setRating(p.rating || 1500);
@@ -54,8 +47,6 @@ export const ManagePlayersTab: React.FC = () => {
     e.preventDefault();
     const playerData = {
       name,
-      email: email || undefined,
-      phone: phone || undefined,
       club: club || undefined,
       city,
       rating,
@@ -219,17 +210,6 @@ export const ManagePlayersTab: React.FC = () => {
                 />
               </div>
 
-              <div>
-                <label className="block font-bold text-gray-700 mb-1">Email Address</label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={e => setEmail(e.target.value)}
-                  placeholder="ramesh@sports.in"
-                  className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
-                />
-              </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">Rating Points</label>
@@ -280,17 +260,6 @@ export const ManagePlayersTab: React.FC = () => {
                     className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
                   />
                 </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-gray-700 mb-1">Contact Phone</label>
-                <input
-                  type="tel"
-                  value={phone}
-                  onChange={e => setPhone(e.target.value)}
-                  placeholder="e.g. 9822012345"
-                  className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
-                />
               </div>
 
               {editingPlayer && (
