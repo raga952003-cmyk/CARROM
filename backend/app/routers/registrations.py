@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
+from app.services.access_control import require_tournament_access
 from app.utils.serializers import serialize_registration
 from app.services.notification_service import fan_out_notification
 from app.services.audit_service import record_audit
@@ -44,10 +45,21 @@ def _set_status(id: str, status: str, admin_db, actor=None):
     return res.data[0]
 
 
+def _authorise_registration(admin_db, registration_id: str, admin):
+    """Deciding a registration belongs to whoever runs that tournament."""
+    rows = admin_db.table("registrations").select("tournament_id").eq(
+        "id", registration_id).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Registration not found.")
+    require_tournament_access(admin_db, rows[0]["tournament_id"], admin)
+
+
 @router.post("/{id}/approve")
 async def approve_registration(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
+        _authorise_registration(admin_db, id, admin)
+
         registration = _set_status(id, "approved", admin_db, actor=admin)
 
         tournament = admin_db.table("tournaments").select("name").eq(
@@ -74,6 +86,8 @@ async def approve_registration(id: str, admin = Depends(verify_admin)):
 async def reject_registration(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
+        _authorise_registration(admin_db, id, admin)
+
         registration = _set_status(id, "rejected", admin_db, actor=admin)
 
         tournament = admin_db.table("tournaments").select("name").eq(

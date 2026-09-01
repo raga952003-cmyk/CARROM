@@ -155,6 +155,8 @@ async def resume_match(id: str, admin = Depends(verify_admin)):
 async def add_board(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
+        _authorise_match(admin_db, id, admin, "match.add_board")
+
         # Count existing boards
         boards_res = admin_db.table("boards").select("board_number").eq("match_id", id).execute()
         count = len(boards_res.data)
@@ -188,6 +190,11 @@ async def update_board(
 ):
     admin_db = get_admin_db()
     try:
+        # Correcting a board is scoring, and was the one scoring path that never
+        # checked. Being an admin was enough to rewrite any board on anyone's
+        # tournament, which is precisely what the ownership model exists to stop.
+        _authorise_match(admin_db, id, admin, "match.score")
+
         # Fetch previous board score for audit log
         prev_board = admin_db.table("boards").select("*").eq("match_id", id).eq("board_number", board_number).execute()
         if not prev_board.data:

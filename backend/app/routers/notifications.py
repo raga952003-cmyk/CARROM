@@ -4,6 +4,7 @@ from app.models.notification import NotificationCreateSchema
 from app.utils.security import get_user_profile, verify_admin, get_user_db
 from app.utils.serializers import serialize_notification
 from app.services.notification_service import fan_out_notification
+from app.services.access_control import require_tournament_access
 from typing import List, Dict, Any
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -59,6 +60,11 @@ async def mark_read(id: str, profile = Depends(get_user_profile), db = Depends(g
 async def create_notification(data: NotificationCreateSchema, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
+        # Announcing something to a tournament's audience is the organiser's
+        # voice; anyone else broadcasting under it would be impersonation.
+        if data.tournament_id:
+            require_tournament_access(admin_db, data.tournament_id, admin)
+
         if data.profile_id:
             payload = {
                 "title": data.title,

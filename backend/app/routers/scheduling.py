@@ -7,6 +7,7 @@ double-book a player or a board is rejected rather than written.
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
+from app.services.access_control import require_tournament_access
 from app.utils.serializers import serialize_match
 from app.routers.tournaments import (
     generate_schedule as _generate_schedule,
@@ -135,6 +136,7 @@ async def generate(
     restMinutes: int = Query(10, ge=0, le=240),
     admin = Depends(verify_admin),
 ):
+    require_tournament_access(get_admin_db(), tournament_id, admin)
     return await _generate_schedule(tournament_id, restMinutes=restMinutes, admin=admin)
 
 
@@ -145,6 +147,8 @@ async def publish(tournament_id: str, admin = Depends(verify_admin)):
     (spec 69: validate before committing).
     """
     admin_db = get_admin_db()
+    require_tournament_access(admin_db, tournament_id, admin)
+
     matches = admin_db.table("matches").select("*").eq(
         "tournament_id", tournament_id
     ).execute().data or []

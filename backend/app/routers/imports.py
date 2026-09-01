@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
+from app.services.access_control import require_tournament_access
 from app.services.sheet_parser import parse_participants
 from app.services.audit_service import record_audit
 from app.routers.tournaments import generate_fixtures, generate_schedule, publish_schedule
@@ -125,6 +126,10 @@ async def confirm_bulk_import(
     entry. Previously every row was registered as `singles` regardless, so a
     doubles sheet produced singles fixtures between team names.
     """
+    # Importing writes players and registrations into one tournament, so it is
+    # that tournament's owner's call.
+    require_tournament_access(get_admin_db(), tournamentId, admin)
+
     try:
         entries = json.loads(players_json)
         if not isinstance(entries, list):

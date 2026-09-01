@@ -8,6 +8,7 @@ domain path and adds the read side, which the tournament router never had.
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
+from app.services.access_control import require_tournament_access
 from app.utils.serializers import serialize_match
 from app.utils.idempotency import IdempotencyGuard, get_idempotency_key
 from app.routers.tournaments import generate_fixtures as _generate_fixtures
@@ -59,6 +60,10 @@ async def generate(
     Deterministic fixture generation (spec 68). Regenerating replaces the
     previous draw, so this is guarded by an optional Idempotency-Key.
     """
+    # Regenerating replaces someone's entire draw, so it belongs to whoever
+    # runs that tournament, not to any admin who knows its id.
+    require_tournament_access(get_admin_db(), tournament_id, admin)
+
     guard = IdempotencyGuard(
         get_admin_db(), idempotency_key,
         f"POST /fixtures/{tournament_id}/generate", {"tournament_id": tournament_id},

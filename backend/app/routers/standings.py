@@ -8,6 +8,7 @@ from app.services.qualification import (
 )
 from app.services.audit_service import record_audit
 from app.utils.security import verify_admin
+from app.services.access_control import require_tournament_access
 from app.utils.serializers import camelize
 from typing import Any, Dict, List, Optional
 import logging
@@ -197,6 +198,7 @@ async def promote_league_qualifiers(
     exists to re-run it, or to seed the bracket early with force=true.
     """
     admin_db = get_admin_db()
+    require_tournament_access(admin_db, tournament_id, admin)
     try:
         matches = admin_db.table("matches").select("*").eq(
             "tournament_id", tournament_id
