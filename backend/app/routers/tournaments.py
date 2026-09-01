@@ -176,6 +176,9 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> Lis
                 m,
                 boards=boards_by_match.get(m["id"], []),
                 audit_logs=audit_by_match.get(m["id"], []),
+                # The list view carries every match of every tournament; the
+                # single-tournament and single-match reads still send the lot.
+                boards_with_play_only=True,
             )
         )
 

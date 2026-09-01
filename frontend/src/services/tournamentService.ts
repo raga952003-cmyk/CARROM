@@ -6,12 +6,52 @@
 import { apiClient } from '../utils/apiClient';
 import { Tournament, StandingsBreakdown } from '../types/tournament';
 
+/**
+ * Put back the boards the list view leaves out.
+ *
+ * An unplayed board is eight identical zeroes, and there were 1520 of them in
+ * this tournament: 1.4 MB and 5.7 seconds on every load, and again on every
+ * realtime change — so each board an umpire scored made every other screen
+ * re-download the entire draw. The API now sends only boards that carry play,
+ * plus a boardCount, and the rest are rebuilt here.
+ *
+ * Done at the edge on purpose: every component downstream goes on seeing a
+ * complete `boards` array, so nothing else has to know this happens. Nothing
+ * addresses a board by id — submission is by board NUMBER — so a rebuilt board
+ * is indistinguishable from one that travelled.
+ */
+function fillBoards(t: Tournament): Tournament {
+  if (!t?.matches?.length) return t;
+  return {
+    ...t,
+    matches: t.matches.map(m => {
+      const sent = m.boards || [];
+      const count = (m as any).boardCount ?? sent.length;
+      if (sent.length >= count) return m;
+      const byNumber = new Map(sent.map(b => [b.boardNumber, b]));
+      const boards = Array.from({ length: count }, (_, i) => {
+        const n = i + 1;
+        return byNumber.get(n) || ({
+          boardNumber: n,
+          status: 'pending',
+          player1Score: 0,
+          player2Score: 0,
+          queenClaimedBy: 'none',
+          queenCovered: false,
+        } as any);
+      });
+      return { ...m, boards };
+    }),
+  };
+}
+
 export const tournamentService = {
   /**
    * Get all tournaments
    */
   async getAllTournaments() {
-    return apiClient.get<Tournament[]>('/tournaments');
+    const list = await apiClient.get<Tournament[]>('/tournaments');
+    return (list || []).map(fillBoards);
   },
 
   /**

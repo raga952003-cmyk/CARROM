@@ -73,13 +73,36 @@ def serialize_audit_log(row: Dict[str, Any]) -> Dict[str, Any]:
     return camelize(row)
 
 
+def board_has_play(b: Dict[str, Any]) -> bool:
+    """Whether a board carries anything worth sending over the wire."""
+    return bool(
+        b.get("status") not in (None, "pending")
+        or (b.get("player1_score") or 0)
+        or (b.get("player2_score") or 0)
+        or (b.get("board_winner") or "none") != "none"
+    )
+
+
 def serialize_match(
     row: Dict[str, Any],
     boards: Optional[List[Dict[str, Any]]] = None,
     audit_logs: Optional[List[Dict[str, Any]]] = None,
+    boards_with_play_only: bool = False,
 ) -> Dict[str, Any]:
     match = camelize(row)
-    match["boards"] = [serialize_board(b) for b in (boards or [])]
+    all_boards = boards or []
+    # boardCount is what the client rebuilds the full list from, and it counts
+    # the rows that exist rather than max_boards -- a tie-break board is a real
+    # board beyond the configured length.
+    match["boardCount"] = len(all_boards)
+    if boards_with_play_only:
+        # An unplayed board is eight identical zeroes. Sending 1520 of them made
+        # the tournament payload 1.4 MB and took 5.7 seconds, on every load and
+        # again on every realtime change -- so every board an umpire scored made
+        # every other screen re-download the whole draw. The client fills the
+        # gaps from boardCount; nothing addresses a board by id.
+        all_boards = [b for b in all_boards if board_has_play(b)]
+    match["boards"] = [serialize_board(b) for b in all_boards]
     match["auditHistory"] = [serialize_audit_log(a) for a in (audit_logs or [])]
     # The UI treats these as required; DB nulls would break `.length`/comparisons.
     match["scheduledDate"] = row.get("scheduled_date") or ""
