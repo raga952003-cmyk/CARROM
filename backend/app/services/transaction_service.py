@@ -204,11 +204,13 @@ def _confirm_match_result_fallback(
                 "match_id": match_id}
 
     from datetime import datetime
-    admin_db.table("matches").update({
+    from app.services.match_timer import freeze_timer_when_finished
+
+    admin_db.table("matches").update(freeze_timer_when_finished(match, {
         "result_confirmed": True,
         "result_confirmed_at": datetime.utcnow().isoformat(),
         "status": "completed",
-    }).eq("id", match_id).execute()
+    })).eq("id", match_id).execute()
 
     advanced = False
     if match.get("next_match_id") and match.get("winner_id"):

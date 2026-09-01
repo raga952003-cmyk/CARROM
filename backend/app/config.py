@@ -28,16 +28,19 @@ class Settings(BaseSettings):
 
     # Whether a tournament's owner is the only admin who may manage it.
     #
-    # Off by default, because this deployment is run by one organiser and the
-    # ownership check was blocking them from their own screens with "request
-    # access to help run it" -- from an account that could not grant it.
+    # On by default: whoever creates a tournament runs it, and another admin
+    # who wants in asks for access, which the owner approves -- or the owner
+    # grants it to them directly without being asked.
     #
-    # The tradeoff is real: with this off, ANY account holding the admin role
-    # can manage, score and delete EVERY tournament in the database. Turn it on
-    # (ENFORCE_TOURNAMENT_OWNERSHIP=true) before letting a second organisation
-    # share this instance. It never affects players, who are refused either way.
+    # It was briefly defaulted off, when the only thing standing between the
+    # organiser and their own tournament was an ownership record pointing at a
+    # test account nobody could sign in as. That was the wrong fix for that
+    # problem; the test account should not have existed.
+    #
+    # Setting it to false lets ANY admin account manage, score and delete EVERY
+    # tournament. That is only reasonable on a single-operator instance.
     ENFORCE_TOURNAMENT_OWNERSHIP: bool = os.getenv(
-        "ENFORCE_TOURNAMENT_OWNERSHIP", "false"
+        "ENFORCE_TOURNAMENT_OWNERSHIP", "true"
     ).strip().lower() in ("1", "true", "yes", "on")
 
     def cors_origin_list(self) -> list[str]:

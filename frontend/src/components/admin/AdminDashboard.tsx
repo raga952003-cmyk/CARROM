@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { 
   Plus, 
   Trophy, 
@@ -36,6 +36,7 @@ import { KnockoutBracketView } from '../common/KnockoutBracketView';
 import { ManagePlayersTab } from './ManagePlayersTab';
 import { useNotify } from '../../context/NotificationContext';
 import { accessService, PERMISSIVE_ACCESS, TournamentAccess } from '../../services/accessService';
+import { TournamentAccessPanel } from './TournamentAccessPanel';
 
 export const AdminDashboard: React.FC = () => {
   const { 
@@ -73,15 +74,15 @@ export const AdminDashboard: React.FC = () => {
   // Re-asked whenever the selected tournament changes. A failure here must not
   // lock the operator out of their own screen, so the assumption on error is
   // permissive and the server still has the final say on every action.
-  useEffect(() => {
-    let cancelled = false;
+  const refreshAccess = useCallback(() => {
     const id = currentTournament?.id;
     if (!id) { setAccess(PERMISSIVE_ACCESS); return; }
     accessService.myAccessFor(id)
-      .then(a => { if (!cancelled) setAccess(a); })
-      .catch(() => { if (!cancelled) setAccess(PERMISSIVE_ACCESS); });
-    return () => { cancelled = true; };
+      .then(setAccess)
+      .catch(() => setAccess(PERMISSIVE_ACCESS));
   }, [currentTournament?.id]);
+
+  useEffect(() => { refreshAccess(); }, [refreshAccess]);
 
   const removeTournament = async () => {
     if (!currentTournament || busy) return;
@@ -501,6 +502,12 @@ export const AdminDashboard: React.FC = () => {
                   />
                 )}                {activeTab === 'overview' && (
                   <div className="space-y-4">
+                    <TournamentAccessPanel
+                      tournamentId={currentTournament.id}
+                      tournamentName={currentTournament.name}
+                      access={access}
+                      onChanged={refreshAccess}
+                    />
                     {/* Edit mode controls header */}
                     <div className="flex flex-col sm:flex-row sm:justify-end gap-2 bg-white p-3 rounded-2xl border border-gray-200 shadow-2xs">
                       {isEditingRules ? (

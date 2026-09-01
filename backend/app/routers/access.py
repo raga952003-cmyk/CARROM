@@ -35,6 +35,14 @@ class AccessDecisionSchema(BaseModel):
     role: Optional[str] = None
 
 
+class AccessGrantSchema(BaseModel):
+    """Owner hands access to someone who has not asked for it."""
+    user_id: Optional[str] = None
+    email: Optional[str] = None
+    role: str = MANAGER
+    note: Optional[str] = None
+
+
 def _unavailable():
     raise HTTPException(
         status_code=503,
@@ -243,6 +251,105 @@ def _decide(request_id: str, decision: str, note: Optional[str],
         new_state={"status": decision, "role": granted_role, "user_id": request_row["user_id"]},
     )
     return _hydrate(admin_db, [updated])[0]
+
+
+@router.post("/tournaments/{tournament_id}/grant")
+async def grant_access(tournament_id: str, data: AccessGrantSchema,
+                       admin = Depends(verify_admin)):
+    """
+    Give someone access without waiting for them to ask.
+
+    Requests cover the case where a helper notices the tournament and wants in.
+    This covers the other direction, which is the more common one on the day:
+    the organiser knows who is scoring on table three and adds them, rather
+    than telling them to go and request it so it can be approved.
+
+    The row written is the same shape a request produces, already approved, so
+    the two routes converge and revoking works identically for both.
+    """
+    if data.role not in (MANAGER, SCORER):
+        raise HTTPException(status_code=422, detail="role must be 'manager' or 'scorer'.")
+
+    admin_db = get_admin_db()
+    # Only the owner decides who helps run their tournament.
+    tournament = owned_by(admin_db, tournament_id, admin)
+
+    if not data.user_id and not data.email:
+        raise HTTPException(status_code=422, detail="Provide either user_id or email.")
+
+    target = None
+    try:
+        if data.user_id:
+            rows = admin_db.table("profiles").select("*").eq("id", data.user_id).execute().data
+        else:
+            rows = admin_db.table("profiles").select("*").eq(
+                "email", (data.email or "").strip().lower()).execute().data
+        target = rows[0] if rows else None
+    except Exception as e:
+        logger.error(f"Grant lookup failed for {tournament_id}: {str(e)}")
+        _unavailable()
+
+    if not target:
+        raise HTTPException(
+            status_code=404,
+            detail="No account found for that person. They need to register before being given access.",
+        )
+    if target.get("role") != "admin":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{target.get('name') or 'That account'} is a player, not an admin. "
+                "Only admin accounts can be given scoring or management access."
+            ),
+        )
+    if str(tournament.get("owner_id") or "") == str(target["id"]):
+        raise HTTPException(status_code=409, detail="That person already owns this tournament.")
+
+    try:
+        row = admin_db.table("tournament_access").upsert({
+            "tournament_id": tournament_id,
+            "user_id": target["id"],
+            "access_role": data.role,
+            "status": "approved",
+            "message": None,
+            "requested_at": datetime.utcnow().isoformat(),
+            "decided_at": datetime.utcnow().isoformat(),
+            "decided_by": admin["id"],
+            "decision_note": data.note,
+        }, on_conflict="tournament_id,user_id").execute().data[0]
+    except Exception as e:
+        logger.error(f"Grant failed for {tournament_id}: {str(e)}")
+        _unavailable()
+
+    fan_out_notification(
+        admin_db,
+        title="Tournament access granted",
+        message=(
+            f"You now have {data.role} access to '{tournament['name']}'."
+            + (f" Note: {data.note}" if data.note else "")
+        ),
+        type="access_granted",
+        tournament_id=tournament_id,
+        recipient_ids=[target["id"]],
+    )
+    record_audit(
+        admin_db, actor=admin, action="access.grant",
+        entity_type="tournament", entity_id=tournament_id,
+        new_state={"role": data.role, "status": "approved", "user_id": target["id"]},
+    )
+    return _hydrate(admin_db, [row])[0]
+
+
+@router.get("/admins")
+async def list_admins(admin = Depends(verify_admin)):
+    """Admin accounts that can be granted access, for the owner's picker."""
+    admin_db = get_admin_db()
+    try:
+        rows = admin_db.table("profiles").select("id,name,email").eq(
+            "role", "admin").order("name").execute().data or []
+    except Exception:
+        return []
+    return [camelize(r) for r in rows if r["id"] != admin["id"]]
 
 
 @router.post("/requests/{request_id}/approve")

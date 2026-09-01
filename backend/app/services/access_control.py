@@ -102,11 +102,11 @@ def describe_access(admin_db, tournament: Dict[str, Any], profile: Dict[str, Any
                 "canManage": is_admin, "canScore": is_admin,
                 "enforced": False, "status": None}
 
-    # Policy, as opposed to the migration probe below: on a single-operator
-    # deployment every admin is the same person, and being told a tournament
-    # "is owned by Sets Admin; request access to help run it" is an obstacle
-    # with nobody on the other end to grant it. Note this widens access for
-    # admins only -- a player still falls through to the ordinary checks.
+    # Policy, as opposed to the migration probe below. Normally off: the owner
+    # runs their own tournament and grants access to anyone else. Turning it on
+    # makes every admin equivalent, which suits a single-operator instance.
+    # Either way this widens access for admins only -- a player still falls
+    # through to the ordinary checks.
     if is_admin and not settings.ENFORCE_TOURNAMENT_OWNERSHIP:
         is_owner = bool(owner_id and user_id and str(owner_id) == str(user_id))
         return {"isOwner": is_owner, "role": MANAGER,

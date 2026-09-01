@@ -1,6 +1,10 @@
 /**
  * Access Service
- * What the signed-in admin may do on a given tournament.
+ * Who may run a tournament, and how someone else gets let in.
+ *
+ * Whoever creates a tournament owns it. Another admin sees it but cannot touch
+ * it until the owner lets them in — either because they asked and were
+ * approved, or because the owner handed them access directly.
  *
  * The backend has always exposed this (GET /access/tournaments/{id}/me, whose
  * docstring says it "drives which controls the UI offers") but nothing ever
@@ -16,22 +20,92 @@
 
 import { apiClient } from '../utils/apiClient';
 
+export type AccessRole = 'manager' | 'scorer';
+export type AccessStatus = 'pending' | 'approved' | 'rejected' | 'revoked' | 'owner' | 'unenforced' | null;
+
 export interface TournamentAccess {
   isOwner: boolean;
   role: string | null;
   canManage: boolean;
   canScore: boolean;
   enforced: boolean;
-  status: string | null;
+  status: AccessStatus;
+}
+
+/** One row of the access table, as the owner and the requester both see it. */
+export interface AccessRequest {
+  id: string;
+  tournamentId: string;
+  userId: string;
+  userName?: string;
+  userEmail?: string;
+  tournamentName?: string;
+  accessRole: AccessRole;
+  status: AccessStatus;
+  message?: string | null;
+  decisionNote?: string | null;
+  requestedAt?: string;
+  decidedAt?: string | null;
+}
+
+export interface GrantableAdmin {
+  id: string;
+  name: string;
+  email: string;
 }
 
 /** Assumed when the check itself fails, so a lookup problem cannot lock an admin out of their own screen. */
 export const PERMISSIVE_ACCESS: TournamentAccess = {
-  isOwner: false, role: null, canManage: true, canScore: true, enforced: false, status: 'unknown',
+  isOwner: false, role: null, canManage: true, canScore: true, enforced: false, status: 'unknown' as AccessStatus,
 };
 
 export const accessService = {
+  /** What the signed-in admin may do here. */
   async myAccessFor(tournamentId: string) {
     return apiClient.get<TournamentAccess>(`/access/tournaments/${tournamentId}/me`);
+  },
+
+  /** Ask the owner to be let in. */
+  async requestAccess(tournamentId: string, role: AccessRole, message?: string) {
+    return apiClient.post<AccessRequest>(`/access/tournaments/${tournamentId}/request`, { role, message });
+  },
+
+  /** Every request on one tournament — owner only. */
+  async listRequests(tournamentId: string) {
+    return apiClient.get<AccessRequest[]>(`/access/tournaments/${tournamentId}/requests`);
+  },
+
+  /** Everything awaiting this owner's decision, across their tournaments. */
+  async listPending() {
+    return apiClient.get<AccessRequest[]>('/access/pending');
+  },
+
+  /** This admin's own access records, including anything still pending. */
+  async listMine() {
+    return apiClient.get<{ owned: any[]; requests: AccessRequest[]; enforced: boolean }>('/access/mine');
+  },
+
+  async approve(requestId: string, role?: AccessRole, note?: string) {
+    return apiClient.post<AccessRequest>(`/access/requests/${requestId}/approve`, { role, note });
+  },
+
+  async reject(requestId: string, note?: string) {
+    return apiClient.post<AccessRequest>(`/access/requests/${requestId}/reject`, { note });
+  },
+
+  async revoke(requestId: string, note?: string) {
+    return apiClient.post<AccessRequest>(`/access/requests/${requestId}/revoke`, { note });
+  },
+
+  /** Hand access to someone who never asked. */
+  async grant(tournamentId: string, target: { userId?: string; email?: string }, role: AccessRole, note?: string) {
+    return apiClient.post<AccessRequest>(`/access/tournaments/${tournamentId}/grant`, {
+      userId: target.userId, email: target.email, role, note,
+    });
+  },
+
+  /** Admin accounts the owner can pick from when granting. */
+  async grantableAdmins() {
+    return apiClient.get<GrantableAdmin[]>('/access/admins');
   },
 };
