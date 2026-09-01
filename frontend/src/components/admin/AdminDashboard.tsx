@@ -48,7 +48,9 @@ export const AdminDashboard: React.FC = () => {
     role,
     publishTournament,
     updateTournament,
-    deleteTournament
+    deleteTournament,
+    startTournament,
+    finishTournament
   } = useTournament();
 
   const notify = useNotify();
@@ -112,6 +114,41 @@ export const AdminDashboard: React.FC = () => {
       // Previously this rejection escaped into the void: a red console line and
       // a button that appeared to do nothing.
       notify.report(e, 'Could not delete the tournament.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startDay = async () => {
+    if (!currentTournament || busy) return;
+    setBusy(true);
+    try {
+      await startTournament(currentTournament.id);
+      notify.success('Match day started.');
+    } catch (e) {
+      notify.report(e, 'Could not start the tournament.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const finishDay = async () => {
+    if (!currentTournament || busy) return;
+    const unconfirmed = (currentTournament.matches || []).filter(m => !m.resultConfirmed).length;
+    const ok = window.confirm(
+      unconfirmed
+        ? `${unconfirmed} match(es) are not yet confirmed. Finish the tournament anyway?
+
+The standings become final as they are.`
+        : 'Finish the tournament? The standings become final.'
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      await finishTournament(currentTournament.id);
+      notify.success('Tournament complete.');
+    } catch (e) {
+      notify.report(e, 'Could not finish the tournament.');
     } finally {
       setBusy(false);
     }
@@ -444,6 +481,42 @@ export const AdminDashboard: React.FC = () => {
                       <Share2 className="w-3.5 h-3.5" />
                       <span>Publish Tournament</span>
                     </button>
+                  )}
+
+                  {/* The rest of the lifecycle, which had no controls at all.
+                      Until now a tournament stayed at "registration open" while
+                      its draw was already fixed -- still inviting entries it
+                      could not accommodate -- and could never be finished. */}
+                  {(currentTournament.status === 'registration_closed'
+                    || currentTournament.status === 'scheduled') && access.canManage && (
+                    <button
+                      onClick={startDay}
+                      disabled={busy}
+                      className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-40"
+                      title="Mark the tournament as under way. Registration closes to new entries."
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      <span>Start Match Day</span>
+                    </button>
+                  )}
+
+                  {currentTournament.status === 'ongoing' && access.canManage && (
+                    <button
+                      onClick={finishDay}
+                      disabled={busy}
+                      className="px-4 py-2 bg-[#D4A72C] hover:opacity-90 text-[#0B5D3B] text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-40"
+                      title="Close the tournament. The standings become final."
+                    >
+                      <Trophy className="w-3.5 h-3.5" />
+                      <span>Finish Tournament</span>
+                    </button>
+                  )}
+
+                  {currentTournament.status === 'completed' && (
+                    <span className="px-4 py-2 bg-emerald-50 text-emerald-800 text-xs font-black rounded-xl border border-emerald-200 flex items-center gap-1.5">
+                      <Trophy className="w-3.5 h-3.5" />
+                      <span>Tournament complete</span>
+                    </span>
                   )}
                 </div>
               </div>

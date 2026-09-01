@@ -22,7 +22,14 @@ TOURNAMENT_ALIASES: Dict[str, str] = {
 TOURNAMENT_TRANSITIONS: Dict[str, Set[str]] = {
     "draft": {"registration_open", "cancelled"},
     "registration_open": {"registration_closed", "draft", "cancelled"},
-    "registration_closed": {"fixture_generation", "registration_open", "cancelled"},
+    # fixture_published is reachable directly, because fixture_generation is not
+    # a value the database will store: the CHECK on tournaments.status allows
+    # draft, registration_open, registration_closed, scheduled, ongoing and
+    # completed, and fixture_generation aliases to none of them. Routing through
+    # it made the path from a closed registration to a running tournament
+    # impassable, which is why no tournament has ever left registration_open.
+    "registration_closed": {"fixture_generation", "fixture_published",
+                            "registration_open", "cancelled"},
     "fixture_generation": {"fixture_published", "registration_closed", "cancelled"},
     "fixture_published": {"in_progress", "fixture_generation", "cancelled"},
     "in_progress": {"completed", "fixture_published", "cancelled"},

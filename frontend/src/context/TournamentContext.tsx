@@ -82,6 +82,8 @@ interface TournamentContextType {
   deleteTournament: (id: string) => Promise<void>;
   publishTournament: (id: string) => Promise<void>;
   closeRegistration: (id: string) => Promise<void>;
+  startTournament: (id: string) => Promise<void>;
+  finishTournament: (id: string) => Promise<void>;
   generateFixturesForTournament: (id: string) => Promise<void>;
   generateScheduleForTournament: (id: string, restMinutes?: number) => Promise<void>;
   publishScheduleForTournament: (id: string) => Promise<void>;
@@ -445,6 +447,20 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     await refreshData();
   };
 
+  // The rest of the lifecycle. Registration could be opened and closed and
+  // nothing further: no screen ever wrote 'scheduled', 'ongoing' or 'completed',
+  // so a tournament stayed advertised as open for entries while its draw was
+  // already fixed, and could never be finished at all.
+  const startTournament = async (id: string) => {
+    await tournamentService.updateTournament(id, { status: 'ongoing' } as any);
+    await refreshData();
+  };
+
+  const finishTournament = async (id: string) => {
+    await tournamentService.updateTournament(id, { status: 'completed' } as any);
+    await refreshData();
+  };
+
   const generateFixturesForTournament = async (id: string) => {
     await apiClient.post(`/tournaments/${id}/fixtures`, {});
     await refreshData();
@@ -656,6 +672,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         deleteTournament,
         publishTournament,
         closeRegistration,
+        startTournament,
+        finishTournament,
         generateFixturesForTournament,
         generateScheduleForTournament,
         publishScheduleForTournament,
