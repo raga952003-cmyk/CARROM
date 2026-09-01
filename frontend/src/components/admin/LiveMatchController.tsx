@@ -449,12 +449,24 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               <div>
                 <h4 className="text-sm font-bold text-amber-900">This match finished level</h4>
                 <p className="text-xs text-amber-800 mt-0.5">
-                  Both players scored {match.player1TotalPoints}. Every board has been
-                  played, so the result is yours to decide. Your ruling is recorded
-                  with the match.
+                  Both players scored {match.player1TotalPoints} across all{' '}
+                  {(match.boards || []).length} boards.{' '}
+                  {match.tieBreakRule === 'additional_board'
+                    ? 'This tournament settles a level match with a deciding board — add one and play it. If that is not possible, award the match instead.'
+                    : 'The result is yours to decide.'}{' '}
+                  Whichever you choose is recorded with the match.
                 </p>
               </div>
             </div>
+            {match.tieBreakRule === 'additional_board' && (
+              <button
+                onClick={() => addBoardToMatch(tournament.id, match.id)}
+                className="w-full mb-2 py-2.5 px-3 rounded-xl text-sm font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white shadow-xs flex items-center justify-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Add a deciding board</span>
+              </button>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {[
                 { id: match.player1Id, name: match.player1Name },

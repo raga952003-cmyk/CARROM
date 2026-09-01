@@ -762,6 +762,21 @@ async def confirm_match(
         m = _authorise_match(admin_db, id, admin, "match.confirm")
 
         if not m.get("winner_id") and m.get("status") != "completed":
+            # "Finish the remaining boards" is wrong and maddening when every
+            # board has been played and the scores are simply level -- which is
+            # the commonest reason to land here under remaining-coins scoring.
+            if m.get("tie_break_required"):
+                rule = m.get("tie_break_rule") or "organizer_decision"
+                how = ("Play a deciding board, or award the match."
+                       if rule == "additional_board"
+                       else "Award the match to one of the players.")
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This match finished level at {} points each, so it has no "
+                        "winner yet. {}"
+                    ).format(m.get("player1_total_points"), how),
+                )
             raise HTTPException(
                 status_code=409,
                 detail="This match has no decided winner yet. Finish the remaining boards first.",
