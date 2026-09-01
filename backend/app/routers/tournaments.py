@@ -674,15 +674,35 @@ async def generate_fixtures(id: str, force: bool = Query(False,
         ).eq("tournament_id", id).execute().data or []
         confirmed = [m for m in existing if m.get("result_confirmed")]
         completed = [m for m in existing if m.get("status") == "completed"]
-        if (confirmed or completed) and not force:
+
+        # The match row is not enough to tell whether play has happened.
+        #
+        # Under remaining-coins scoring a match stays 'live' until EVERY board is
+        # in, so one with seven of eight boards scored is neither confirmed nor
+        # completed -- it passed a guard that checked only those two and was
+        # deleted along with its boards and its correction history. Ask the
+        # boards instead: anything not pending, or carrying a score, is play.
+        played_boards = 0
+        match_ids = [m["id"] for m in existing]
+        for start in range(0, len(match_ids), 100):
+            for b in (admin_db.table("boards").select(
+                "id, status, player1_score, player2_score"
+            ).in_("match_id", match_ids[start:start + 100]).execute().data or []):
+                if (b.get("status") != "pending"
+                        or (b.get("player1_score") or 0)
+                        or (b.get("player2_score") or 0)):
+                    played_boards += 1
+
+        if (confirmed or completed or played_boards) and not force:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "This draw already has {} confirmed and {} completed match(es), and "
-                    "regenerating deletes every match and every board score with them. "
-                    "Add a match instead if someone joined late, or confirm you want the "
-                    "results discarded."
-                ).format(len(confirmed), len(completed)),
+                    "This draw already has {} confirmed match(es), {} completed, and {} "
+                    "board(s) with play recorded on them. Regenerating deletes every "
+                    "match, every board score and the correction history with them. "
+                    "Add a match instead if someone joined late, or confirm you want "
+                    "those results discarded."
+                ).format(len(confirmed), len(completed), played_boards),
             )
 
         admin_db.table("matches").delete().eq("tournament_id", id).execute()

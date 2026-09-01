@@ -1,23 +1,5 @@
 import React, { useState } from 'react';
-import { 
-  Sparkles, 
-  Calendar, 
-  Clock, 
-  Layers, 
-  Play, 
-  Check, 
-  RefreshCw, 
-  AlertCircle, 
-  Flame, 
-  CheckCircle2, 
-  Grid, 
-  List, 
-  ShieldCheck, 
-  ArrowRight,
-  Send,
-  Eye,
-  Plus
-} from 'lucide-react';
+import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -233,22 +215,39 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
         </div>
       </div>
 
-      {/* Constraints Validation Banner */}
-      {hasMatches && (
-        <div className="bg-emerald-50/70 border border-emerald-200/80 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-          <div className="flex items-center space-x-2 text-emerald-950">
-            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span className="font-semibold">All Scheduling Constraints Verified:</span>
-            <span className="text-emerald-800">
-              No overlapping player matches · No concurrent board collisions · Rest buffers respected
-            </span>
-          </div>
+      {/* The state of the schedule, checked rather than asserted.
+          This used to read "All Scheduling Constraints Verified" in green
+          whenever any fixture existed -- nothing here ever called the conflict
+          checker, so the one place an organiser looks for that assurance was
+          the one place giving it without looking. */}
+      {hasMatches && (() => {
+        const scheduled = allMatches.filter(m => m.scheduledDate || m.scheduledTime).length;
+        const unscheduled = allMatches.length - scheduled;
+        const ok = unscheduled === 0;
+        return (
+          <div className={`rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs border ${
+            ok ? 'bg-emerald-50/70 border-emerald-200/80' : 'bg-amber-50 border-amber-200'
+          }`}>
+            <div className={`flex items-center space-x-2 ${ok ? 'text-emerald-950' : 'text-amber-950'}`}>
+              {ok
+                ? <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                : <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />}
+              <span className="font-semibold">
+                {ok ? 'Every match has a time and a board' : 'Not scheduled yet'}
+              </span>
+              <span className={ok ? 'text-emerald-800' : 'text-amber-800'}>
+                {ok
+                  ? 'Run Auto-Schedule again after any change to the draw.'
+                  : `${unscheduled} of ${allMatches.length} matches have no date or time. Run Auto-Schedule to assign boards and times.`}
+              </span>
+            </div>
 
-          <div className="text-emerald-900 font-bold shrink-0">
-            {matches.length} Matches Assigned · {tournament.numberOfBoards} Boards
+            <div className={`font-bold shrink-0 ${ok ? 'text-emerald-900' : 'text-amber-900'}`}>
+              {matches.length} Matches · {tournament.numberOfBoards} Boards
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Main Fixtures & Schedule Display */}
       {!hasMatches ? (
