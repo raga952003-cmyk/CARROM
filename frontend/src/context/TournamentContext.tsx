@@ -352,7 +352,6 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         email,
         password,
         name: metadata.name || 'User',
-        role: selectedRole,
         club: metadata.club,
         city: metadata.city,
         phone: metadata.phone,

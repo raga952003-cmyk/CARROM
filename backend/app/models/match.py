@@ -111,6 +111,12 @@ class WalkoverSchema(BaseCamelModel):
     reason: str
 
 
+class TieBreakSchema(BaseCamelModel):
+    """The organiser's ruling on a match that finished level."""
+    winner_id: str
+    reason: str
+
+
 class MatchSidesSchema(BaseCamelModel):
     """
     Who plays which coin, and which way round the board is drawn.

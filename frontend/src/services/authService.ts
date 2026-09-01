@@ -5,11 +5,19 @@
 
 import { apiClient } from '../utils/apiClient';
 
+/**
+ * Registration always creates a player.
+ *
+ * `role` used to be sent from here and written straight into the account's
+ * app_metadata, so anyone could register as an admin. The server now ignores
+ * anything sent, and the field is gone from this type so nothing goes on
+ * pretending otherwise. Admin rights are granted by an existing admin, or with
+ * backend/db/promote_admin.py.
+ */
 export interface SignUpData {
   email: string;
   password: string;
   name: string;
-  role: 'admin' | 'player';
   club?: string;
   city?: string;
   phone?: string;

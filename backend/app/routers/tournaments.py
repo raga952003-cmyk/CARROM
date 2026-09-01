@@ -53,6 +53,32 @@ def _slot_id(value):
     return value
 
 
+def _select_all(query_factory, page: int = 1000) -> List[Dict[str, Any]]:
+    """
+    Read every row a query matches, not the first thousand.
+
+    PostgREST caps an unpaginated response at 1000 rows and says nothing about
+    it -- no error, no header the client checks, just a short list. Against 190
+    matches of 8 boards that is 1520 rows arriving as 1000, so boards 7 and 8
+    of every match simply did not exist as far as the app was concerned: the
+    umpire scored up to board 5, the server activated board 6, and the screen
+    had nothing to show. Under remaining-coins scoring, where a match completes
+    only when every board is played, those matches could never be finished.
+
+    `query_factory` is called for each page so the range can be applied to a
+    fresh query object.
+    """
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        batch = query_factory().range(offset, offset + page - 1).execute().data or []
+        rows.extend(batch)
+        # A short page is the last page. An exactly-full one might not be.
+        if len(batch) < page:
+            return rows
+        offset += page
+
+
 def _hydrate_registrations(supabase, reg_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Attach both player profiles to every doubles registration's team.
@@ -104,33 +130,42 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]]) -> Lis
     tournament_ids = [t["id"] for t in tournament_rows]
 
     # --- Registrations (+ hydrated doubles partners) -----------------------
-    reg_rows = supabase.table("registrations").select(
-        "*, player:profiles(*), team:teams(*)"
-    ).in_("tournament_id", tournament_ids).execute().data or []
+    reg_rows = _select_all(
+        lambda: supabase.table("registrations")
+        .select("*, player:profiles(*), team:teams(*)")
+        .in_("tournament_id", tournament_ids)
+    )
 
     regs_by_tournament: Dict[str, List[Dict[str, Any]]] = {}
     for raw, serialized in zip(reg_rows, _hydrate_registrations(supabase, reg_rows)):
         regs_by_tournament.setdefault(raw["tournament_id"], []).append(serialized)
 
     # --- Matches, boards and score audit trail -----------------------------
-    match_rows = supabase.table("matches").select("*").in_(
-        "tournament_id", tournament_ids
-    ).order("match_number").execute().data or []
+    match_rows = _select_all(
+        lambda: supabase.table("matches").select("*")
+        .in_("tournament_id", tournament_ids).order("match_number")
+    )
 
     match_ids = [m["id"] for m in match_rows]
     boards_by_match: Dict[str, List[Dict[str, Any]]] = {}
     audit_by_match: Dict[str, List[Dict[str, Any]]] = {}
 
     if match_ids:
-        board_rows = supabase.table("boards").select("*").in_(
-            "match_id", match_ids
-        ).order("board_number").execute().data or []
+        board_rows = _select_all(
+            lambda: supabase.table("boards").select("*")
+            .in_("match_id", match_ids).order("board_number")
+        )
         for b in board_rows:
             boards_by_match.setdefault(b["match_id"], []).append(b)
 
+        # Capped on purpose, and newest first. This table grows with every
+        # score correction and is only ever displayed, so the whole history is
+        # not worth carrying on the tournament list. The difference from the
+        # reads above is that this limit is deliberate and stated, rather than
+        # PostgREST quietly stopping at a thousand.
         audit_rows = supabase.table("score_audit_logs").select("*").in_(
             "match_id", match_ids
-        ).order("timestamp", desc=True).execute().data or []
+        ).order("timestamp", desc=True).limit(500).execute().data or []
         for a in audit_rows:
             audit_by_match.setdefault(a["match_id"], []).append(a)
 

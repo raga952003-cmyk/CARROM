@@ -76,6 +76,35 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [isWalkoverModalOpen, setIsWalkoverModalOpen] = useState(false);
   const [removingBoards, setRemovingBoards] = useState(false);
   const [resizing, setResizing] = useState(false);
+  const [decidingTie, setDecidingTie] = useState(false);
+
+  // A level match under remaining-coins scoring has no winner and cannot be
+  // confirmed. Until this existed the screen simply showed nothing and the
+  // umpire was told to "finish the remaining boards" they had already finished.
+  const decideTieBreak = async (winnerId: string, winnerName: string) => {
+    if (decidingTie) return;
+    const reason = window.prompt(
+      `Award this match to ${winnerName}?
+
+` +
+      `The scores are level, so this is your ruling. Say why — it is recorded ` +
+      `with the result.`,
+      'Organiser ruling'
+    );
+    if (reason === null || !reason.trim()) return;
+    setDecidingTie(true);
+    try {
+      await apiClient.post(`/matches/${match.id}/tie-break`, {
+        winnerId, reason: reason.trim(),
+      });
+      notify.success(`Match awarded to ${winnerName}.`);
+      await refreshData();
+    } catch (e) {
+      notify.report(e, 'Could not record the ruling.');
+    } finally {
+      setDecidingTie(false);
+    }
+  };
 
   const resizeBoards = async (n: number) => {
     if (resizing || n === (match.boards || []).length) return;
@@ -425,6 +454,38 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
           </div>
         </div>
+
+        {/* A level match needs a human, and this is where they are asked. */}
+        {match.tieBreakRequired && !match.resultConfirmed && role === 'admin' && (
+          <div className="mx-4 mb-3 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
+            <div className="flex items-start gap-2 mb-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
+              <div>
+                <h4 className="text-sm font-bold text-amber-900">This match finished level</h4>
+                <p className="text-xs text-amber-800 mt-0.5">
+                  Both players scored {match.player1TotalPoints}. Every board has been
+                  played, so the result is yours to decide. Your ruling is recorded
+                  with the match.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {[
+                { id: match.player1Id, name: match.player1Name },
+                { id: match.player2Id, name: match.player2Name },
+              ].filter(p => p.id).map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => decideTieBreak(p.id!, p.name)}
+                  disabled={decidingTie}
+                  className="py-2.5 px-3 rounded-xl text-sm font-bold bg-white border-2 border-amber-300 text-gray-800 hover:border-[#0B5D3B] hover:text-[#0B5D3B] transition-colors disabled:opacity-40"
+                >
+                  Award to {p.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Action Controls Footer */}
         {role === 'admin' && (

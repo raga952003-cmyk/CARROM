@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.database import get_db, get_admin_db
 from app.models.match import (
     MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema, TossSchema,
-    MatchSidesSchema, WalkoverSchema,
+    MatchSidesSchema, WalkoverSchema, TieBreakSchema,
 )
 from app.utils.security import get_user_profile, verify_admin
 from app.services.scoring_engine import (
@@ -501,7 +501,7 @@ async def update_board(
         updated_match = recalculate_match_scores(match_data, boards, corrected_rules)
         
         # Persist updated match scores
-        admin_db.table("matches").update({
+        corrected_patch = {
             "player1_board_wins": updated_match["player1BoardWins"],
             "player2_board_wins": updated_match["player2BoardWins"],
             "player1_total_points": updated_match["player1TotalPoints"],
@@ -509,8 +509,28 @@ async def update_board(
             "status": updated_match["status"],
             "winner_id": updated_match["winnerId"],
             "winner_name": updated_match["winnerName"],
-            "match_completed_at": updated_match.get("matchCompletedAt")
-        }).eq("id", id).execute()
+            "match_completed_at": updated_match.get("matchCompletedAt"),
+        }
+
+        # A correction that levels the scores leaves the engine with no winner
+        # and tie_break_required set. Writing only the fields above kept
+        # status='completed' with winner_id NULL, and the standings read a match
+        # with no winner as a DRAW -- so correcting one board quietly turned a
+        # decided match into a drawn one, awarded both sides the draw points,
+        # and left nothing anywhere saying a decision was still owed.
+        if scoring_mode(corrected_rules) == "remaining_coins":
+            needs_tie_break = bool(updated_match.get("tieBreakRequired"))
+            if board_detail_available(admin_db):
+                corrected_patch["tie_break_required"] = needs_tie_break
+                corrected_patch["tie_break_rule"] = updated_match.get("tieBreakRule")
+            if needs_tie_break:
+                # Not finished: it is waiting on a ruling, and saying so is the
+                # difference between a match an organiser can act on and one
+                # that silently reads as a draw.
+                corrected_patch["status"] = "live"
+                corrected_patch["match_completed_at"] = None
+
+        admin_db.table("matches").update(corrected_patch).eq("id", id).execute()
 
         return res.data[0]
     except HTTPException:
@@ -812,6 +832,75 @@ async def confirm_match(
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/{id}/tie-break")
+async def resolve_tie_break(id: str, data: TieBreakSchema, admin = Depends(verify_admin)):
+    """
+    Record the organiser's ruling on a match that finished level.
+
+    Under remaining-coins scoring a match can end with the points exactly
+    level. The engine sets tie_break_required and returns no winner, which is
+    correct -- an extra board, sudden death or an organiser's ruling all need a
+    human. But nothing could then supply that human decision: /confirm refuses
+    a match with no winner, the scoring screen offers no way to name one, and
+    the league can never reach a full set of confirmed results.
+
+    The ruling is recorded in tie_break_result alongside the winner, so the
+    standings show a decided match and the reason it was decided that way
+    survives with it.
+    """
+    admin_db = get_admin_db()
+    try:
+        match = _authorise_match(admin_db, id, admin, "match.confirm")
+
+        if match.get("result_confirmed"):
+            raise HTTPException(
+                status_code=409,
+                detail="This result is already confirmed.",
+            )
+
+        p1, p2 = match.get("player1_id"), match.get("player2_id")
+        if data.winner_id not in (p1, p2):
+            raise HTTPException(
+                status_code=422,
+                detail="The winner must be one of the two players in this match.",
+            )
+        if not (data.reason or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail="A reason is required: a level match decided without one cannot be explained later.",
+            )
+
+        winner_is_p1 = data.winner_id == p1
+        patch = {
+            "status": "completed",
+            "winner_id": data.winner_id,
+            "winner_name": match.get("player1_name") if winner_is_p1 else match.get("player2_name"),
+            "match_completed_at": datetime.now(timezone.utc).isoformat(),
+            "tie_break_required": False,
+            "tie_break_result": data.reason.strip(),
+        }
+        # Migration 005 carries the tie-break columns; without it the ruling
+        # still resolves the match, it just cannot record why.
+        if not board_detail_available(admin_db):
+            patch.pop("tie_break_required", None)
+            patch.pop("tie_break_result", None)
+
+        res = admin_db.table("matches").update(patch).eq("id", id).execute()
+        record_audit(
+            admin_db, actor=admin, action="match.tie_break",
+            entity_type="match", entity_id=id,
+            previous_state={"winner_id": match.get("winner_id"),
+                            "p1": match.get("player1_total_points"),
+                            "p2": match.get("player2_total_points")},
+            new_state={"winner_id": data.winner_id, "reason": data.reason.strip()},
+        )
+        return serialize_match(res.data[0])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.post("/{id}/walkover")
 async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_admin)):

@@ -44,14 +44,18 @@ async def signup(data: SignUpSchema):
             "email_confirm": True,
             "user_metadata": {
                 "name": data.name,
-                "role": data.role,
+                # Hard-coded, never taken from the request. app_metadata is what
+                # the API trusts for authorisation, so accepting a role here let
+                # anyone who could reach the sign-up form mint themselves an
+                # admin account.
+                "role": "player",
                 "club": data.club,
                 "city": data.city,
                 "phone": data.phone,
                 "rating": data.rating
             },
             "app_metadata": {
-                "role": data.role
+                "role": "player"
             }
         })
         
@@ -98,7 +102,7 @@ async def signup(data: SignUpSchema):
             "id": user_id,
             "email": data.email,
             "name": data.name,
-            "role": data.role,
+            "role": "player",
             "club": data.club,
             "city": data.city,
             "phone": data.phone,
@@ -142,7 +146,10 @@ async def login(data: LoginSchema):
         if not profile_response.data:
             # If database record is not present, create it using metadata
             # Wait, the trigger should have run, but in case of manual sync issues
-            role = auth_response.user.app_metadata.get("role") or auth_response.user.user_metadata.get("role") or data.role
+            # Falls back to player, not to whatever the caller asked to sign in as:
+            # a missing profile row must not become a promotion.
+            role = (auth_response.user.app_metadata.get("role")
+                    or auth_response.user.user_metadata.get("role") or "player")
             name = auth_response.user.user_metadata.get("name") or "User"
             
             profile_data = {
