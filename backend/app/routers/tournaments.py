@@ -550,7 +550,7 @@ async def generate_fixtures(id: str, force: bool = Query(False,
             elif r["type"] == "doubles" and r.get("team"):
                 pools["doubles"].append(r["team"])
 
-        max_boards = t.get("rules", {}).get("maxBoardsPerMatch", 3)
+        max_boards = t.get("rules", {}).get("maxBoardsPerMatch", 8)
         number_of_sets = int(t.get("rules", {}).get("numberOfSets") or 1)
         boards_per_set = int(t.get("rules", {}).get("boardsPerSet") or max_boards)
         if not sets_supported(admin_db):
@@ -922,7 +922,7 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
             )
 
         rules = t.get("rules") or {}
-        max_boards = int(rules.get("maxBoardsPerMatch") or 3)
+        max_boards = int(rules.get("maxBoardsPerMatch") or 8)
         number_of_sets = int(rules.get("numberOfSets") or 1)
         boards_per_set = int(rules.get("boardsPerSet") or max_boards)
         if not sets_supported(admin_db):
