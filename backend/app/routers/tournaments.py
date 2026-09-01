@@ -665,9 +665,25 @@ async def generate_fixtures(id: str, force: bool = Query(False,
         admin_db.table("matches").delete().eq("tournament_id", id).execute()
 
         # Insert new matches & boards
+        venue_boards = max(1, int(t.get("number_of_boards") or 1))
+
+        def _board_for(match: Dict[str, Any], index: int) -> int:
+            """
+            Which physical board this fixture starts on.
+
+            Round-robin within a round, so consecutive fixtures land on
+            different boards and every board has work. A match that already
+            carries a real board number keeps it; the engine's placeholder 1
+            does not count as one, which is why the index is used instead.
+            """
+            declared = match.get("boardNumber")
+            if isinstance(declared, int) and declared > 1:
+                return declared
+            return (index % venue_boards) + 1
+
         match_rows: List[Dict[str, Any]] = []
         board_rows: List[Dict[str, Any]] = []
-        for match in matches:
+        for i, match in enumerate(matches):
             match_payload = {
                 "id": str(uuid.uuid4()),  # Convert string mock IDs to true UUIDs
                 "tournament_id": id,
@@ -682,7 +698,16 @@ async def generate_fixtures(id: str, force: bool = Query(False,
                 "player2_id": _slot_id(match.get("player2Id")),
                 "player1_name": match["player1Name"],
                 "player2_name": match["player2Name"],
-                "board_number": match["boardNumber"],
+                # Spread across the physical boards the venue has.
+                #
+                # The fixture engine stamps every match with boardNumber 1,
+                # which is fine as a placeholder and disastrous as a result: a
+                # venue with eleven boards had all 190 fixtures on board 1, so
+                # ten of the eleven umpires opened their scoring screen to
+                # "nothing left on this board". Round-robin is the right
+                # default -- a physical board is a resource to share, and the
+                # scheduler can still reassign later.
+                "board_number": _board_for(match, i),
                 "status": "scheduled",
                 "max_boards": match["maxBoards"],
                 "target_points": t.get("rules", {}).get("targetScore", 29),
@@ -849,14 +874,29 @@ async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depen
             rest_time_minutes=restMinutes
         )
 
-        # Update matches in db
+        # Write the schedule back.
+        #
+        # One UPDATE per match meant 190 sequential round trips, which is the
+        # same shape that made fixture generation time out on the serverless
+        # function. Upserting whole rows in chunks turns it into one request per
+        # two hundred matches. Whole rows and not a patch: PostgREST upsert is
+        # INSERT ... ON CONFLICT, so a partial row would fail the NOT NULL
+        # columns on the insert arm even though only the update arm ever runs.
+        by_id = {m["id"]: m for m in matches}
+        rows = []
         for s_match in scheduled:
-            update_payload = {
-                "board_number": s_match["boardNumber"],
-                "scheduled_date": s_match["scheduledDate"],
-                "scheduled_time": s_match["scheduledTime"]
-            }
-            admin_db.table("matches").update(update_payload).eq("id", s_match["id"]).execute()
+            row = dict(by_id.get(s_match["id"]) or {})
+            if not row:
+                continue
+            row["board_number"] = s_match["boardNumber"]
+            row["scheduled_date"] = s_match["scheduledDate"]
+            row["scheduled_time"] = s_match["scheduledTime"]
+            rows.append(row)
+
+        for start in range(0, len(rows), 200):
+            admin_db.table("matches").upsert(
+                rows[start:start + 200], on_conflict="id"
+            ).execute()
 
         return {"status": "success", "message": f"Conflict-free schedule generated across {num_boards} boards."}
     except HTTPException:

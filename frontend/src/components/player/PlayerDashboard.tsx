@@ -56,13 +56,26 @@ export const PlayerDashboard: React.FC = () => {
     (currentUser?.id && r.team?.player2?.id === currentUser.id)
   );
 
-  // Find all matches involving current user in the active tournament
-  const myMatches = currentTournament?.matches?.filter(m => 
-    (currentUser?.id && m.player1Id === currentUser.id) || 
-    (currentUser?.id && m.player2Id === currentUser.id) ||
-    (currentUser?.name && m.player1Name.toLowerCase().includes(currentUser.name.toLowerCase())) ||
-    (currentUser?.name && m.player2Name.toLowerCase().includes(currentUser.name.toLowerCase()))
-  ) || [];
+  // Matches this player is actually in.
+  //
+  // This used to fall back to a name SUBSTRING, so "Srinivas" matched
+  // "Srinivasan S" and a player was shown fixtures belonging to someone else —
+  // in their own "My Matches" tab, with a count to match. Identity is the id.
+  // A doubles fixture carries the TEAM id, so the teams this player belongs to
+  // count as them, which is the same rule NextMatchCard already uses.
+  const myTeamIds = React.useMemo(() => new Set(
+    (currentTournament?.registrations || [])
+      .filter(r => r.type === 'doubles' && r.team &&
+        (r.team.player1?.id === currentUser?.id || r.team.player2?.id === currentUser?.id))
+      .map(r => r.team!.id)
+  ), [currentTournament, currentUser]);
+
+  const myMatches = (currentTournament?.matches || []).filter(m =>
+    !!currentUser?.id && (
+      m.player1Id === currentUser.id || m.player2Id === currentUser.id ||
+      myTeamIds.has(m.player1Id) || myTeamIds.has(m.player2Id)
+    )
+  );
 
   // Next upcoming match
   const nextMatch = myMatches.find(m => m.status === 'live' || m.status === 'scheduled');
@@ -114,7 +127,7 @@ export const PlayerDashboard: React.FC = () => {
                     Match #{nextMatch.matchNumber} · Board #{nextMatch.boardNumber}
                   </h2>
                   <p className="text-xs sm:text-sm text-emerald-100 mt-0.5">
-                    Opponent: <strong>{nextMatch.player1Name.includes(currentUser?.name || '') ? nextMatch.player2Name : nextMatch.player1Name}</strong> · Scheduled: {nextMatch.scheduledTime}
+                    Opponent: <strong>{nextMatch.player1Id === currentUser?.id || myTeamIds.has(nextMatch.player1Id) ? nextMatch.player2Name : nextMatch.player1Name}</strong> · Scheduled: {nextMatch.scheduledTime}
                   </p>
                 </div>
 
@@ -344,10 +357,29 @@ export const PlayerDashboard: React.FC = () => {
 
                 {currentTournament.status === 'registration_open' && (
                   userRegistration ? (
-                    <div className="px-4 py-2 bg-emerald-950/40 text-emerald-300 text-xs font-bold rounded-xl border border-emerald-600/30 flex items-center gap-1.5 shrink-0">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      <span>Registered (Approved)</span>
-                    </div>
+                    // The badge used to read "Registered (Approved)" the instant
+                    // someone registered, whatever the row actually said -- and a
+                    // self-registration is written as 'pending'. So the approval
+                    // step, which the organiser has to perform, was invisible:
+                    // the player believed they were in before anyone had decided.
+                    (() => {
+                      const status = (userRegistration as any).status;
+                      const look =
+                        status === 'approved'
+                          ? { cls: 'bg-emerald-950/40 text-emerald-300 border-emerald-600/30',
+                              icon: 'text-emerald-400', text: "You're in" }
+                          : status === 'rejected'
+                            ? { cls: 'bg-red-950/40 text-red-300 border-red-600/30',
+                                icon: 'text-red-400', text: 'Entry not accepted' }
+                            : { cls: 'bg-amber-950/40 text-amber-300 border-amber-600/30',
+                                icon: 'text-amber-400', text: 'Awaiting approval' };
+                      return (
+                        <div className={`px-4 py-2 text-xs font-bold rounded-xl border flex items-center gap-1.5 shrink-0 ${look.cls}`}>
+                          <CheckCircle2 className={`w-4 h-4 ${look.icon}`} />
+                          <span>{look.text}</span>
+                        </div>
+                      );
+                    })()
                   ) : (
                     <button
                       onClick={() => handleOpenRegistration(currentTournament)}

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Minus, Plus, Play, Check, Crown, Loader2 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { apiClient } from '../../utils/apiClient';
 import { exitToApp } from '../../utils/useHashRoute';
 import { MatchTimer } from '../admin/MatchTimer';
 import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from '../admin/BoardResultForm';
@@ -21,7 +22,7 @@ interface BoardModeProps {
 export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId }) => {
   const {
     tournaments, currentTournament, startMatch, submitBoardScore,
-    confirmMatchResult, refreshData,
+    confirmMatchResult, refreshData, addBoardToMatch,
   } = useTournament();
 
   const tournament: Tournament | undefined =
@@ -198,6 +199,63 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
             {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
             Start match
           </button>
+        )}
+
+        {/* All boards played and the scores level. `decided` is false and
+            `activeBoard` is undefined, so this screen used to render nothing
+            below the header -- the umpire is left holding a phone with no
+            controls and no explanation, at the exact moment they need telling
+            what to do. */}
+        {!decided && !activeBoard && match.tieBreakRequired && (
+          <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 space-y-3">
+            <div>
+              <div className="text-sm font-black text-amber-900">This match finished level</div>
+              <div className="text-xs text-amber-800 mt-0.5">
+                Both players scored {match.player1TotalPoints} across all{' '}
+                {(match.boards || []).length} boards.
+                {match.tieBreakRule === 'additional_board'
+                  ? ' Add a deciding board and play it.'
+                  : ' Award it to one of them.'}
+              </div>
+            </div>
+            {match.tieBreakRule === 'additional_board' && (
+              <button
+                onClick={() => run(() => addBoardToMatch(tournament.id, match.id), 'Deciding board added.')}
+                disabled={busy}
+                className="w-full py-3.5 rounded-2xl bg-[#0B5D3B] text-white font-black text-sm disabled:opacity-50"
+              >
+                Add a deciding board
+              </button>
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: match.player1Id, name: match.player1Name },
+                { id: match.player2Id, name: match.player2Name },
+              ].filter(p => p.id).map(p => (
+                <button
+                  key={p.id}
+                  onClick={async () => {
+                    const reason = window.prompt(
+                      `Award this match to ${p.name}?
+
+Say why — it is recorded with the result.`,
+                      'Umpire ruling'
+                    );
+                    if (reason === null || !reason.trim()) return;
+                    await run(
+                      () => apiClient.post(`/matches/${match.id}/tie-break`,
+                        { winnerId: p.id, reason: reason.trim() }),
+                      `Awarded to ${p.name}.`
+                    );
+                  }}
+                  disabled={busy}
+                  className="py-3 rounded-2xl bg-white border-2 border-amber-300 text-gray-800 font-bold text-xs disabled:opacity-50"
+                >
+                  Award to {p.name}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
 
         {!decided && activeBoard && (
