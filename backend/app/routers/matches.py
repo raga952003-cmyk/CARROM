@@ -5,7 +5,6 @@ from app.models.match import (
     MatchSidesSchema,
 )
 from app.utils.security import get_user_profile, verify_admin
-from app.services.match_timer import freeze_timer_when_finished
 from app.services.scoring_engine import (
     recalculate_match_scores, apply_queen_points, board_result, scoring_mode,
     apply_set_results, summarise_sets, set_layout,
@@ -310,7 +309,7 @@ async def update_board(
         updated_match = recalculate_match_scores(match_data, boards, corrected_rules)
         
         # Persist updated match scores
-        admin_db.table("matches").update(freeze_timer_when_finished(match_data, {
+        admin_db.table("matches").update({
             "player1_board_wins": updated_match["player1BoardWins"],
             "player2_board_wins": updated_match["player2BoardWins"],
             "player1_total_points": updated_match["player1TotalPoints"],
@@ -319,7 +318,7 @@ async def update_board(
             "winner_id": updated_match["winnerId"],
             "winner_name": updated_match["winnerName"],
             "match_completed_at": updated_match.get("matchCompletedAt")
-        })).eq("id", id).execute()
+        }).eq("id", id).execute()
 
         return res.data[0]
     except HTTPException:
@@ -479,9 +478,6 @@ async def submit_board(
             match_patch["player1_sets_won"] = updated_match.get("player1SetsWon", 0)
             match_patch["player2_sets_won"] = updated_match.get("player2SetsWon", 0)
 
-        # The last board finishing the match is what ends it, so this is where
-        # the clock has to stop.
-        freeze_timer_when_finished(match_data, match_patch)
 
         degraded_note = ""
         if not board_detail_available(admin_db):

@@ -6,12 +6,15 @@ only ever added to when the match is paused, and `timer_started_at`, the epoch
 milliseconds of the current run. The live figure is the sum of the two, and the
 UI stops counting when `is_timer_running` goes false.
 
-Nothing was setting that flag false when a match finished. Start, pause and
-resume each maintained the timer properly, but the paths that end a match --
-the last board completing it, and the umpire confirming the result -- wrote
-`status = 'completed'` and nothing else. So the clock kept running on a match
-that had already been won, and the recorded duration was whatever it had been
-at the last pause rather than the time the match actually took.
+Nothing was setting that flag false when a match finished, so the clock ran on
+for as long as the page stayed open and the recorded duration stayed at
+whatever it had been at the last pause.
+
+What ends a match is the umpire confirming the result, not the last board being
+scored. Between those two moments there is still work to do -- checking the
+boards, settling a dispute, agreeing the tie-break -- and that time belongs to
+the match. So the clock keeps running while the status is 'completed' and stops
+only when the result is confirmed.
 """
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -19,13 +22,17 @@ from typing import Any, Dict
 
 def freeze_timer_when_finished(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Add the timer fields to `patch` when it takes the match to 'completed'.
+    Add the timer fields to `patch` when it confirms the result.
 
     `current` is the match row as it stands; `patch` is the update about to be
     applied. Returns the same patch, extended in place, so callers can wrap an
     existing dict without restructuring.
+
+    Deliberately keyed on result_confirmed rather than status: a match whose
+    last board is in is finished on paper but not yet signed off, and the
+    umpire is still working on it.
     """
-    if patch.get("status") != "completed":
+    if not patch.get("result_confirmed"):
         return patch
 
     # Already stopped -- paused, or completed by an earlier write. Whatever is

@@ -10,13 +10,17 @@ import { Match } from '../../types/tournament';
  * way to see how long a match had been going.
  */
 export function elapsedSeconds(
-  match: Pick<Match, 'timerElapsedSeconds' | 'timerStartedAt' | 'isTimerRunning' | 'status'>,
+  match: Pick<Match, 'timerElapsedSeconds' | 'timerStartedAt' | 'isTimerRunning' | 'resultConfirmed'>,
 ): number {
   const base = match.timerElapsedSeconds || 0;
-  // A finished match is not running, whatever the flag says. The flag was left
-  // set on every match completed before this was fixed, and those rows would
+  // A confirmed result is not running, whatever the flag says. The flag was
+  // left set on matches confirmed before this was fixed, and those rows would
   // otherwise go on counting for as long as the page is open.
-  if (match.status === 'completed') return base;
+  //
+  // Note this is resultConfirmed, not status: the last board landing makes a
+  // match 'completed', but the umpire is still checking it and that time is
+  // part of the match. The clock stops when they sign it off.
+  if (match.resultConfirmed) return base;
   if (!match.isTimerRunning || !match.timerStartedAt) return base;
 
   const delta = Math.floor((Date.now() - match.timerStartedAt) / 1000);
@@ -45,10 +49,10 @@ export const MatchTimer: React.FC<MatchTimerProps> = ({ match, className = '' })
 
   useEffect(() => {
     setNow(elapsedSeconds(match));
-    if (!match.isTimerRunning || match.status === 'completed') return;
+    if (!match.isTimerRunning || match.resultConfirmed) return;
     const id = setInterval(() => setNow(elapsedSeconds(match)), 1000);
     return () => clearInterval(id);
-  }, [match.isTimerRunning, match.timerStartedAt, match.timerElapsedSeconds, match.status]);
+  }, [match.isTimerRunning, match.timerStartedAt, match.timerElapsedSeconds, match.resultConfirmed]);
 
   return (
     <span className={className} aria-live="off" title="Elapsed match time">

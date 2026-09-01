@@ -6,18 +6,20 @@
 -- current run. The UI stops counting when is_timer_running goes false.
 --
 -- Nothing set that flag false when a match finished. Start, pause and resume
--- each maintained the timer, but the paths that END a match -- the last board
--- completing it, and the umpire confirming the result -- wrote
--- status = 'completed' and nothing else. The clock went on running on a match
--- that had already been won, and the stored duration stayed at whatever it was
--- at the last pause instead of the time the match actually took.
+-- each maintained the timer, but nothing closed it out, so the clock ran on for
+-- as long as the page stayed open and the stored duration stayed at whatever it
+-- was at the last pause.
 --
--- Four code paths reach 'completed': two in the application, and two inside
--- SECURITY DEFINER functions whose bodies differ depending on which of
--- migrations 002, 005 and 007 have been applied. Rather than rewrite three
--- variants of two functions, a trigger closes the clock whenever a match
--- arrives at 'completed' by any route at all -- including a hand correction in
--- the SQL editor.
+-- What ends a match is the umpire confirming the result, NOT the last board
+-- being scored. Between those two moments there is still work to do -- checking
+-- the boards, settling a dispute, agreeing a tie-break -- and that time belongs
+-- to the match. So the clock runs through 'completed' and stops on confirmation.
+--
+-- Confirmation happens in two places: the application fallback, and a
+-- SECURITY DEFINER function whose body differs depending on which of migrations
+-- 002, 005 and 007 have been applied. Rather than rewrite several variants of
+-- it, a trigger closes the clock whenever result_confirmed becomes true by any
+-- route at all -- including a hand correction in the SQL editor.
 --
 -- The application stops the clock too, so a database without this migration
 -- still behaves. The two do not double-count: the trigger only acts when the
@@ -41,7 +43,8 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF NEW.status = 'completed' AND NEW.is_timer_running THEN
+    IF NEW.result_confirmed AND NOT COALESCE(OLD.result_confirmed, false)
+       AND NEW.is_timer_running THEN
         -- Bank the stretch this run has been going before clearing the flag,
         -- or the recorded duration loses the final part of the match.
         NEW.timer_elapsed_seconds :=
@@ -65,14 +68,15 @@ CREATE TRIGGER trg_stop_timer_on_match_complete
     FOR EACH ROW
     EXECUTE FUNCTION public.stop_timer_on_match_complete();
 
--- Matches already finished with the clock left running. How long they really
+-- Matches already confirmed with the clock left running. How long they really
 -- took is not recoverable, so only the flag is corrected -- which is the part
--- that stops the display counting.
+-- that stops the display counting. A match that is merely 'completed' is left
+-- alone: its clock is meant to still be running.
 UPDATE public.matches
 SET is_timer_running = false
-WHERE status = 'completed' AND is_timer_running = true;
+WHERE result_confirmed = true AND is_timer_running = true;
 
 DO $$
 BEGIN
-    RAISE NOTICE 'Migration 009 applied: the match clock now stops when a match completes.';
+    RAISE NOTICE 'Migration 009 applied: the match clock now stops when a result is confirmed.';
 END $$;
