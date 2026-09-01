@@ -24,6 +24,8 @@ interface Props {
   access: TournamentAccess;
   /** Called after anything changes, so the parent can re-read its own access. */
   onChanged: () => void;
+  /** Reports how many people are waiting, so the tab can carry a badge. */
+  onPendingCount?: (n: number) => void;
 }
 
 const ROLE_LABEL: Record<AccessRole, string> = {
@@ -32,7 +34,7 @@ const ROLE_LABEL: Record<AccessRole, string> = {
 };
 
 export const TournamentAccessPanel: React.FC<Props> = ({
-  tournamentId, tournamentName, access, onChanged,
+  tournamentId, tournamentName, access, onChanged, onPendingCount,
 }) => {
   const notify = useNotify();
 
@@ -55,11 +57,12 @@ export const TournamentAccessPanel: React.FC<Props> = ({
       ]);
       setRequests(reqs || []);
       setAdmins(adms || []);
+      onPendingCount?.((reqs || []).filter(r => r.status === 'pending').length);
     } else {
       const res = await accessService.listMine().catch(() => null);
       setMine((res?.requests || []).find(r => r.tournamentId === tournamentId) || null);
     }
-  }, [isOwner, tournamentId]);
+  }, [isOwner, tournamentId, onPendingCount]);
 
   useEffect(() => { reload(); }, [reload]);
 

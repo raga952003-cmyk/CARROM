@@ -60,6 +60,7 @@ export const AdminDashboard: React.FC = () => {
   // line is not to send the request.
   const [access, setAccess] = useState<TournamentAccess>(PERMISSIVE_ACCESS);
   const [busy, setBusy] = useState(false);
+  const [pendingAccessCount, setPendingAccessCount] = useState(0);
 
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -67,7 +68,7 @@ export const AdminDashboard: React.FC = () => {
   const [selectedTournamentForPoster, setSelectedTournamentForPoster] = useState<Tournament | null>(null);
 
   // Tournament workspace sub-tab
-  const [activeTab, setActiveTab] = useState<'fixtures' | 'registrations' | 'standings' | 'knockout' | 'overview' | 'players'>('fixtures');
+  const [activeTab, setActiveTab] = useState<'fixtures' | 'registrations' | 'standings' | 'knockout' | 'overview' | 'players' | 'access'>('fixtures');
 
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
 
@@ -76,9 +77,21 @@ export const AdminDashboard: React.FC = () => {
   // permissive and the server still has the final say on every action.
   const refreshAccess = useCallback(() => {
     const id = currentTournament?.id;
-    if (!id) { setAccess(PERMISSIVE_ACCESS); return; }
+    if (!id) { setAccess(PERMISSIVE_ACCESS); setPendingAccessCount(0); return; }
     accessService.myAccessFor(id)
-      .then(setAccess)
+      .then(a => {
+        setAccess(a);
+        // The badge has to be loaded here rather than by the panel: the panel
+        // only mounts once its tab is open, and a request nobody has noticed
+        // yet is exactly the thing the badge is for.
+        if (a.isOwner) {
+          accessService.listRequests(id)
+            .then(rs => setPendingAccessCount((rs || []).filter(r => r.status === 'pending').length))
+            .catch(() => setPendingAccessCount(0));
+        } else {
+          setPendingAccessCount(0);
+        }
+      })
       .catch(() => setAccess(PERMISSIVE_ACCESS));
   }, [currentTournament?.id]);
 
@@ -445,6 +458,8 @@ export const AdminDashboard: React.FC = () => {
                   { id: 'standings', label: 'Points & Standings', icon: Trophy },
                   { id: 'knockout', label: 'Knockout Bracket', icon: Award },
                   { id: 'players', label: 'Players Directory', icon: Users },
+                  { id: 'access', label: 'Access', icon: Lock,
+                    badge: pendingAccessCount || undefined },
                   { id: 'overview', label: 'Rules & Venue Details', icon: Sliders }
                 ].map((tab) => {
                   const Icon = tab.icon;
@@ -500,14 +515,17 @@ export const AdminDashboard: React.FC = () => {
                     tournament={currentTournament}
                     onOpenMatch={(m) => setActiveMatch(m)}
                   />
+                )}                {activeTab === 'access' && (
+                  <TournamentAccessPanel
+                    tournamentId={currentTournament.id}
+                    tournamentName={currentTournament.name}
+                    access={access}
+                    onChanged={refreshAccess}
+                    onPendingCount={setPendingAccessCount}
+                  />
                 )}                {activeTab === 'overview' && (
                   <div className="space-y-4">
-                    <TournamentAccessPanel
-                      tournamentId={currentTournament.id}
-                      tournamentName={currentTournament.name}
-                      access={access}
-                      onChanged={refreshAccess}
-                    />
+
                     {/* Edit mode controls header */}
                     <div className="flex flex-col sm:flex-row sm:justify-end gap-2 bg-white p-3 rounded-2xl border border-gray-200 shadow-2xs">
                       {isEditingRules ? (
