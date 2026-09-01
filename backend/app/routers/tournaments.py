@@ -257,12 +257,21 @@ async def get_tournaments(viewer = Depends(get_optional_profile)):
     # including the Realtime stream.
     supabase = get_admin_db()
     try:
-        res = supabase.table("tournaments").select("*").order("created_at", desc=True).execute()
+        rows = supabase.table("tournaments").select("*").order("created_at", desc=True).execute().data or []
+
+        # A draft is the organiser's working copy: half-entered dates, a
+        # placeholder name, entrants not yet approved. This endpoint answers
+        # anonymously and the public board reads it, so a draft was published
+        # the moment it was created. Invisible with one tournament; not once
+        # next year's is being set up alongside this year's.
+        is_admin = bool(viewer and viewer.get("role") == "admin")
+        if not is_admin:
+            rows = [t for t in rows if t.get("status") != "draft"]
+
         # Hydrated here because the dashboard reads tournament.matches and
         # tournament.registrations straight off the list response.
         # Contact details reach the organiser, never the public board.
-        is_admin = bool(viewer and viewer.get("role") == "admin")
-        return _hydrate_tournaments(supabase, res.data or [], is_admin)
+        return _hydrate_tournaments(supabase, rows, is_admin)
     except HTTPException:
         raise
     except Exception as e:
@@ -276,6 +285,10 @@ async def get_tournament(id: str, viewer = Depends(get_optional_profile)):
         if not t_res.data:
             raise HTTPException(status_code=404, detail="Tournament not found")
         is_admin = bool(viewer and viewer.get("role") == "admin")
+        # Guessing the id of a draft should not be a way around the list filter.
+        # 404 rather than 403: whether a draft exists is itself not public.
+        if not is_admin and t_res.data[0].get("status") == "draft":
+            raise HTTPException(status_code=404, detail="Tournament not found")
         return _hydrate_tournaments(supabase, t_res.data, is_admin)[0]
     except HTTPException:
         raise

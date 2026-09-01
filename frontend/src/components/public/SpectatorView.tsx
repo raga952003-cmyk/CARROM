@@ -44,10 +44,39 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [selectedId]);
 
   // Live updates without a session: the anon key plus RLS is exactly what
-  // Realtime is for.
+  // Realtime is for -- when it is configured. It was not, on the deployed site,
+  // because the build had no VITE_SUPABASE_* variables, so the subscription was
+  // a no-op and this page sat on a snapshot under a heading reading "LIVE".
+  //
+  // The signed-in app already polls when Realtime is unavailable; a spectator
+  // had no such fallback. They do now, and the page only claims to be live when
+  // the socket says so. Worth keeping even once Realtime works: a phone on
+  // venue wifi drops the connection.
+  const [isLive, setIsLive] = useState(false);
+
   useEffect(() => {
-    const handle = subscribeToTournamentData({ onChange: load });
-    return () => handle.unsubscribe();
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const stopPolling = () => { if (poll) { clearInterval(poll); poll = null; } };
+
+    const handle = subscribeToTournamentData({
+      onChange: load,
+      onStatus: status => {
+        const live = status === 'live';
+        setIsLive(live);
+        if (live) stopPolling();
+        else if (!poll) poll = setInterval(load, 20000);
+      },
+    });
+
+    // Nothing calls onStatus at all when Supabase is unconfigured, so the
+    // fallback cannot wait to be told.
+    const kickoff = setTimeout(() => { if (!poll) poll = setInterval(load, 20000); }, 3000);
+
+    return () => {
+      clearTimeout(kickoff);
+      stopPolling();
+      handle.unsubscribe();
+    };
     // eslint-disable-next-line
   }, [selectedId]);
 
@@ -86,7 +115,14 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
       <header className="bg-[#0B5D3B] text-white">
         <div className="max-w-3xl mx-auto px-4 py-4">
           <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-[#D4A72C]">
-            <Trophy className="w-3.5 h-3.5" /> Live tournament board
+            <Trophy className="w-3.5 h-3.5" />
+            <span>Tournament board</span>
+            {/* Only claimed when the socket is actually connected. Saying
+                "live" over a snapshot is worse than saying nothing. */}
+            <span className={`flex items-center gap-1 ${isLive ? 'text-emerald-200' : 'text-emerald-300/70'}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-emerald-300 animate-pulse' : 'bg-emerald-400/50'}`} />
+              {isLive ? 'Live' : 'Updating every 20s'}
+            </span>
           </div>
           <h1 className="text-xl font-serif font-bold mt-1 leading-tight">{tournament.name}</h1>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-emerald-100 mt-1">
@@ -244,8 +280,27 @@ const MatchRow: React.FC<{ match: Match; live?: boolean }> = ({ match, live }) =
         </div>
       </div>
       <div className="text-right shrink-0">
+        {/* Three states, not two. A match in play used to fall through to the
+            scheduled time -- which is empty for every match in this tournament,
+            so the one thing a spectator came to see rendered as a dash while
+            the umpire was recording boards a metre away. */}
         {match.resultConfirmed ? (
           <div className="text-sm font-black">{match.player1BoardWins}–{match.player2BoardWins}</div>
+        ) : match.status === 'live' || match.status === 'paused' ? (
+          <>
+            <div className="text-sm font-black text-[#0B5D3B]">
+              {match.player1BoardWins}–{match.player2BoardWins}
+            </div>
+            {(() => {
+              const playing = (match.boards || []).find(b => b.status === 'in_progress');
+              if (!playing) return null;
+              return (
+                <div className="text-[10px] text-gray-600 font-semibold">
+                  Board {playing.boardNumber}: {playing.player1Score}–{playing.player2Score}
+                </div>
+              );
+            })()}
+          </>
         ) : (
           <div className="text-[11px] text-gray-600">{match.scheduledTime || '—'}</div>
         )}
