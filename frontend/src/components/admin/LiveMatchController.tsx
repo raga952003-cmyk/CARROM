@@ -75,6 +75,21 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const notify = useNotify();
   const [isWalkoverModalOpen, setIsWalkoverModalOpen] = useState(false);
   const [removingBoards, setRemovingBoards] = useState(false);
+  const [resizing, setResizing] = useState(false);
+
+  const resizeBoards = async (n: number) => {
+    if (resizing || n === (match.boards || []).length) return;
+    setResizing(true);
+    try {
+      const res: any = await apiClient.post(`/matches/${match.id}/boards/resize?boards=${n}`, {});
+      notify.success(res?.message || `This match is now ${n} boards.`);
+      await refreshData();
+    } catch (e) {
+      notify.report(e, 'Could not change the number of boards.');
+    } finally {
+      setResizing(false);
+    }
+  };
 
   // Only offer it when there is actually something to remove: a trailing run
   // of boards with no play on them, and at least one board left over.
@@ -515,8 +530,23 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
           <div className="flex items-center space-x-2">
             <div className="text-xs font-semibold text-gray-600 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-200">
-              {setBoards.filter(b => b.status === 'completed').length} / {boardsPerSet} Boards Completed{totalSets > 1 ? ` · Set ${activeSet} of ${totalSets}` : ''}
+              {setBoards.filter(b => b.status === 'completed').length} / {setBoards.length} Boards Completed{totalSets > 1 ? ` · Set ${activeSet} of ${totalSets}` : ''}
             </div>
+            {role === 'admin' && !match.resultConfirmed && (
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-600 bg-white px-2.5 py-1 rounded-xl border border-gray-200">
+                <span>Boards</span>
+                <select
+                  value={setBoards.length}
+                  onChange={e => resizeBoards(parseInt(e.target.value, 10))}
+                  disabled={resizing}
+                  className="bg-transparent font-bold text-gray-900 focus:outline-hidden disabled:opacity-40"
+                >
+                  {Array.from({ length: 15 }, (_, n) => n + 1).map(n => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </label>
+            )}
             {role === 'admin' && !match.resultConfirmed && (
               <button
                 onClick={() => addBoardToMatch(tournament.id, match.id)}

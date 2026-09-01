@@ -221,6 +221,79 @@ async def add_board(id: str, admin = Depends(verify_admin)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/{id}/boards/resize")
+async def resize_match_boards(id: str, boards: int = Query(..., ge=1, le=31),
+                              admin = Depends(verify_admin)):
+    """
+    Set how many boards this match is played over.
+
+    Fixtures already generated carry the length they were generated with, so
+    changing the tournament rules afterwards does not reach them — and
+    regenerating the draw would throw away every board already played. This
+    changes one match in place.
+
+    Boards are added or trailing unplayed ones removed until the count matches,
+    and max_boards moves with it so the win condition stays consistent with the
+    match actually being played. It will not go below the boards already
+    played: shortening a match to less than has happened would silently discard
+    real results.
+    """
+    admin_db = get_admin_db()
+    try:
+        _authorise_match(admin_db, id, admin, "match.add_board")
+
+        existing = admin_db.table("boards").select("*").eq(
+            "match_id", id).order("board_number").execute().data or []
+        played = [b for b in existing if b.get("status") == "completed"
+                  or (b.get("player1_score") or 0) or (b.get("player2_score") or 0)]
+
+        if boards < len(played):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This match already has {} board(s) with a result on them, so it "
+                    "cannot be shortened to {}."
+                ).format(len(played), boards),
+            )
+
+        added = removed = 0
+        if boards > len(existing):
+            rows = [{
+                "match_id": id,
+                "board_number": n,
+                "status": "pending",
+                "player1_score": 0,
+                "player2_score": 0,
+            } for n in range(len(existing) + 1, boards + 1)]
+            admin_db.table("boards").insert(rows).execute()
+            added = len(rows)
+        elif boards < len(existing):
+            # Trailing first, so numbering stays contiguous.
+            for b in reversed(existing[boards:]):
+                admin_db.table("boards").delete().eq("id", b["id"]).execute()
+                removed += 1
+
+        admin_db.table("matches").update({"max_boards": boards}).eq("id", id).execute()
+
+        record_audit(
+            admin_db, actor=admin, action="match.resize_boards",
+            entity_type="match", entity_id=id,
+            previous_state={"boards": len(existing)},
+            new_state={"boards": boards, "added": added, "removed": removed},
+        )
+        return {
+            "status": "success",
+            "boards": boards,
+            "added": added,
+            "removed": removed,
+            "message": "This match is now played over {} board(s).".format(boards),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.delete("/{id}/boards/unplayed")
 async def remove_unplayed_boards(id: str, admin = Depends(verify_admin)):
     """

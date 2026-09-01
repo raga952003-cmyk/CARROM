@@ -514,13 +514,17 @@ async def generate_fixtures(id: str, admin = Depends(verify_admin)):
                 pools["doubles"].append(r["team"])
 
         max_boards = t.get("rules", {}).get("maxBoardsPerMatch", 3)
-        # Boards per SET when the tournament is played in sets; the flat board
-        # count otherwise, so a one-set tournament is unchanged.
         number_of_sets = int(t.get("rules", {}).get("numberOfSets") or 1)
         boards_per_set = int(t.get("rules", {}).get("boardsPerSet") or max_boards)
         if not sets_supported(admin_db):
             number_of_sets = 1
-        if number_of_sets > 1:
+        # boardsPerSet governs the boards in a match whether or not the
+        # tournament is played in sets: with a single set, that set IS the
+        # match. It used to apply only when numberOfSets > 1, so a tournament
+        # configured for 8 boards a match quietly got 3 -- the default of
+        # maxBoardsPerMatch -- while the screen went on reading "0 / 8" from the
+        # rule that had been ignored.
+        if boards_per_set:
             max_boards = boards_per_set
         format_type = t.get("format")
 
@@ -867,7 +871,9 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
         boards_per_set = int(rules.get("boardsPerSet") or max_boards)
         if not sets_supported(admin_db):
             number_of_sets = 1
-        if number_of_sets > 1:
+        # Same rule as generated fixtures, so a manually added match is the
+        # same length as the rest of the draw.
+        if boards_per_set:
             max_boards = boards_per_set
 
         existing = admin_db.table("matches").select("match_number, round_index").eq(
