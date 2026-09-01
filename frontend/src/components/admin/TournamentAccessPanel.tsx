@@ -117,7 +117,7 @@ export const TournamentAccessPanel: React.FC<Props> = ({
                         <Clock className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
                         <div className="flex-1 min-w-0">
                           <div className="text-xs font-bold text-gray-900 truncate">
-                            {r.userName || r.userEmail || 'An admin'}
+                            {r.requester?.name || r.requester?.email || 'An admin'}
                           </div>
                           <div className="text-[10px] text-amber-800">
                             asked for {ROLE_LABEL[r.accessRole] || r.accessRole}
@@ -162,7 +162,7 @@ export const TournamentAccessPanel: React.FC<Props> = ({
                       <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                       <div className="flex-1 min-w-0">
                         <div className="text-xs font-bold text-gray-900 truncate">
-                          {r.userName || r.userEmail}
+                          {r.requester?.name || r.requester?.email}
                         </div>
                         <div className="text-[10px] text-emerald-800">
                           {ROLE_LABEL[r.accessRole] || r.accessRole}

@@ -7,6 +7,7 @@ that tournament.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from app.models.tournament import BaseCamelModel
 from app.database import get_admin_db
 from app.utils.security import verify_admin, get_user_profile
 from app.utils.serializers import camelize, serialize_player
@@ -35,8 +36,16 @@ class AccessDecisionSchema(BaseModel):
     role: Optional[str] = None
 
 
-class AccessGrantSchema(BaseModel):
-    """Owner hands access to someone who has not asked for it."""
+class AccessGrantSchema(BaseCamelModel):
+    """
+    Owner hands access to someone who has not asked for it.
+
+    Camel-cased on purpose: the browser sends userId, and a plain BaseModel
+    would silently drop it -- which read as "Provide either user_id or email"
+    on a form where an admin had plainly been chosen. The other schemas here
+    get away with BaseModel only because none of their fields have an
+    underscore in them.
+    """
     user_id: Optional[str] = None
     email: Optional[str] = None
     role: str = MANAGER

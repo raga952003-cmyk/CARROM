@@ -32,14 +32,19 @@ export interface TournamentAccess {
   status: AccessStatus;
 }
 
-/** One row of the access table, as the owner and the requester both see it. */
+/**
+ * One row of the access table, as the owner and the requester both see it.
+ *
+ * The API hydrates each row with the requester's profile and the tournament
+ * under their own keys rather than flattening them, so read names through
+ * `requester`, not off the row.
+ */
 export interface AccessRequest {
   id: string;
   tournamentId: string;
   userId: string;
-  userName?: string;
-  userEmail?: string;
-  tournamentName?: string;
+  requester?: { id: string; name?: string; email?: string; club?: string; role?: string } | null;
+  tournament?: { id: string; name?: string; ownerId?: string } | null;
   accessRole: AccessRole;
   status: AccessStatus;
   message?: string | null;
