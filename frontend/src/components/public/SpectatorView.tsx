@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { compareMatches } from '../../utils/matchOrder';
 import { Trophy, Clock, MapPin, Search, RefreshCw, Radio } from 'lucide-react';
 import { Tournament, Match, StandingsBreakdown } from '../../types/tournament';
 import { tournamentService } from '../../services/tournamentService';
@@ -91,9 +92,7 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
           m.player2Name.toLowerCase().includes(needle))
       : all;
     return [...filtered].sort((a, b) =>
-      (a.scheduledDate || '').localeCompare(b.scheduledDate || '') ||
-      (a.scheduledTime || '').localeCompare(b.scheduledTime || '') ||
-      a.matchNumber - b.matchNumber);
+      compareMatches(a, b));
   }, [tournament, query]);
 
   const live = matches.filter(m => m.status === 'live');

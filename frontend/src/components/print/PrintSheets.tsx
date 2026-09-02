@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { compareMatches } from '../../utils/matchOrder';
 import { Printer, ArrowLeft } from 'lucide-react';
 import { Tournament, Match, StandingsBreakdown } from '../../types/tournament';
 import { tournamentService } from '../../services/tournamentService';
@@ -70,9 +71,7 @@ export const PrintSheets: React.FC<PrintSheetsProps> = ({ tournamentId, kind }) 
   });
   byBoard.forEach(list =>
     list.sort((a, b) =>
-      (a.scheduledDate || '').localeCompare(b.scheduledDate || '') ||
-      (a.scheduledTime || '').localeCompare(b.scheduledTime || '') ||
-      a.matchNumber - b.matchNumber
+      compareMatches(a, b)
     )
   );
   const boards = [...byBoard.keys()].sort((a, b) => a - b);

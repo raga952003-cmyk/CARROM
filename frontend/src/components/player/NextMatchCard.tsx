@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { compareMatches } from '../../utils/matchOrder';
 import { Clock, MapPin, ChevronRight, CheckCircle2, Radio } from 'lucide-react';
 import { Tournament, Match, Player, Admin } from '../../types/tournament';
 
@@ -36,9 +37,7 @@ export const NextMatchCard: React.FC<NextMatchCardProps> = ({
         m.player1Id === userId || m.player2Id === userId ||
         myTeamIds.has(m.player1Id) || myTeamIds.has(m.player2Id))
       .sort((a, b) =>
-        (a.scheduledDate || '').localeCompare(b.scheduledDate || '') ||
-        (a.scheduledTime || '').localeCompare(b.scheduledTime || '') ||
-        a.matchNumber - b.matchNumber);
+        compareMatches(a, b));
   }, [tournament, currentUser]);
 
   const live = mine.find(m => m.status === 'live');

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { compareMatches } from '../../utils/matchOrder';
 import { ArrowLeft, Minus, Plus, Play, Check, Crown, Loader2 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
@@ -52,9 +53,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
       .filter(m => (m.boardNumber || 1) === boardNumber && !m.resultConfirmed)
       .filter(m => m.player1Id && m.player2Id)
       .sort((a, b) =>
-        (a.scheduledDate || '').localeCompare(b.scheduledDate || '') ||
-        (a.scheduledTime || '').localeCompare(b.scheduledTime || '') ||
-        a.matchNumber - b.matchNumber);
+        compareMatches(a, b));
   }, [tournament, boardNumber]);
 
   // Prefer whatever is already live on this board, else the next one up.

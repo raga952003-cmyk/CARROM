@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle } from 'lucide-react';
+import { compareMatches } from '../../utils/matchOrder';
+import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle, Search, X } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -46,6 +47,7 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
     }
   };
   const [selectedRoundFilter, setSelectedRoundFilter] = useState<string>('all');
+  const [playerSearch, setPlayerSearch] = useState('');
 
   const allMatches = tournament.matches || [];
 
@@ -67,10 +69,26 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   // Group matches by round, within the selected category
   const rounds = Array.from(new Set(matches.map(m => m.roundName)));
 
-  // Filtered matches
-  const displayedMatches = selectedRoundFilter === 'all'
-    ? matches
-    : matches.filter(m => m.roundName === selectedRoundFilter);
+  // Find a player's or a team's fixtures.
+  //
+  // With 190 fixtures across nineteen rounds, "when do I play, and who?" was a
+  // question you could only answer by reading every card. Matching on the two
+  // side names covers doubles as well, because a doubles fixture carries the
+  // team's name rather than the two people in it.
+  const needle = playerSearch.trim().toLowerCase();
+  const searchedMatches = needle
+    ? matches.filter(m =>
+        (m.player1Name || '').toLowerCase().includes(needle) ||
+        (m.player2Name || '').toLowerCase().includes(needle))
+    : matches;
+
+  // A search is a question about one person, so the round tabs stop applying:
+  // their next match is very unlikely to be in the round being looked at.
+  const displayedMatches = needle
+    ? searchedMatches
+    : selectedRoundFilter === 'all'
+      ? matches
+      : matches.filter(m => m.roundName === selectedRoundFilter);
 
   // Group matches by board for board timeline
   const boardMap: Map<number, Match[]> = new Map();
@@ -280,6 +298,64 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           {/* Round Filter Tabs */}
           {rounds.length > 1 && (
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+              {/* Who plays whom, and when. */}
+              <div className="w-full mb-2.5">
+                <div className="relative">
+                  <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={playerSearch}
+                    onChange={e => setPlayerSearch(e.target.value)}
+                    placeholder="Find a player or team — type a name to see their matches"
+                    className="w-full text-sm pl-9 pr-9 py-2.5 border border-gray-200 rounded-xl bg-white focus:border-[#0B5D3B] focus:outline-hidden"
+                  />
+                  {playerSearch && (
+                    <button
+                      onClick={() => setPlayerSearch('')}
+                      aria-label="Clear search"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+
+                {needle && (
+                  <div className="mt-2 px-3 py-2 rounded-xl bg-[#F8F6F0] border border-gray-200 text-xs">
+                    {searchedMatches.length === 0 ? (
+                      <span className="text-gray-600">
+                        Nobody matching <span className="font-bold">“{playerSearch}”</span> has a fixture.
+                      </span>
+                    ) : (
+                      <span className="text-gray-700">
+                        <span className="font-bold">{searchedMatches.length}</span>
+                        {' '}match{searchedMatches.length === 1 ? '' : 'es'} for{' '}
+                        <span className="font-bold">“{playerSearch}”</span>
+                        {(() => {
+                          const next = searchedMatches
+                            .filter(m => !m.resultConfirmed)
+                            .sort((a, b) =>
+                              compareMatches(a, b))[0];
+                          if (!next) return <span className="text-gray-500"> · all played</span>;
+                          const them = (next.player1Name || '').toLowerCase().includes(needle)
+                            ? next.player2Name : next.player1Name;
+                          return (
+                            <span className="text-gray-600">
+                              {' '}· next: <span className="font-bold text-[#0B5D3B]">vs {them}</span>
+                              {next.scheduledDate || next.scheduledTime
+                                ? <> on {next.scheduledDate} at {next.scheduledTime}</>
+                                : <> (not scheduled yet)</>}
+                              {' '}· Board {next.boardNumber}
+                            </span>
+                          );
+                        })()}
+                        <span className="text-gray-400"> · round filter ignored while searching</span>
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
               {showCategoryTabs && (
                 <div className="w-full flex items-center gap-1.5 mb-2 pb-2 border-b border-gray-200/70">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mr-1">
