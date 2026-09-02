@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { findMyMatches, opponentOf } from '../../utils/myMatches';
 import { 
   Trophy, 
   Calendar, 
@@ -56,25 +57,14 @@ export const PlayerDashboard: React.FC = () => {
     (currentUser?.id && r.team?.player2?.id === currentUser.id)
   );
 
-  // Matches this player is actually in.
-  //
-  // This used to fall back to a name SUBSTRING, so "Srinivas" matched
-  // "Srinivasan S" and a player was shown fixtures belonging to someone else —
-  // in their own "My Matches" tab, with a count to match. Identity is the id.
-  // A doubles fixture carries the TEAM id, so the teams this player belongs to
-  // count as them, which is the same rule NextMatchCard already uses.
-  const myTeamIds = React.useMemo(() => new Set(
-    (currentTournament?.registrations || [])
-      .filter(r => r.type === 'doubles' && r.team &&
-        (r.team.player1?.id === currentUser?.id || r.team.player2?.id === currentUser?.id))
-      .map(r => r.team!.id)
-  ), [currentTournament, currentUser]);
-
-  const myMatches = (currentTournament?.matches || []).filter(m =>
-    !!currentUser?.id && (
-      m.player1Id === currentUser.id || m.player2Id === currentUser.id ||
-      myTeamIds.has(m.player1Id) || myTeamIds.has(m.player2Id)
-    )
+  // Matches this player is actually in. See utils/myMatches: the id is the
+  // identity, with an exact-name fallback for the case where the signed-in
+  // account and the roster entry are different rows -- which is why this
+  // screen read "No personal matches found" for a player with nineteen
+  // fixtures in the draw.
+  const myMatches = React.useMemo(
+    () => findMyMatches(currentTournament, currentUser),
+    [currentTournament, currentUser]
   );
 
   // Next upcoming match
@@ -127,7 +117,7 @@ export const PlayerDashboard: React.FC = () => {
                     Match #{nextMatch.matchNumber} · Board #{nextMatch.boardNumber}
                   </h2>
                   <p className="text-xs sm:text-sm text-emerald-100 mt-0.5">
-                    Opponent: <strong>{nextMatch.player1Id === currentUser?.id || myTeamIds.has(nextMatch.player1Id) ? nextMatch.player2Name : nextMatch.player1Name}</strong> · Scheduled: {nextMatch.scheduledTime}
+                    Opponent: <strong>{opponentOf(nextMatch, currentUser)}</strong> · Scheduled: {nextMatch.scheduledTime}
                   </p>
                 </div>
 

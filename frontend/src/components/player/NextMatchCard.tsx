@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { compareMatches } from '../../utils/matchOrder';
+import { findMyMatches } from '../../utils/myMatches';
 import { Clock, MapPin, ChevronRight, CheckCircle2, Radio } from 'lucide-react';
 import { Tournament, Match, Player, Admin } from '../../types/tournament';
 
@@ -19,26 +19,10 @@ interface NextMatchCardProps {
 export const NextMatchCard: React.FC<NextMatchCardProps> = ({
   tournament, currentUser, onOpenMatch,
 }) => {
-  const mine = useMemo(() => {
-    if (!tournament || !currentUser) return [];
-    const userId = currentUser.id;
-
-    // A doubles fixture carries the *team* id, so match on the team's members
-    // as well as on the player id.
-    const myTeamIds = new Set(
-      (tournament.registrations || [])
-        .filter(r => r.type === 'doubles' && r.team &&
-          (r.team.player1?.id === userId || r.team.player2?.id === userId))
-        .map(r => r.team!.id)
-    );
-
-    return (tournament.matches || [])
-      .filter(m =>
-        m.player1Id === userId || m.player2Id === userId ||
-        myTeamIds.has(m.player1Id) || myTeamIds.has(m.player2Id))
-      .sort((a, b) =>
-        compareMatches(a, b));
-  }, [tournament, currentUser]);
+  const mine = useMemo(
+    () => findMyMatches(tournament, currentUser),
+    [tournament, currentUser]
+  );
 
   const live = mine.find(m => m.status === 'live');
   const next = live || mine.find(m => !m.resultConfirmed);
