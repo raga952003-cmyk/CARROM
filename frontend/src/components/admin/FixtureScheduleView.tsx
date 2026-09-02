@@ -233,6 +233,67 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
         </div>
       </div>
 
+      {/* Who plays whom, and when. Rendered above the view toggle, because it
+          used to live inside the rounds branch and vanished on Board Grid. */}
+      {hasMatches && (
+            <div className="w-full mb-2.5">
+              <div className="relative">
+                <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={playerSearch}
+                  onChange={e => setPlayerSearch(e.target.value)}
+                  placeholder="Find a player or team — type a name to see their matches"
+                  className="w-full text-sm pl-9 pr-9 py-2.5 border border-gray-200 rounded-xl bg-white focus:border-[#0B5D3B] focus:outline-hidden"
+                />
+                {playerSearch && (
+                  <button
+                    onClick={() => setPlayerSearch('')}
+                    aria-label="Clear search"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+  
+              {needle && (
+                <div className="mt-2 px-3 py-2 rounded-xl bg-[#F8F6F0] border border-gray-200 text-xs">
+                  {searchedMatches.length === 0 ? (
+                    <span className="text-gray-600">
+                      Nobody matching <span className="font-bold">“{playerSearch}”</span> has a fixture.
+                    </span>
+                  ) : (
+                    <span className="text-gray-700">
+                      <span className="font-bold">{searchedMatches.length}</span>
+                      {' '}match{searchedMatches.length === 1 ? '' : 'es'} for{' '}
+                      <span className="font-bold">“{playerSearch}”</span>
+                      {(() => {
+                        const next = searchedMatches
+                          .filter(m => !m.resultConfirmed)
+                          .sort((a, b) =>
+                            compareMatches(a, b))[0];
+                        if (!next) return <span className="text-gray-500"> · all played</span>;
+                        const them = (next.player1Name || '').toLowerCase().includes(needle)
+                          ? next.player2Name : next.player1Name;
+                        return (
+                          <span className="text-gray-600">
+                            {' '}· next: <span className="font-bold text-[#0B5D3B]">vs {them}</span>
+                            {next.scheduledDate || next.scheduledTime
+                              ? <> on {next.scheduledDate} at {next.scheduledTime}</>
+                              : <> (not scheduled yet)</>}
+                            {' '}· Board {next.boardNumber}
+                          </span>
+                        );
+                      })()}
+                      <span className="text-gray-400"> · round filter ignored while searching</span>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+      )}
+
       {/* The state of the schedule, checked rather than asserted.
           This used to read "All Scheduling Constraints Verified" in green
           whenever any fixture existed -- nothing here ever called the conflict
@@ -295,63 +356,6 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
         /* Round by Round View */
         <div className="space-y-4">
           
-          {/* Who plays whom, and when. */}
-          <div className="w-full mb-2.5">
-            <div className="relative">
-              <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={playerSearch}
-                onChange={e => setPlayerSearch(e.target.value)}
-                placeholder="Find a player or team — type a name to see their matches"
-                className="w-full text-sm pl-9 pr-9 py-2.5 border border-gray-200 rounded-xl bg-white focus:border-[#0B5D3B] focus:outline-hidden"
-              />
-              {playerSearch && (
-                <button
-                  onClick={() => setPlayerSearch('')}
-                  aria-label="Clear search"
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              )}
-            </div>
-
-            {needle && (
-              <div className="mt-2 px-3 py-2 rounded-xl bg-[#F8F6F0] border border-gray-200 text-xs">
-                {searchedMatches.length === 0 ? (
-                  <span className="text-gray-600">
-                    Nobody matching <span className="font-bold">“{playerSearch}”</span> has a fixture.
-                  </span>
-                ) : (
-                  <span className="text-gray-700">
-                    <span className="font-bold">{searchedMatches.length}</span>
-                    {' '}match{searchedMatches.length === 1 ? '' : 'es'} for{' '}
-                    <span className="font-bold">“{playerSearch}”</span>
-                    {(() => {
-                      const next = searchedMatches
-                        .filter(m => !m.resultConfirmed)
-                        .sort((a, b) =>
-                          compareMatches(a, b))[0];
-                      if (!next) return <span className="text-gray-500"> · all played</span>;
-                      const them = (next.player1Name || '').toLowerCase().includes(needle)
-                        ? next.player2Name : next.player1Name;
-                      return (
-                        <span className="text-gray-600">
-                          {' '}· next: <span className="font-bold text-[#0B5D3B]">vs {them}</span>
-                          {next.scheduledDate || next.scheduledTime
-                            ? <> on {next.scheduledDate} at {next.scheduledTime}</>
-                            : <> (not scheduled yet)</>}
-                          {' '}· Board {next.boardNumber}
-                        </span>
-                      );
-                    })()}
-                    <span className="text-gray-400"> · round filter ignored while searching</span>
-                  </span>
-                )}
-              </div>
-            )}
-          </div>
 
           {/* Round Filter Tabs */}
           {rounds.length > 1 && (
