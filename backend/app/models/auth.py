@@ -49,3 +49,21 @@ class EmailChangeSchema(BaseCamelModel):
     """Changing the address you sign in with, so the current password is required."""
     current_password: str
     new_email: EmailStr
+
+
+class ForgotPasswordSchema(BaseCamelModel):
+    """Ask for a reset link. Answered identically whether the account exists or not."""
+    email: EmailStr
+
+
+class ResetPasswordSchema(BaseCamelModel):
+    """
+    Finish a reset.
+
+    The recovery token arrives in the URL fragment of the emailed link. The
+    browser hands it back here rather than talking to Supabase directly,
+    because the frontend Supabase client is not configured in this deployment
+    -- so the standard client-side recovery flow has nothing to run on.
+    """
+    access_token: str
+    new_password: str = Field(..., min_length=6)

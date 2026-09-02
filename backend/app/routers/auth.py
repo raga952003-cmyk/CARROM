@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.database import get_db, get_admin_db
+from app.config import settings
 from app.models.auth import (
     SignUpSchema, LoginSchema, RefreshSchema,
     ProfileUpdateSchema, PasswordChangeSchema, EmailChangeSchema,
+    ForgotPasswordSchema, ResetPasswordSchema,
 )
 from app.utils.security import get_user_profile, get_current_user
 from app.utils.serializers import serialize_player
@@ -319,6 +321,86 @@ async def change_email(data: EmailChangeSchema,
         raise HTTPException(status_code=400, detail="Could not change the email address.")
     return {"status": "success",
             "message": "Email changed. Use the new address next time you sign in."}
+
+
+@router.post("/forgot-password")
+async def forgot_password(data: ForgotPasswordSchema):
+    """
+    Send a reset link.
+
+    The comment on admin-created accounts has always said they "use the
+    Supabase password-reset flow". That flow was never built, so an account
+    whose password nobody knows -- which is every account created from a sheet
+    -- had no way back in at all.
+
+    The response is the same whether or not the address exists. Saying "no such
+    account" turns this endpoint into a way to find out who has one.
+    """
+    email = str(data.email).strip().lower()
+    same_answer = {
+        "status": "success",
+        "message": (
+            "If that address has an account, a reset link is on its way. "
+            "Check the spam folder if it does not arrive."
+        ),
+    }
+
+    try:
+        redirect = (settings.cors_origin_list() or [None])[0]
+        get_db().auth.reset_password_for_email(
+            email,
+            {"redirect_to": "{}/#/reset-password".format(redirect)} if redirect else {},
+        )
+    except Exception as e:
+        # Logged, not returned: a delivery failure is ours to fix, and telling
+        # the caller which addresses error would leak the same thing the
+        # identical response above is there to hide.
+        logger.error(f"Password reset for {email} failed: {str(e)}")
+
+    return same_answer
+
+
+@router.post("/reset-password")
+async def reset_password(data: ResetPasswordSchema):
+    """
+    Set a new password using the token from a reset link.
+
+    Supabase's own flow expects the browser to hold a Supabase client and call
+    updateUser itself. This deployment has no such client -- the VITE_SUPABASE_*
+    variables are not set in the build -- so the token comes here instead and
+    the change is made with the service role after the token is verified.
+    """
+    token = (data.access_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=422, detail="That reset link is missing its token.")
+
+    try:
+        # The token identifies the account; an expired or forged one resolves
+        # to nobody, and this is the only thing standing between a link and a
+        # password change.
+        result = get_admin_db().auth.get_user(token)
+        user = getattr(result, "user", None)
+    except Exception:
+        user = None
+
+    if not user or not getattr(user, "id", None):
+        raise HTTPException(
+            status_code=401,
+            detail="That reset link has expired or has already been used. Ask for a new one.",
+        )
+
+    try:
+        get_admin_db().auth.admin.update_user_by_id(
+            user.id, attributes={"password": data.new_password}
+        )
+    except Exception as e:
+        logger.error(f"Password reset write failed for {user.id}: {str(e)}")
+        raise HTTPException(status_code=400, detail="Could not set that password.")
+
+    return {
+        "status": "success",
+        "message": "Password set. Sign in with your new password.",
+    }
 
 
 @router.post("/refresh")

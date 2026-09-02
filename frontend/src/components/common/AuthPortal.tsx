@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { apiClient } from '../../utils/apiClient';
 import { 
   Trophy, 
   ShieldCheck, 
@@ -28,6 +29,8 @@ export const AuthPortal: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [loading, setLoading] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
+  const [forgotNote, setForgotNote] = useState('');
 
   // Form Fields
   const [email, setEmail] = useState('');
@@ -347,6 +350,41 @@ export const AuthPortal: React.FC = () => {
                 )}
               </button>
             </form>
+
+            {/* Locked out. Every account made from a sheet import was given a
+                random password nobody kept, so this is not an edge case here --
+                it is the only way most people get in. */}
+            {authMode === 'signin' && (
+              <div className="text-center">
+                {forgotSent ? (
+                  <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                    If that address has an account, a reset link is on its way.
+                  </p>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!email.trim()) { setForgotNote('Enter your email address first.'); return; }
+                      setForgotNote('');
+                      try {
+                        await apiClient.post('/auth/forgot-password', { email: email.trim() });
+                        setForgotSent(true);
+                      } catch {
+                        // The endpoint answers the same either way; a network
+                        // failure is the only thing that reaches here.
+                        setForgotNote('Could not send it. Check your connection and try again.');
+                      }
+                    }}
+                    className="text-[11px] text-[#0B5D3B] hover:underline font-semibold"
+                  >
+                    Forgot your password?
+                  </button>
+                )}
+                {forgotNote && (
+                  <p className="text-[11px] text-amber-800 mt-1">{forgotNote}</p>
+                )}
+              </div>
+            )}
 
             {/* Register Toggle Switch */}
             <div className="text-center text-[11px] text-gray-500 pt-2 border-t border-gray-100 flex items-center justify-between">

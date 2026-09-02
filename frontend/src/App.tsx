@@ -3,6 +3,7 @@ import { TournamentProvider, useTournament } from './context/TournamentContext';
 import { useHashRoute } from './utils/useHashRoute';
 import { BoardMode } from './components/scorer/BoardMode';
 import { SpectatorView } from './components/public/SpectatorView';
+import { ResetPassword } from './components/common/ResetPassword';
 import { PrintSheets } from './components/print/PrintSheets';
 import { Header } from './components/common/Header';
 import { NotificationDrawer } from './components/common/NotificationDrawer';
@@ -106,6 +107,12 @@ const AppWrapper: React.FC = () => {
   // and never triggers the authenticated refresh loop.
   if (route.view === 'live') {
     return <SpectatorView tournamentId={route.segments[1] || undefined} />;
+  }
+
+  // Also outside the provider: someone following a reset link has no session,
+  // and this page must not require one to render.
+  if (route.view === 'reset-password' || (window.location.hash || '').includes('type=recovery')) {
+    return <ResetPassword />;
   }
 
   return (
