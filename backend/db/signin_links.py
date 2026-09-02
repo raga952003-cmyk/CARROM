@@ -17,6 +17,7 @@ their own password from Settings once they are there.
     python db/signin_links.py                       # every player, as a table
     python db/signin_links.py "Ragavendra S"        # one person
     python db/signin_links.py --format=csv > links.csv
+    python db/signin_links.py --site=https://carrom-umber-six.vercel.app
 
 Each link is single-use and expires, so re-run this when one goes stale.
 
@@ -32,13 +33,25 @@ from app.config import settings
 from app.database import get_admin_db
 
 
-def redirect_target() -> str:
-    """Where a clicked link should land. The deployed site, or localhost."""
+DEFAULT_SITE = "https://carrom-umber-six.vercel.app"
+
+
+def redirect_target(override: str = "") -> str:
+    """
+    Where a clicked link should land.
+
+    Order: what was passed on the command line, then CORS_ORIGINS, then the
+    deployed site. Getting this wrong is not cosmetic -- Supabase falls back to
+    the project's Site URL when it has nothing usable, which on a fresh project
+    is localhost:3000, and every link goes to a page nobody is serving.
+    """
+    if override:
+        return override.rstrip("/")
     origins = settings.cors_origin_list()
-    return origins[0] if origins else "http://localhost:5173"
+    return (origins[0] if origins else DEFAULT_SITE).rstrip("/")
 
 
-def main(who: str, as_csv: bool) -> int:
+def main(who: str, as_csv: bool, site: str) -> int:
     adm = get_admin_db()
 
     profiles = adm.table("profiles").select("id, name, email, role").eq(
@@ -73,7 +86,7 @@ def main(who: str, as_csv: bool) -> int:
                 # has never seen the app.
                 "type": "magiclink",
                 "email": email,
-                "options": {"redirect_to": redirect_target()},
+                "options": {"redirect_to": redirect_target(site) + "/"},
             })
             # GenerateLinkResponse.properties.action_link, per the client's
             # own types. The dict branch is for older client versions.
@@ -109,4 +122,7 @@ def main(who: str, as_csv: bool) -> int:
 
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    sys.exit(main(args[0] if args else "", as_csv="--format=csv" in sys.argv))
+    site_arg = next((a.split("=", 1)[1] for a in sys.argv[1:]
+                     if a.startswith("--site=")), "")
+    sys.exit(main(args[0] if args else "", as_csv="--format=csv" in sys.argv,
+                  site=site_arg))

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.database import get_db, get_admin_db
 from app.config import settings
 from app.models.auth import (
@@ -324,7 +324,7 @@ async def change_email(data: EmailChangeSchema,
 
 
 @router.post("/forgot-password")
-async def forgot_password(data: ForgotPasswordSchema):
+async def forgot_password(data: ForgotPasswordSchema, request: Request):
     """
     Send a reset link.
 
@@ -345,12 +345,35 @@ async def forgot_password(data: ForgotPasswordSchema):
         ),
     }
 
+    # Send them back to the site they asked from.
+    #
+    # This used to read CORS_ORIGINS, which is not set on this deployment, so
+    # the redirect was omitted and Supabase fell back to its project-level Site
+    # URL -- localhost:3000, which is nobody's browser. Taking it from the
+    # request works wherever the app is served: production, a preview build, or
+    # a laptop.
+    #
+    # The value is not a redirect this API performs, and it is not trusted on
+    # its own: Supabase refuses any target that is not in the project's
+    # allow-list, so a forged Origin cannot point the link somewhere else.
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    if not origin:
+        referer = request.headers.get("referer") or ""
+        if "//" in referer:
+            scheme, _, rest = referer.partition("//")
+            origin = "{}//{}".format(scheme, rest.split("/", 1)[0])
+    if not origin:
+        origin = (settings.cors_origin_list() or [""])[0].rstrip("/")
+
     try:
-        redirect = (settings.cors_origin_list() or [None])[0]
-        get_db().auth.reset_password_for_email(
-            email,
-            {"redirect_to": "{}/#/reset-password".format(redirect)} if redirect else {},
-        )
+        # The site root, with no fragment of its own.
+        #
+        # Supabase APPENDS its token as a fragment -- "#access_token=...&
+        # type=recovery" -- so a redirect that already ended in "#/reset-password"
+        # would arrive carrying two. The app recognises the recovery fragment and
+        # renders the set-password page from it, so the root is enough.
+        options = {"redirect_to": "{}/".format(origin)} if origin else {}
+        get_db().auth.reset_password_for_email(email, options)
     except Exception as e:
         # Logged, not returned: a delivery failure is ours to fix, and telling
         # the caller which addresses error would leak the same thing the
