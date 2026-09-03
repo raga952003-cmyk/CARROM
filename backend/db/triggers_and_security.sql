@@ -1,3 +1,18 @@
+-- =============================================================================
+-- SUPERSEDED by db/migrations/013_profiles_trigger_and_rls.sql.
+-- Kept for reference only. Do not run this file; run 013.
+--
+-- This file sat outside the numbered migrations, which is how a project ended
+-- up with every migration applied and no handle_new_user trigger. 013 is the
+-- same trigger, the same RLS switches and the same policies in the numbered,
+-- idempotent form the rest of the migrations take, so it is applied and
+-- re-applied the same way they are and /api/health can account for it.
+--
+-- One line below is now actively wrong: select_profiles reads every column of
+-- every profile to anyone holding the anon key. Migration 011 closed that, and
+-- running this file after 011 would reopen it. 013 carries 011's policy.
+-- =============================================================================
+
 -- Sync user registration from Supabase Auth to Profiles
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS trigger AS $$

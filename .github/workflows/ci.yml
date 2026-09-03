@@ -1,0 +1,137 @@
+# The gate in front of a deploy.
+#
+# Two jobs run on every push and pull request to main and cost nothing but
+# CI minutes: the frontend type-check, hook check, pure-logic parity suite and
+# production build; and the backend offline suites, which boot the real FastAPI
+# app against an in-memory database (backend/tests/offline).
+#
+# NEVER run backend/tests/*.py from here. Those are the LIVE suites: they sign
+# up real accounts and write real tournaments into whatever database the API
+# they point at is backed by, and a run against production has already left
+# throwaway admins and a test tournament behind that could not be deleted from
+# the UI. backend/tests/run_all.py refuses to run without an explicit
+# CARROM_ALLOW_DB_WRITES=1 for exactly this reason. Nothing in this workflow
+# has a database to write to, and that is the point.
+#
+# The third job, verify-deploy, asks a deployment whether it is actually
+# healthy: GET /api/health must answer status "ok" with no pending migrations.
+# The API degrades rather than crashes when a migration is missing, which is
+# right in the middle of a tournament and wrong at deploy time, so this is
+# where a half-migrated database gets caught. It runs when a deployment
+# succeeds (Vercel's GitHub integration reports one per deploy) and can be run
+# by hand against any URL.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: Base URL of the deployment to verify, e.g. https://carrom.example.com
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit
+      # A hook below an early return passes tsc and crashes the umpire's phone
+      # screen on open; scripts/check-hooks.mjs exits with the offence count.
+      - name: Hook order check
+        run: node scripts/check-hooks.mjs
+      # Replays the server's board results through the browser preview. The
+      # preview disagreeing with the stored score is the one thing that must
+      # never happen.
+      - name: Offline pure-logic and parity suite
+        run: npx tsx tests/offline/test_pure.ts
+      - name: Production build
+        run: npm run build
+
+  backend:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Vercel's Python runtime; the code has no newer syntax than this.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      # The full offline run: unit, 900 scenario tournaments, integration,
+      # system, end-to-end and acceptance suites, then a coverage pass. None of
+      # it touches the network or a database. The Supabase environment
+      # variables are deliberately absent so no client can be constructed
+      # against a real project even by accident. Do not add backend/tests/*.py
+      # here; see the note at the top of this file.
+      - name: Offline suites
+        run: python tests/offline/run_offline.py
+
+  verify-deploy:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe /api/health
+        env:
+          # Hand-run: the url input. Automatic: the URL the deployment reported.
+          # A preview deployment behind Vercel's deployment protection answers
+          # 401 to an anonymous probe and will fail here; the production URL is
+          # the one this gate exists for.
+          BASE_URL: ${{ inputs.url || github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
+        run: |
+          set -euo pipefail
+          url="${BASE_URL%/}"
+          if [ -z "$url" ]; then
+            echo "::error::No deployment URL to verify."
+            exit 1
+          fi
+          echo "GET $url/api/health"
+          # A serverless function cold-starts on its first request after a
+          # deploy, so give it a few tries before believing a 5xx.
+          payload="$(curl --silent --show-error --fail --max-time 60 \
+                          --retry 5 --retry-delay 10 --retry-all-errors \
+                          "$url/api/health")"
+          echo "$payload" | jq .
+
+          status="$(echo "$payload" | jq -r '.status')"
+          # `null | length` is 0 in jq, so a payload with no pending_migrations
+          # key at all must not pass as "nothing pending".
+          pending_ok="$(echo "$payload" | jq -r \
+            '(.pending_migrations | type) == "array" and (.pending_migrations | length) == 0')"
+          if [ "$status" != "ok" ] || [ "$pending_ok" != "true" ]; then
+            echo "::error::Deployment is not healthy: status=$status, pending_migrations=$(echo "$payload" | jq -c '.pending_migrations')"
+            echo "Apply the files named above in the Supabase SQL editor, then re-run this job."
+            exit 1
+          fi
+
+          # These the probe cannot see (a dropped default, a trigger, a policy);
+          # it reports them so the deploy checklist knows to apply them by hand
+          # and check each one's RAISE NOTICE line in the SQL editor.
+          echo
+          echo "Healthy. Migrations /api/health cannot observe, apply by hand:"
+          echo "$payload" | jq -r '.unprobeable_migrations[]? | "  - \(.migration): \(.reason)"'
