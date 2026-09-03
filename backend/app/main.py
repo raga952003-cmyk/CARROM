@@ -72,6 +72,47 @@ _pending_cache = None
 _pending_checked_at = 0.0
 _PENDING_RECHECK_SECONDS = 30
 
+# Migrations probed by selecting a column they add -- or, for 011, the view
+# they create, which PostgREST serves exactly like a table. Each entry is
+# (migration, table or view, column). 007 replaces a function rather than
+# adding a column and is probed separately, by rpc, in health() below.
+_COLUMN_PROBES = (
+    ("002_serverless_architecture", "idempotency_keys", "key"),
+    ("003_ownership_and_access", "tournament_access", "id"),
+    ("004_match_toss", "matches", "toss_choice"),
+    ("005_board_detail", "boards", "board_winner"),
+    ("006_sets_and_sides", "boards", "set_number"),
+    ("010_walkover", "matches", "walkover_by"),
+    ("011_profile_privacy", "public_profiles", "id"),
+    ("012_lifecycle", "tournaments", "champion_id"),
+)
+
+# Migrations that leave nothing PostgREST can see. Reporting one of these as
+# applied would be a guess, and reporting it as pending would never clear, so
+# they are named separately with the reason. The deploy checklist applies
+# these by hand and reads each one's RAISE NOTICE in the SQL editor instead.
+UNPROBEABLE_MIGRATIONS = (
+    {"migration": "008_drop_city_default",
+     "reason": "only drops the DEFAULT on profiles.city; PostgREST does not "
+               "expose column defaults, and the one query that would show it "
+               "is an insert."},
+    {"migration": "009_stop_timer_on_finish",
+     "reason": "installs a BEFORE UPDATE trigger on matches and adds no column; "
+               "its function returns TRIGGER, which PostgREST leaves out of the "
+               "rpc surface, so its absence looks the same as its presence."},
+    {"migration": "013_profiles_trigger_and_rls",
+     "reason": "a trigger on auth.users and RLS policies, none of it visible "
+               "through PostgREST; is_admin() can be called, but every earlier "
+               "version of triggers_and_security.sql created it too, so it "
+               "proves nothing about the trigger or the policies."},
+    {"migration": "014_lock_profile_role",
+     "reason": "a REVOKE, a BEFORE UPDATE trigger on profiles and a rewritten "
+               "policy. PostgREST exposes neither grants nor triggers, and the "
+               "one query that would show the revoke is an update to somebody "
+               "else's role -- which is the thing it exists to prevent. Verify "
+               "it by reading its RAISE NOTICE in the SQL editor."},
+)
+
 
 def _health_payload(pending, rpc_state, idem_state, owner_state,
                     client_ok, admin_ok):
@@ -102,14 +143,20 @@ def _health_payload(pending, rpc_state, idem_state, owner_state,
             else "DEGRADED - any admin can manage any tournament; "
                  "apply db/migrations/003_ownership_and_access.sql"
         ),
+        # Constant, so the cached paths carry it too: it describes what the
+        # probe can see, not what the database holds.
+        "unprobeable_migrations": [dict(m) for m in UNPROBEABLE_MIGRATIONS],
     }
 
 
 @app.get("/api/health")
 async def health():
     """
-    Readiness probe (spec 88). Reports client configuration and whether the
-    transactional RPCs from migration 002 are present.
+    Readiness probe (spec 88). Reports client configuration, whether the
+    transactional RPCs from migration 002 are present, which migrations are
+    missing (pending_migrations), and which ones it cannot see at all
+    (unprobeable_migrations). A deploy gates on status "ok" with nothing
+    pending; see .github/workflows/ci.yml.
     """
     from app.database import supabase_client, supabase_admin
     from app.services.transaction_service import transactional_rpc_available
@@ -126,7 +173,7 @@ async def health():
     # green while quietly not recording tosses or board detail.
     # Cached, because a schema does not change without a deployment.
     #
-    # These probes are six sequential Supabase round trips, and from a
+    # These probes are nine sequential Supabase round trips, and from a
     # serverless function each costs a couple of hundred milliseconds: /health
     # was measured at 2.2 seconds to return about nothing. Anything polling it
     # paid that every time. A positive result is kept for the life of the
@@ -143,15 +190,7 @@ async def health():
 
     pending = []
     if supabase_admin is not None:
-        probes = (
-            ("002_serverless_architecture", "idempotency_keys", "key"),
-            ("003_ownership_and_access", "tournament_access", "id"),
-            ("004_match_toss", "matches", "toss_choice"),
-            ("005_board_detail", "boards", "board_winner"),
-            ("006_sets_and_sides", "boards", "set_number"),
-            ("010_walkover", "matches", "walkover_by"),
-        )
-        for migration, table, column in probes:
+        for migration, table, column in _COLUMN_PROBES:
             try:
                 supabase_admin.table(table).select(column).limit(1).execute()
             except Exception:

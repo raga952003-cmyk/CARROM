@@ -255,9 +255,20 @@ async def confirm_bulk_import(
         fixture_error = None
         if autoGenerate and imported > 0:
             try:
-                await generate_fixtures(tournamentId, admin)
-                await generate_schedule(tournamentId, restMinutes=10, admin=admin)
-                await publish_schedule(tournamentId, admin)
+                # Keyword arguments, deliberately. generate_fixtures is
+                # (id, force, admin) and this used to call it as (id, admin):
+                # the admin profile slid into `force` and `admin` kept
+                # FastAPI's Depends marker, so every auto-generated import
+                # ended in "Fixtures were not generated" with a reason that
+                # named nothing. force stays False here on purpose -- an
+                # import must never be the thing that discards recorded
+                # results; if there are any, generate_fixtures answers 409 and
+                # the except below reports it as fixtureError. The schedule
+                # and publish calls take the same shape so a later change to
+                # either signature fails loudly instead of shifting.
+                await generate_fixtures(id=tournamentId, force=False, admin=admin)
+                await generate_schedule(id=tournamentId, restMinutes=10, admin=admin)
+                await publish_schedule(id=tournamentId, admin=admin)
                 fixtures_built = True
             except HTTPException as e:
                 fixture_error = e.detail
@@ -289,6 +300,10 @@ async def confirm_bulk_import(
             "imported": imported,
             "skipped": skipped,
             "fixturesGenerated": fixtures_built,
+            # Why the draw was not built, when it was asked for. It was only
+            # ever folded into the message, which is how the mis-call above
+            # went unnoticed: nothing machine-readable said the draw failed.
+            "fixtureError": fixture_error,
         }
     except HTTPException:
         raise

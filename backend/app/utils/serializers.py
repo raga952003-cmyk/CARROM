@@ -29,6 +29,11 @@ def camelize(value: Any) -> Any:
 # Contact details are never part of a public listing.
 PRIVATE_PLAYER_FIELDS = {"phone", "email"}
 
+# The columns migration 012 adds to tournaments, in the order they are read.
+LIFECYCLE_COLUMNS = (
+    "champion_id", "champion_name", "completed_at", "cancelled_at", "cancel_reason",
+)
+
 
 def serialize_player(row: Optional[Dict[str, Any]],
                      include_contact: bool = False) -> Optional[Dict[str, Any]]:
@@ -97,6 +102,22 @@ def board_has_play(b: Dict[str, Any]) -> bool:
     )
 
 
+def board_stub(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    An unplayed board reduced to the three things that identify it.
+
+    Which set it belongs to is part of that identity: board numbers restart at
+    1 in every set, so a board is the pair, never the number alone.
+    """
+    stub: Dict[str, Any] = {
+        "boardNumber": row.get("board_number"),
+        "status": row.get("status") or "pending",
+    }
+    if row.get("set_number") is not None:
+        stub["setNumber"] = row["set_number"]
+    return stub
+
+
 def serialize_match(
     row: Dict[str, Any],
     boards: Optional[List[Dict[str, Any]]] = None,
@@ -105,18 +126,28 @@ def serialize_match(
 ) -> Dict[str, Any]:
     match = camelize(row)
     all_boards = boards or []
-    # boardCount is what the client rebuilds the full list from, and it counts
-    # the rows that exist rather than max_boards -- a tie-break board is a real
-    # board beyond the configured length.
+    # boardCount counts the rows that exist rather than max_boards -- a
+    # tie-break board is a real board beyond the configured length.
     match["boardCount"] = len(all_boards)
     if boards_with_play_only:
         # An unplayed board is eight identical zeroes. Sending 1520 of them made
         # the tournament payload 1.4 MB and took 5.7 seconds, on every load and
         # again on every realtime change -- so every board an umpire scored made
-        # every other screen re-download the whole draw. The client fills the
-        # gaps from boardCount; nothing addresses a board by id.
-        all_boards = [b for b in all_boards if board_has_play(b)]
-    match["boards"] = [serialize_board(b) for b in all_boards]
+        # every other screen re-download the whole draw.
+        #
+        # What goes out instead is the board's identity and nothing else, and
+        # the client fills the zeroes back in. It used to send only a count and
+        # let the client rebuild boards 1..n, which silently flattened every
+        # multi-set match: three sets of four boards became one set of twelve,
+        # sets two and three had nothing left to score, and boards 5 to 12 of
+        # set one did not exist to submit against. A count cannot express a
+        # grid; the identity can.
+        match["boards"] = [
+            serialize_board(b) if board_has_play(b) else board_stub(b)
+            for b in all_boards
+        ]
+    else:
+        match["boards"] = [serialize_board(b) for b in all_boards]
     match["auditHistory"] = [serialize_audit_log(a) for a in (audit_logs or [])]
     # The UI treats these as required; DB nulls would break `.length`/comparisons.
     match["scheduledDate"] = row.get("scheduled_date") or ""
@@ -138,6 +169,13 @@ def serialize_tournament(
     tournament["scheduledPublished"] = row.get("schedule_published", False)
     tournament["fixturesGenerated"] = row.get("fixtures_generated", False)
     tournament["posterConfig"] = row.get("poster_config") or {}
+    # Migration 012: who won, and when it ended or why it was called off. These
+    # are optional on the wire -- present (possibly null) once the database has
+    # the columns, absent before -- so a client can tell "no champion yet" from
+    # "this deployment cannot record one" without guessing.
+    for column in LIFECYCLE_COLUMNS:
+        if column in row:
+            tournament[to_camel(column)] = row.get(column)
     return tournament
 
 

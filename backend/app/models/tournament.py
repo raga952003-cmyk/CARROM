@@ -105,6 +105,18 @@ class RegistrationCreateSchema(BaseCamelModel):
     notes: Optional[str] = None
 
 
+class TournamentCancelSchema(BaseCamelModel):
+    """
+    Why a tournament is being called off.
+
+    Cancelling is terminal: nothing can be scored, drawn or registered after
+    it, and every participant is told. A decision like that needs to say why
+    on the record, so the reason is required rather than optional -- the
+    router also refuses a blank one.
+    """
+    reason: str
+
+
 class ManualMatchSchema(BaseCamelModel):
     """
     One fixture added by hand.

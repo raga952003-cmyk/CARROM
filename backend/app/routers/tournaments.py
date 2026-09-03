@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from app.database import get_db, get_admin_db
 from app.models.tournament import (
     TournamentCreateSchema, TournamentUpdateSchema, RegistrationCreateSchema, ManualMatchSchema,
+    TournamentCancelSchema,
 )
 from app.utils.security import get_user_profile, verify_admin, get_optional_profile
 from app.utils.serializers import (
@@ -31,8 +32,11 @@ from app.services.state_machine import (
     canonical_tournament_status,
     assert_tournament_accepts_registrations,
     set_tournament_status,
+    LIFECYCLE_MIGRATION,
 )
-from typing import List, Dict, Any, Optional
+from app.routers.standings import compute_standings
+from typing import List, Dict, Any, Optional, Callable
+from datetime import datetime, timezone
 import time
 import uuid
 import logging
@@ -79,6 +83,32 @@ def _select_all(query_factory, page: int = 1000) -> List[Dict[str, Any]]:
         offset += page
 
 
+# How many ids go into one `in_` filter.
+#
+# PostgREST takes the filter in the query string, so a list of ids is a list of
+# ids in a URL: 190 match uuids is about 7 KB of it, and the gateway in front
+# of the database stops accepting a request line somewhere above that. A draw
+# that size works today; the next size up would have failed the boards read
+# outright, and the failure would arrive as an opaque gateway error in the
+# middle of a tournament rather than anything naming the cause.
+_IN_CHUNK = 100
+
+
+def _select_all_in(query_factory, column: str, values: List[str],
+                   page: int = 1000) -> List[Dict[str, Any]]:
+    """
+    _select_all, with the `in_` filter split so the URL cannot grow unbounded.
+
+    `query_factory` is called with each chunk and must return the query with
+    the filter already applied.
+    """
+    rows: List[Dict[str, Any]] = []
+    for start in range(0, len(values), _IN_CHUNK):
+        chunk = values[start:start + _IN_CHUNK]
+        rows.extend(_select_all(lambda c=chunk: query_factory(c), page=page))
+    return rows
+
+
 def _hydrate_registrations(supabase, reg_rows: List[Dict[str, Any]],
                            include_contact: bool = False) -> List[Dict[str, Any]]:
     """
@@ -118,13 +148,20 @@ def _hydrate_registrations(supabase, reg_rows: List[Dict[str, Any]],
 
 
 def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]],
-                         include_contact: bool = False) -> List[Dict[str, Any]]:
+                         include_contact: bool = False,
+                         with_audit: bool = True) -> List[Dict[str, Any]]:
     """
     Attach registrations, matches, boards and audit history to tournament rows.
 
     Everything is fetched with one query per table (filtered by `in_`) and then
     grouped in memory, so hydrating N tournaments costs a constant number of
     round trips rather than N+1.
+
+    `with_audit` is off for the list, which is the read the dashboard repeats
+    after every single action. Correction history is shown in one place -- the
+    open match's own screen -- and that screen asks /audit/scores/{match_id}
+    for it. Carrying it here spent a sequential round trip and up to 500 rows
+    on every refresh to render nothing.
     """
     if not tournament_rows:
         return []
@@ -141,19 +178,21 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]],
     # tournament is a far worse trade than a slower page, and making it safe
     # means a client per thread, which trades the round trips for connection
     # setup. The payload trimming below is where the real win came from.
-    reg_rows = _select_all(
-        lambda: supabase.table("registrations")
+    reg_rows = _select_all_in(
+        lambda ids: supabase.table("registrations")
         .select("*, player:profiles(*), team:teams(*)")
-        .in_("tournament_id", tournament_ids)
+        .in_("tournament_id", ids),
+        "tournament_id", tournament_ids,
     )
 
     regs_by_tournament: Dict[str, List[Dict[str, Any]]] = {}
     for raw, serialized in zip(reg_rows, _hydrate_registrations(supabase, reg_rows, include_contact)):
         regs_by_tournament.setdefault(raw["tournament_id"], []).append(serialized)
 
-    match_rows = _select_all(
-        lambda: supabase.table("matches").select("*")
-        .in_("tournament_id", tournament_ids).order("match_number")
+    match_rows = _select_all_in(
+        lambda ids: supabase.table("matches").select("*")
+        .in_("tournament_id", ids).order("match_number"),
+        "tournament_id", tournament_ids,
     )
 
     match_ids = [m["id"] for m in match_rows]
@@ -161,23 +200,29 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]],
     audit_by_match: Dict[str, List[Dict[str, Any]]] = {}
 
     if match_ids:
-        board_rows = _select_all(
-            lambda: supabase.table("boards").select("*")
-            .in_("match_id", match_ids).order("board_number")
+        board_rows = _select_all_in(
+            lambda ids: supabase.table("boards").select("*")
+            .in_("match_id", ids).order("board_number"),
+            "match_id", match_ids,
         )
         for b in board_rows:
             boards_by_match.setdefault(b["match_id"], []).append(b)
 
-        # Capped on purpose, and newest first. This table grows with every
-        # score correction and is only ever displayed, so the whole history is
-        # not worth carrying on the tournament list. The difference from the
-        # reads above is that this limit is deliberate and stated, rather than
-        # PostgREST quietly stopping at a thousand.
-        audit_rows = supabase.table("score_audit_logs").select("*").in_(
-            "match_id", match_ids
-        ).order("timestamp", desc=True).limit(500).execute().data or []
-        for a in audit_rows:
-            audit_by_match.setdefault(a["match_id"], []).append(a)
+        if with_audit:
+            # Capped on purpose, and newest first. This table grows with every
+            # score correction and is only ever displayed, so the whole history
+            # is not worth carrying. The difference from the reads above is
+            # that this limit is deliberate and stated, rather than PostgREST
+            # quietly stopping at a thousand.
+            audit_rows = []
+            for start in range(0, len(match_ids), _IN_CHUNK):
+                audit_rows.extend(
+                    supabase.table("score_audit_logs").select("*").in_(
+                        "match_id", match_ids[start:start + _IN_CHUNK]
+                    ).order("timestamp", desc=True).limit(500).execute().data or []
+                )
+            for a in audit_rows:
+                audit_by_match.setdefault(a["match_id"], []).append(a)
 
     matches_by_tournament: Dict[str, List[Dict[str, Any]]] = {}
     for m in match_rows:
@@ -186,8 +231,11 @@ def _hydrate_tournaments(supabase, tournament_rows: List[Dict[str, Any]],
                 m,
                 boards=boards_by_match.get(m["id"], []),
                 audit_logs=audit_by_match.get(m["id"], []),
-                # The list view carries every match of every tournament; the
-                # single-tournament and single-match reads still send the lot.
+                # Every read through this helper -- the list, one
+                # tournament, and a lifecycle verb's answer -- sends an
+                # unplayed board as its identity alone. The single-MATCH
+                # reads in routers/matches.py still send whole boards.
+                # tournamentService.fillBoards puts the zeroes back.
                 boards_with_play_only=True,
             )
         )
@@ -257,6 +305,215 @@ def sets_supported(admin_db) -> bool:
     return _sets_supported["value"]
 
 
+# Migration 012 adds the champion and cancellation columns. Same caching rule
+# as the probes above: a column that exists cannot stop existing, a missing one
+# is re-checked so applying the migration takes effect without a restart.
+_lifecycle_columns: Dict[str, Any] = {}
+
+
+def lifecycle_columns_available(admin_db) -> bool:
+    """Whether migration 012 has been applied. tournaments.champion_id is the probe."""
+    cached = _lifecycle_columns.get("value")
+    if cached is True:
+        return True
+    if cached is False and time.monotonic() - _lifecycle_columns.get("at", 0) < _PROBE_RETRY_SECONDS:
+        return False
+    try:
+        admin_db.table("tournaments").select("champion_id").limit(1).execute()
+        _lifecycle_columns["value"] = True
+    except Exception:
+        _lifecycle_columns["value"] = False
+        _lifecycle_columns["at"] = time.monotonic()
+    return _lifecycle_columns["value"]
+
+
+# What each lifecycle state is called when the organiser is told they are
+# already in it.
+_STATE_DESCRIPTIONS = {
+    "registration_open": "open for registration",
+    "registration_closed": "closed for registration",
+    "in_progress": "in progress",
+    "completed": "completed",
+    "cancelled": "cancelled",
+}
+
+
+def _assert_lifecycle_move(tournament: Dict[str, Any], target: str) -> None:
+    """
+    The rules for an explicit lifecycle verb, on top of the transition table.
+
+    validate_tournament_transition treats re-asserting the current state as a
+    no-op, which is right for PUT -- the whole object comes back with status
+    unchanged -- and wrong for a verb: a second POST /complete would notify
+    every participant again, a second /cancel would overwrite the reason. So a
+    verb that would change nothing is refused, and told why.
+    """
+    current = canonical_tournament_status(tournament.get("status")) or "draft"
+    if current == target:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This tournament is already {_STATE_DESCRIPTIONS.get(target, target)}.",
+        )
+    validate_tournament_transition(tournament.get("status"), target)
+
+
+def _lifecycle_move(
+    admin_db,
+    admin: Dict[str, Any],
+    tournament: Dict[str, Any],
+    target: str,
+    *,
+    verb: str,
+    extra: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+    notify: Optional[Callable[[], int]] = None,
+) -> Dict[str, Any]:
+    """
+    Validate, write, notify, audit; return the tournament as GET would.
+
+    `extra` holds the columns migration 012 adds. They are written together
+    with the status when the database has them and dropped when it does not --
+    the status change is the part that must land, the champion's name is not
+    worth blocking the organiser over. Either way the audit record keeps them,
+    so a champion recorded on an un-migrated database is still on file.
+
+    `notify` runs only after the status is written, so a refused write never
+    tells two hundred people their tournament is over.
+    """
+    tournament_id = tournament["id"]
+    _assert_lifecycle_move(tournament, target)
+
+    columns_present = lifecycle_columns_available(admin_db) if extra else False
+    written = set_tournament_status(
+        admin_db, tournament_id, target, extra=extra if columns_present else None
+    )
+    if written is None:
+        # No legacy synonym exists for this state, so the CHECK constraint
+        # itself is what refused it. 503 rather than 400: nothing the organiser
+        # can change about the request will make it succeed.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"This database does not accept the tournament status '{target}'. "
+                f"Apply {LIFECYCLE_MIGRATION} and try again."
+            ),
+        )
+
+    request_context = dict(context or {})
+    request_context["transition"] = f"{tournament.get('status')} -> {written}"
+    if extra:
+        request_context["lifecycle_columns_recorded"] = columns_present
+    if notify is not None:
+        request_context["notified"] = notify()
+
+    record_audit(
+        admin_db, actor=admin, action=f"tournament.{verb}",
+        entity_type="tournament", entity_id=tournament_id,
+        previous_state={"status": tournament.get("status")},
+        new_state={"status": written, **(extra or {})},
+        request_context=request_context,
+    )
+
+    rows = admin_db.table("tournaments").select("*").eq("id", tournament_id).execute().data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Tournament not found")
+    # The caller is the owner or a manager, so the response carries what an
+    # admin's GET carries -- contact details included. Not the correction
+    # history: it is up to 500 rows and another round trip, and starting a
+    # tournament is not the moment anybody reads back who fixed a board score.
+    return _hydrate_tournaments(admin_db, rows, True, with_audit=False)[0]
+
+
+def _match_is_finished(match: Dict[str, Any]) -> bool:
+    """
+    Whether a match needs nothing more before the tournament can close.
+
+    A confirmed result is the normal case. A walkover is a result too, signed
+    or not -- nobody played, so there is nothing to sign off -- and it is
+    recognised by either walkover column, because a database without
+    migration 010's walkover_by still carries the flag. A cancelled match was
+    struck from the draw and is waiting on nobody.
+    """
+    return bool(
+        match.get("result_confirmed")
+        or match.get("walkover_by")
+        or match.get("walkover")
+        or match.get("status") == "cancelled"
+    )
+
+
+def _champions_of(admin_db, tournament: Dict[str, Any],
+                  matches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Who won each category that was played, or a 409 explaining why nobody has.
+
+    A knockout is decided by its final: the knockout match that feeds no other.
+    A pure league is decided by the points table. A group stage on its own is
+    not decided by anything -- groups decide who qualifies, not who wins -- so
+    it needs a final added by hand before it can be completed. Every match is
+    already known to be finished by the time this runs, so a final without a
+    winner can only be one that was cancelled.
+    """
+    champions: Dict[str, Dict[str, Any]] = {}
+    for category in ("singles", "doubles"):
+        played = [m for m in matches
+                  if (m.get("type") or "singles") == category
+                  and m.get("status") != "cancelled"]
+        if not played:
+            continue
+
+        finals = [m for m in played
+                  if m.get("stage") == "knockout" and not m.get("next_match_id")]
+        if finals:
+            # A play-off added by hand also feeds nothing. Prefer the match the
+            # draw called the final; failing that, the deepest round.
+            named = [m for m in finals if (m.get("round_name") or "").strip().lower() == "final"]
+            final = max(named or finals,
+                        key=lambda m: (m.get("round_index") or 0, m.get("match_number") or 0))
+            if not final.get("winner_id"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"The {category} final (match #{final.get('match_number')}) has no "
+                        f"winner recorded, so there is no champion to declare."
+                    ),
+                )
+            champions[category] = {"id": final["winner_id"], "name": final.get("winner_name")}
+            continue
+
+        if any(isinstance(m.get("bracket_position"), dict)
+               and (m.get("bracket_position") or {}).get("group") for m in played):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"The {category} draw is a group stage with no knockout, so it decides "
+                    f"who qualifies but not who wins. Add a final "
+                    f"(POST /tournaments/{tournament['id']}/matches with stage 'knockout') "
+                    f"and play it before completing the tournament."
+                ),
+            )
+
+        block = next(
+            (c for c in compute_standings(admin_db, tournament["id"]).get("categories", [])
+             if c.get("category") == category),
+            None,
+        )
+        rows = (block or {}).get("standings") or []
+        if not rows:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No {category} standings could be computed, so there is no champion to declare.",
+            )
+        champions[category] = {"id": rows[0].get("participantId"), "name": rows[0].get("participantName")}
+
+    if not champions:
+        raise HTTPException(
+            status_code=409,
+            detail="Every match in this tournament was cancelled, so there is no champion to declare.",
+        )
+    return champions
+
+
 @router.get("")
 async def get_tournaments(response: Response, viewer = Depends(get_optional_profile)):
     # Reads run with the service client: this API layer performs its own
@@ -294,7 +551,7 @@ async def get_tournaments(response: Response, viewer = Depends(get_optional_prof
         # Hydrated here because the dashboard reads tournament.matches and
         # tournament.registrations straight off the list response.
         # Contact details reach the organiser, never the public board.
-        return _hydrate_tournaments(supabase, rows, is_admin)
+        return _hydrate_tournaments(supabase, rows, is_admin, with_audit=False)
     except HTTPException:
         raise
     except Exception as e:
@@ -393,20 +650,51 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
             update_dict["rules"] = merged
 
         # Reject illegal lifecycle moves before touching the database (spec 75)
-        if "status" in update_dict:
-            validate_tournament_transition(before.get("status"), update_dict["status"])
+        status_target = update_dict.pop("status", None)
+        if status_target is not None:
+            validate_tournament_transition(before.get("status"), status_target)
+        changed_fields = set(update_dict.keys())
 
-        res = admin_db.table("tournaments").update(update_dict).eq("id", id).execute()
-        if not res.data:
+        if update_dict:
+            res = admin_db.table("tournaments").update(update_dict).eq("id", id).execute()
+            if not res.data:
+                raise HTTPException(status_code=404, detail="Tournament not found")
+
+        # A status is still accepted here for compatibility -- the lifecycle
+        # buttons used this route for a long time and older builds still do --
+        # but it goes through set_tournament_status rather than the raw update
+        # above, so a database that predates migration 002 gets the legacy
+        # synonym ('ongoing' for in_progress) instead of the organiser getting
+        # a 400. The dedicated verbs (/start, /complete, ...) are the route
+        # that also checks fixtures exist and records a champion.
+        if status_target is not None and (
+            canonical_tournament_status(status_target)
+            != canonical_tournament_status(before.get("status"))
+        ):
+            written = set_tournament_status(
+                admin_db, id, canonical_tournament_status(status_target)
+            )
+            if written is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"This database does not accept the tournament status "
+                        f"'{status_target}'. Apply {LIFECYCLE_MIGRATION} and try again."
+                    ),
+                )
+            changed_fields.add("status")
+
+        rows = admin_db.table("tournaments").select("*").eq("id", id).execute().data or []
+        if not rows:
             raise HTTPException(status_code=404, detail="Tournament not found")
 
         record_audit(
             admin_db, actor=admin, action="tournament.update",
             entity_type="tournament", entity_id=id,
-            previous_state=before, new_state=res.data[0],
-            request_context={"changed_fields": sorted(update_dict.keys())},
+            previous_state=before, new_state=rows[0],
+            request_context={"changed_fields": sorted(changed_fields)},
         )
-        return serialize_tournament(res.data[0])
+        return serialize_tournament(rows[0])
     except HTTPException:
         raise
     except Exception as e:
@@ -452,10 +740,30 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
         if not tournament:
             raise HTTPException(status_code=404, detail="Tournament not found.")
         # Admins may enter participants at any stage; players only while open.
-        if profile.get("role") != "admin":
+        is_admin = profile.get("role") == "admin"
+        if not is_admin:
             assert_tournament_accepts_registrations(tournament[0])
 
-        player_id = data.player_id or profile["id"]
+        # Whose entry this is.
+        #
+        # Entering somebody else is an organiser's job, and the route took the
+        # id straight from the request body with nothing checking it against
+        # the caller. Any signed-in player could therefore enter anyone in the
+        # directory under their name, and the organiser approving it had no way
+        # to tell it from a real entry. RLS anticipated exactly this -- migration
+        # 013's insert_registrations_self requires auth.uid() = player_id -- but
+        # this handler writes through the service-role client, which bypasses
+        # policies, so that check never ran.
+        #
+        # Refused rather than quietly rewritten to the caller: somebody sending
+        # another person's id meant to send it, and silently entering them
+        # instead is the kind of surprise that surfaces on match day.
+        if not is_admin and data.player_id and str(data.player_id) != str(profile["id"]):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only enter yourself. Ask an organiser to enter somebody else.",
+            )
+        player_id = data.player_id if is_admin and data.player_id else profile["id"]
         team_id = None
         
         if data.type == "doubles":
@@ -921,16 +1229,31 @@ async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depen
         #
         # One UPDATE per match meant 190 sequential round trips, which is the
         # same shape that made fixture generation time out on the serverless
-        # function. Upserting whole rows in chunks turns it into one request per
-        # two hundred matches. Whole rows and not a patch: PostgREST upsert is
-        # INSERT ... ON CONFLICT, so a partial row would fail the NOT NULL
-        # columns on the insert arm even though only the update arm ever runs.
+        # function. Upserting in chunks turns it into one request per two
+        # hundred matches.
+        #
+        # What goes in each row is a board and a time, plus only the columns
+        # the insert arm of ON CONFLICT could not do without -- and every one
+        # of those is part of the draw's identity, fixed when the fixture was
+        # created. It used to send the whole match row, read at the top of this
+        # request: a snapshot taken before the engine ran and written back
+        # after it. Anything that happened to a match in between was reverted.
+        # Rescheduling is offered while a tournament is in progress, and it
+        # takes seconds over 190 fixtures, so a result confirmed in that window
+        # was quietly undone -- the score gone, the match live again, and
+        # nothing anywhere saying so.
+        #
+        # Only the update arm ever runs (every id exists), and PostgREST sets
+        # only the columns it was given, so nothing else on the row is touched.
+        IDENTITY = ("id", "tournament_id", "match_number", "round_name",
+                    "round_index", "stage", "type")
         by_id = {m["id"]: m for m in matches}
         rows = []
         for s_match in scheduled:
-            row = dict(by_id.get(s_match["id"]) or {})
-            if not row:
+            existing = by_id.get(s_match["id"])
+            if not existing:
                 continue
+            row = {column: existing.get(column) for column in IDENTITY}
             row["board_number"] = s_match["boardNumber"]
             row["scheduled_date"] = s_match["scheduledDate"]
             row["scheduled_time"] = s_match["scheduledTime"]
@@ -976,6 +1299,203 @@ async def publish_schedule(id: str, admin = Depends(verify_admin)):
             "status": "success",
             "message": f"Schedule published and notified {delivered} participant(s)."
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle verbs (spec 75)
+#
+# Registration could be opened and closed through PUT, and then nothing: no
+# screen wrote 'in_progress' or 'completed', nobody was told who won, and a
+# tournament that had to be called off had no legal state to go to. Each of
+# these is one explicit move, owner or manager only -- "tournament.lifecycle"
+# is deliberately not a scorer action -- validated against the transition
+# table, written through set_tournament_status, and audited. Every one answers
+# with the tournament exactly as GET /tournaments/{id} would return it.
+# ---------------------------------------------------------------------------
+
+@router.post("/{id}/open-registration")
+async def open_registration(id: str, admin = Depends(verify_admin)):
+    """draft | registration_closed -> registration_open."""
+    admin_db = get_admin_db()
+    try:
+        t = require_tournament_access(admin_db, id, admin, "tournament.lifecycle")
+        return _lifecycle_move(admin_db, admin, t, "registration_open", verb="open_registration")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{id}/close-registration")
+async def close_registration(id: str, admin = Depends(verify_admin)):
+    """registration_open -> registration_closed."""
+    admin_db = get_admin_db()
+    try:
+        t = require_tournament_access(admin_db, id, admin, "tournament.lifecycle")
+        return _lifecycle_move(admin_db, admin, t, "registration_closed", verb="close_registration")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{id}/start")
+async def start_tournament(id: str, admin = Depends(verify_admin)):
+    """
+    registration_closed | fixture_generation | fixture_published -> in_progress.
+
+    Refused while there is nothing to play. A tournament that is 'in progress'
+    with no fixtures is what the scoreboard shows as an empty page, and the
+    fix is a draw, not a status.
+    """
+    admin_db = get_admin_db()
+    try:
+        t = require_tournament_access(admin_db, id, admin, "tournament.lifecycle")
+        # Transition first, so a draft is told to open and close registration
+        # before it is told to generate a draw.
+        _assert_lifecycle_move(t, "in_progress")
+
+        has_matches = admin_db.table("matches").select("id").eq(
+            "tournament_id", id).limit(1).execute().data
+        if not has_matches:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This tournament has no fixtures yet. Generate the draw "
+                    "(Fixtures -> Generate) before starting it."
+                ),
+            )
+        return _lifecycle_move(admin_db, admin, t, "in_progress", verb="start")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{id}/complete")
+async def complete_tournament(id: str, admin = Depends(verify_admin)):
+    """
+    in_progress -> completed, recording the champion and telling everyone.
+
+    Every match has to be settled first -- confirmed, a walkover, or cancelled
+    -- because a completed tournament with an open match is a result that can
+    still change. The champion is read from what was played rather than
+    declared by the caller, so it cannot disagree with the bracket.
+    """
+    admin_db = get_admin_db()
+    try:
+        t = require_tournament_access(admin_db, id, admin, "tournament.lifecycle")
+        _assert_lifecycle_move(t, "completed")
+
+        matches = _select_all(
+            lambda: admin_db.table("matches").select("*")
+            .eq("tournament_id", id).order("match_number")
+        )
+        if not matches:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Nothing has been played: this tournament has no matches, so there "
+                    "is no champion to declare. Generate fixtures and play them, or "
+                    "cancel the tournament instead."
+                ),
+            )
+
+        unfinished = [m for m in matches if not _match_is_finished(m)]
+        if unfinished:
+            numbers = ", ".join(
+                f"#{m.get('match_number')}" for m in unfinished[:6]
+            ) + (" ..." if len(unfinished) > 6 else "")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{len(unfinished)} match(es) still need a result before this tournament "
+                    f"can be completed: {numbers}. Confirm each result, record a walkover, "
+                    f"or cancel the match."
+                ),
+            )
+
+        champions = _champions_of(admin_db, t, matches)
+        # One champion_id column, two possible competitions. Singles takes it
+        # when both were played; the doubles pair is still named in the
+        # notification and the audit record. champion_id only ever holds a
+        # profile id (the column references profiles), and a doubles winner is
+        # a team, so for a doubles-only tournament it stays NULL and the name
+        # carries the result.
+        headline = "singles" if "singles" in champions else "doubles"
+        champion = champions[headline]
+        extra = {
+            "champion_id": champion["id"] if headline == "singles" else None,
+            "champion_name": champion["name"],
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if len(champions) > 1:
+            named = ", ".join(f"{c['name']} ({category})" for category, c in champions.items())
+        else:
+            named = champion["name"] or "undecided"
+
+        def notify() -> int:
+            return fan_out_notification(
+                admin_db,
+                title="Tournament Complete!",
+                message=f"'{t['name']}' has finished. Champion: {named}. Thank you for playing!",
+                type="tournament_completed",
+                tournament_id=id,
+            )
+
+        return _lifecycle_move(
+            admin_db, admin, t, "completed", verb="complete", extra=extra,
+            context={"champions": champions, "match_count": len(matches)},
+            notify=notify,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{id}/cancel")
+async def cancel_tournament(id: str, data: TournamentCancelSchema, admin = Depends(verify_admin)):
+    """
+    Any non-terminal state -> cancelled, with a reason on the record.
+
+    Terminal: a cancelled tournament cannot be reopened, re-drawn or scored.
+    Every registered participant is told, and told why.
+    """
+    admin_db = get_admin_db()
+    try:
+        t = require_tournament_access(admin_db, id, admin, "tournament.lifecycle")
+
+        reason = (data.reason or "").strip()
+        if not reason:
+            raise HTTPException(
+                status_code=422,
+                detail="A reason is required to cancel a tournament.",
+            )
+
+        extra = {
+            "cancelled_at": datetime.now(timezone.utc).isoformat(),
+            "cancel_reason": reason,
+        }
+
+        def notify() -> int:
+            return fan_out_notification(
+                admin_db,
+                title="Tournament Cancelled",
+                message=f"'{t['name']}' has been cancelled. Reason: {reason}",
+                type="tournament_cancelled",
+                tournament_id=id,
+            )
+
+        return _lifecycle_move(
+            admin_db, admin, t, "cancelled", verb="cancel", extra=extra,
+            context={"reason": reason}, notify=notify,
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -1072,6 +1592,11 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
         created = admin_db.table("matches").insert(match_payload).execute()
         match_id = created.data[0]["id"]
 
+        # One insert, not one per board. Three sets of eight is 24 sequential
+        # round trips for a single fixture -- the same shape that made
+        # generating a whole draw time out, in miniature, on the button an
+        # organiser presses when someone turns up late.
+        board_rows = []
         for set_number in range(1, number_of_sets + 1):
             for board_number in range(1, max_boards + 1):
                 board = {
@@ -1083,7 +1608,9 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
                 }
                 if number_of_sets > 1:
                     board["set_number"] = set_number
-                admin_db.table("boards").insert(board).execute()
+                board_rows.append(board)
+        if board_rows:
+            admin_db.table("boards").insert(board_rows).execute()
 
         record_audit(
             admin_db, actor=admin, action="match.added_manually",

@@ -119,6 +119,7 @@ def recalculate_match_scores(
         return updated_match
 
     # Classic: best of N boards, decided as soon as one side is out of reach.
+    updated_match["tieBreakRequired"] = False
     if p1_board_wins >= target_wins:
         winner_id, winner_name = side(1)
         updated_match["status"] = "completed"
@@ -135,8 +136,25 @@ def recalculate_match_scores(
             winner_id, winner_name = side(1)
         elif p2_board_wins > p1_board_wins:
             winner_id, winner_name = side(2)
-        updated_match["status"] = "completed"
-        updated_match["matchCompletedAt"] = datetime.utcnow().isoformat()
+        elif str(_field(match, "stage", "stage", "") or "") == "knockout":
+            # A knockout match cannot be left drawn. Nothing advances out of it
+            # and the bracket stops there -- and with an even board count that
+            # is ordinary rather than exotic: eight boards split 4-4 reach
+            # neither side's target of five. It used to be recorded as
+            # "completed" with no winner and no flag of any kind, because the
+            # tie-break prompt was only ever raised under remaining-coins
+            # scoring, so the organiser saw a finished match feeding a final
+            # that could never be played.
+            #
+            # A drawn LEAGUE match is a real result and is left as one; the
+            # points table has a column for it.
+            updated_match["tieBreakRequired"] = True
+            updated_match["tieBreakRule"] = _rule(
+                rules or {}, "tieBreak", "tie_break", "additional_board")
+
+        if not updated_match.get("tieBreakRequired"):
+            updated_match["status"] = "completed"
+            updated_match["matchCompletedAt"] = datetime.utcnow().isoformat()
 
     updated_match["winnerId"] = winner_id
     updated_match["winnerName"] = winner_name
@@ -146,7 +164,8 @@ def recalculate_match_scores(
 def calculate_points_table(
     matches: List[Dict[str, Any]],
     participants: List[Dict[str, Any]],
-    rules: Dict[str, Any]
+    rules: Dict[str, Any],
+    qualifying_count: Optional[int] = 4,
 ) -> List[Dict[str, Any]]:
     standings_map = {}
 
@@ -261,10 +280,19 @@ def calculate_points_table(
 
     rows.sort(key=sort_key)
 
-    # Assign ranks and qualification status (Top 4 qualify)
+    # Assign ranks, and mark who goes through. How many that is depends on the
+    # draw this table feeds -- two from each group, or as many as the knockout
+    # has seats -- and only the caller knows that, so it says. It used to be a
+    # fixed four, which flagged four qualifiers from a group of three and read
+    # "qualified" against people a two-slot final had no room for. Four stays
+    # the default so callers that never said keep the cut they always had.
+    try:
+        cut = 4 if qualifying_count is None else max(0, int(qualifying_count))
+    except (TypeError, ValueError):
+        cut = 4
     for idx, r in enumerate(rows):
         r["rank"] = idx + 1
-        r["isQualified"] = (idx < 4)
+        r["isQualified"] = (idx < cut)
 
     return rows
 
@@ -404,6 +432,20 @@ def board_result(
         # The umpire named who still has coins on the board.
         if coins_remaining is not None:
             stated = max(0, int(coins_remaining))
+            # A side cannot have more coins left than it started with.
+            #
+            # The count was scored verbatim, so a slipped keystroke in the
+            # "coins remaining" field became the board score: 19 instead of 9
+            # is a 19-point board, more than any board of carrom can be worth.
+            # Nothing downstream caught it either, because validate_board_score
+            # runs on the numbers the scorer typed and this score is derived
+            # afterwards.
+            if stated > coins_per_side:
+                warnings.append(
+                    f"{stated} coins remaining is more than the {coins_per_side} "
+                    f"a side can hold; scored {coins_per_side}"
+                )
+                stated = coins_per_side
         else:
             stated = derived[coins_remaining_with] or 0
 

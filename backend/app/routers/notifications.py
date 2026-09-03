@@ -9,6 +9,14 @@ from typing import List, Dict, Any
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
+# The drawer shows a scrollable list and the header badge stops counting at
+# "9+", so nothing on screen can use more than this. Unbounded, it grew with
+# every announcement ever fanned out -- one row per recipient per event -- and
+# the organiser who had run the most tournaments waited the longest, on a read
+# that fires again after every single admin action.
+NOTIFICATION_PAGE = 200
+
+
 @router.get("")
 async def get_notifications(profile = Depends(get_user_profile), db = Depends(get_user_db)):
     # The JWT-bound client is required here: the RLS policy filters on
@@ -16,7 +24,12 @@ async def get_notifications(profile = Depends(get_user_profile), db = Depends(ge
     try:
         res = db.table("notifications").select("*, tournament:tournaments(name)").or_(
             f"profile_id.is.null,profile_id.eq.{profile['id']}"
-        ).order("created_at", desc=True).execute()
+        # Unread first, then newest. The cap is what the drawer can show, but
+        # the header's badge is counted from this same list, so an account
+        # holding more than a page of history would have stopped counting
+        # unread ones older than the newest 200 and quietly shown nothing to
+        # read. Ordering by `read` puts every unread row inside the page.
+        ).order("read").order("created_at", desc=True).limit(NOTIFICATION_PAGE).execute()
         return [serialize_notification(n) for n in (res.data or [])]
     except HTTPException:
         raise

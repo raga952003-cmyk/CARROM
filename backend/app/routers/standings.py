@@ -17,6 +17,9 @@ logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/standings", tags=["standings"])
 
+# The cut every table had before the draw was consulted.
+LEGACY_QUALIFIERS = 4
+
 
 def _participants_for(supabase, tournament_id: str) -> List[Dict[str, Any]]:
     """
@@ -45,6 +48,69 @@ def _fallback_participants(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]
             if pid and pid not in seen:
                 seen[pid] = {"id": pid, "name": m.get(name_key) or "Unknown"}
     return list(seen.values())
+
+
+def _int_rule(rules: Dict[str, Any], camel: str, snake: str, default: int) -> int:
+    """A numeric rule under whichever spelling it was saved with."""
+    value = rules.get(camel)
+    if value is None:
+        value = rules.get(snake)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def uses_groups(tournament: Dict[str, Any], rules: Dict[str, Any]) -> bool:
+    """
+    Whether this tournament's league phase is played in groups.
+
+    The same reading the fixture route takes: a group format, or groupCount set
+    above one on a league format -- the second route exists for databases whose
+    format CHECK predates the group formats.
+    """
+    return (
+        _int_rule(rules, "groupCount", "group_count", 0) > 1
+        or tournament.get("format") in ("group_stage", "group_knockout")
+    )
+
+
+def qualifying_count(
+    tournament: Dict[str, Any],
+    rules: Dict[str, Any],
+    cat_matches: List[Dict[str, Any]],
+    grouped: bool = False,
+) -> int:
+    """
+    How many go through from one table of this category.
+
+    The engine used to flag the top four of every table whatever the draw. That
+    marked four "qualified" in a group of three, and in a league feeding a
+    two-slot final it promised third and fourth a place that did not exist. The
+    number has to come from the same place the bracket did:
+
+    - groups: qualifiersPerGroup from each (2 by default), which is exactly how
+      many "Group X #n" slots generate_group_knockout_fixtures drew per group;
+    - a league feeding a knockout: the seats in the first knockout round, two
+      per match that no other match feeds -- the "League Rank #n" slots
+      generate_league_knockout_fixtures labelled. Counting matches rather than
+      labels keeps the answer stable after promotion has replaced the labels
+      with names;
+    - anything else: the legacy four, so a plain round robin reads as it
+      always did.
+    """
+    if grouped or uses_groups(tournament, rules):
+        return max(1, _int_rule(rules, "qualifiersPerGroup", "qualifiers_per_group", 2))
+
+    knockout = [m for m in cat_matches if m.get("stage") == "knockout"]
+    if knockout:
+        fed = {str(m.get("next_match_id")) for m in knockout if m.get("next_match_id")}
+        first_round = [m for m in knockout if str(m.get("id")) not in fed]
+        if first_round:
+            return 2 * len(first_round)
+    return LEGACY_QUALIFIERS
 
 
 def compute_standings(supabase, tournament_id: str) -> Dict[str, Any]:
@@ -88,6 +154,7 @@ def compute_standings(supabase, tournament_id: str) -> Dict[str, Any]:
         if labels:
             # A group stage is several separate mini-leagues. One combined table
             # would rank entrants who never played each other.
+            cut = qualifying_count(tournament, rules, cat_matches, grouped=True)
             group_blocks = []
             flat: List[Dict[str, Any]] = []
             for label in labels:
@@ -98,13 +165,17 @@ def compute_standings(supabase, tournament_id: str) -> Dict[str, Any]:
                 }
                 group_pool = [p for p in pool if p["id"] in ids] or _fallback_participants(group_matches)
 
-                rows = [camelize(r) for r in calculate_points_table(group_matches, group_pool, rules)]
+                rows = [
+                    camelize(r) for r in calculate_points_table(
+                        group_matches, group_pool, rules, qualifying_count=cut)
+                ]
                 for r in rows:
                     r["group"] = label
                 group_blocks.append({
                     "group": label,
                     "participantCount": len(group_pool),
                     "matchCount": len(group_matches),
+                    "qualifyingCount": cut,
                     "standings": rows,
                 })
                 flat.extend(rows)
@@ -113,15 +184,18 @@ def compute_standings(supabase, tournament_id: str) -> Dict[str, Any]:
                 "category": category,
                 "participantCount": len(pool),
                 "matchCount": len(cat_matches),
+                "qualifyingCount": cut,
                 "groups": group_blocks,
                 "standings": flat,
             })
         else:
-            rows = calculate_points_table(cat_matches, pool, rules)
+            cut = qualifying_count(tournament, rules, cat_matches)
+            rows = calculate_points_table(cat_matches, pool, rules, qualifying_count=cut)
             categories.append({
                 "category": category,
                 "participantCount": len(pool),
                 "matchCount": len(cat_matches),
+                "qualifyingCount": cut,
                 "groups": [],
                 "standings": [camelize(r) for r in rows],
             })
@@ -160,21 +234,45 @@ async def get_standings(tournament_id: str):
 
 
 @router.get("/{tournament_id}/qualified")
-async def get_qualified(tournament_id: str, count: int = Query(4, ge=1, le=64)):
-    """Top N of the league table — the group-stage qualification cut."""
+async def get_qualified(
+    tournament_id: str,
+    count: Optional[int] = Query(None, ge=1, le=64),
+):
+    """
+    Who goes through from the league phase.
+
+    Without `count` this is the configured cut -- the rows compute_standings
+    flagged, so two per group in a group draw and the size of the knockout in a
+    league-knockout. With `count` it is the top N of each table (each group's
+    table, in a group draw), kept for the callers that ask for a number.
+    """
     supabase = get_admin_db()
     try:
         result = compute_standings(supabase, tournament_id)
         by_category = []
         for block in result.get("categories", []):
-            top = block["standings"][:count]
+            if count is None:
+                top = [row for row in block["standings"] if row.get("isQualified")]
+            elif block.get("groups"):
+                top = []
+                for group in block["groups"]:
+                    top.extend(group["standings"][:count])
+            else:
+                top = block["standings"][:count]
             for row in top:
                 row["isQualified"] = True
-            by_category.append({"category": block["category"], "qualified": top})
+            by_category.append({
+                "category": block["category"],
+                "qualifyingCount": count if count is not None else block.get("qualifyingCount"),
+                "qualified": top,
+            })
 
         return {
             "tournamentId": tournament_id,
-            "qualifyingCount": count,
+            "qualifyingCount": (
+                count if count is not None
+                else (by_category[0]["qualifyingCount"] if by_category else None)
+            ),
             "categories": by_category,
             "qualified": by_category[0]["qualified"] if by_category else [],
         }
@@ -226,7 +324,9 @@ async def promote_league_qualifiers(
                 detail="The knockout stage has already started; re-seeding would rewrite live matches.",
             )
 
-        standings = compute_standings(admin_db, tournament_id).get("standings", [])
+        # The whole breakdown, not just the primary table: every category's
+        # bracket is filled from its own standings.
+        standings = compute_standings(admin_db, tournament_id)
         result = promote_qualifiers(admin_db, tournament_id, standings, matches)
 
         record_audit(

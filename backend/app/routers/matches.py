@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from app.database import get_db, get_admin_db
+from app.database import get_admin_db
 from app.models.match import (
-    MatchUpdateSchema, ScoreSubmitSchema, BoardScoreSchema, TossSchema,
-    MatchSidesSchema, WalkoverSchema, TieBreakSchema,
+    ScoreSubmitSchema, BoardScoreSchema, TossSchema,
+    MatchSidesSchema, WalkoverSchema, TieBreakSchema, MatchReopenSchema,
 )
-from app.utils.security import get_user_profile, verify_admin
+from app.utils.security import verify_admin
 from app.services.scoring_engine import (
     recalculate_match_scores, apply_queen_points, board_result, scoring_mode,
     apply_set_results, summarise_sets, set_layout,
@@ -20,8 +20,10 @@ from app.utils.serializers import serialize_board, serialize_match
 from app.utils.idempotency import IdempotencyGuard, get_idempotency_key
 from typing import Dict, Any
 from datetime import datetime, timezone
-import json
+import logging
 import time
+
+logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
@@ -34,20 +36,53 @@ def tournament_rules(admin_db, tournament_id: str) -> dict:
     return (rows[0].get("rules") or {}) if rows else {}
 
 
-def prev_match_tournament(admin_db, match_id: str) -> str:
-    rows = admin_db.table("matches").select("tournament_id").eq(
-        "id", match_id).execute().data
-    return rows[0]["tournament_id"] if rows else ""
+def _resolve_set(boards, board_number: int, requested):
+    """
+    Which set a board write means, or 422 when the request does not say.
+
+    Board numbers restart at 1 in every set, so "board 1" of a three-set match
+    names three different boards. A missing set used to fall back to 1, which
+    turned a client that forgot to send one into a silent overwrite of a played
+    result -- the umpire scoring set 2 rewrote set 1 and the set they were on
+    never filled. Guessing is the wrong answer to an ambiguous request.
+    """
+    if requested is not None:
+        return int(requested)
+    same_number = [b for b in boards if b.get("board_number") == board_number]
+    sets = {(b.get("set_number") or 1) for b in same_number}
+    if len(sets) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This match is played in sets, so board {} exists in each of "
+                "them. Say which set the board belongs to.".format(board_number)
+            ),
+        )
+    return next(iter(sets)) if sets else 1
 
 
 def _authorise_match(admin_db, match_id: str, admin, action: str):
     """Resolve a match to its tournament and authorise the caller for `action`."""
+    match, _ = _authorise_match_with_tournament(admin_db, match_id, admin, action)
+    return match
+
+
+def _authorise_match_with_tournament(admin_db, match_id: str, admin, action: str):
+    """
+    The same, handing back the tournament row it already had to read.
+
+    Authorising a match loads its tournament to find the owner. Every scoring
+    route then asked for the same row a second time, for the rules -- so every
+    board an umpire entered spent a round trip re-reading a row this request
+    was already holding. On a venue connection that is the difference the
+    umpire feels between one tap and the next.
+    """
     rows = admin_db.table("matches").select("*").eq("id", match_id).execute().data
     if not rows:
         raise HTTPException(status_code=404, detail="Match not found.")
     match = rows[0]
-    require_tournament_access(admin_db, match["tournament_id"], admin, action)
-    return match
+    tournament = require_tournament_access(admin_db, match["tournament_id"], admin, action)
+    return match, tournament
 
 
 
@@ -378,19 +413,63 @@ async def update_board(
     reason: str = Query("Scorer update"),
     override: bool = Query(False, description="Required to change a confirmed board."),
     admin = Depends(verify_admin),
+    idempotency_key: str = Depends(get_idempotency_key),
 ):
+    """
+    Correct a board that has already been scored.
+
+    A correction is a second scoring of the same board, so it is held to the
+    same rules as the first: the numbers that will be stored are validated,
+    and the board row, the audit row and the recomputed match aggregates are
+    written together through apply_board_result. Before this they were three
+    separate writes, and a connection dropped between them left a board
+    showing one score while its match totalled another.
+    """
     admin_db = get_admin_db()
+    # The query string is part of the request: the same key sent again with a
+    # different reason or override flag is a different correction, not a retry.
+    guard = IdempotencyGuard(
+        admin_db, idempotency_key,
+        f"PUT /matches/{id}/boards/{board_number}",
+        {**data.model_dump(), "reason": reason, "override": override},
+    )
+    cached = guard.replay()
+    if cached is not None:
+        return cached
+
     try:
         # Correcting a board is scoring, and was the one scoring path that never
         # checked. Being an admin was enough to rewrite any board on anyone's
         # tournament, which is precisely what the ownership model exists to stop.
-        _authorise_match(admin_db, id, admin, "match.score")
+        match_data, tournament_row = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.score")
 
-        # Fetch previous board score for audit log
-        prev_board = admin_db.table("boards").select("*").eq("match_id", id).eq("board_number", board_number).execute()
-        if not prev_board.data:
+        if match_data.get("result_confirmed"):
+            # A confirmed result is the official record, and it may already
+            # have sent a winner into the next round. Editing a board underneath
+            # it would leave the totals disagreeing with a result that still
+            # stands, so the result has to be taken back first.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This match result is confirmed. Reopen the result first, "
+                    "then correct the board."
+                ),
+            )
+
+        boards = admin_db.table("boards").select("*").eq(
+            "match_id", id).order("board_number").execute().data or []
+
+        # Board numbers restart in each set, so a match played in sets has
+        # several boards with this number. A correction that names the set gets
+        # that board; one that does not gets the only board of that number, or
+        # the first set's -- which is the board every match without sets has.
+        same_number = [b for b in boards if b.get("board_number") == board_number]
+        wanted = _resolve_set(boards, board_number, data.set_number)
+        pb = next((b for b in same_number
+                   if (b.get("set_number") or 1) == wanted), None)
+        if pb is None:
             raise HTTPException(status_code=404, detail="Board not found")
-        pb = prev_board.data[0]
 
         if pb.get("locked") and not override:
             raise HTTPException(
@@ -402,11 +481,10 @@ async def update_board(
             )
         overriding = bool(pb.get("locked") and override)
 
-        # Update board score
         # Corrections go through the same rule as the original submission, so a
         # fixed score is not left missing the queen — or, under remaining-coins
         # scoring, silently re-scored under the classic formula.
-        corrected_rules = (tournament_rules(admin_db, prev_match_tournament(admin_db, id)) or {})
+        corrected_rules = ((tournament_row or {}).get("rules") or {})
         corrected_mode = scoring_mode(corrected_rules)
 
         if corrected_mode == "remaining_coins":
@@ -434,13 +512,29 @@ async def update_board(
                 rules=corrected_rules,
             )
             c_p1, c_p2 = outcome["player1_score"], outcome["player2_score"]
+
+            # Validate what is about to be STORED. The two typed numbers are
+            # not read under this mode, so checking them would check nothing;
+            # the score derived from the observations is what has to meet the
+            # ceiling, exactly as submit_board checks its own derived score.
+            validate_board_score(
+                c_p1, c_p2, match_data, data.queen_claimed_by,
+                allow_scoreless_queen=True,
+            )
         else:
+            # Judged on the coin count before the queen is added, as the
+            # original submission was, so a board won with the queen is not
+            # read as both sides reaching the target.
+            validate_board_score(
+                data.player1_score, data.player2_score, match_data,
+                data.queen_claimed_by,
+            )
             c_p1, c_p2, _ = apply_queen_points(
                 data.player1_score, data.player2_score,
                 data.queen_claimed_by, data.queen_covered, corrected_rules,
             )
 
-        update_payload = {
+        board_patch = {
             "player1_score": c_p1,
             "player2_score": c_p2,
             "status": data.status,
@@ -457,7 +551,7 @@ async def update_board(
         if corrected_mode == "remaining_coins":
             # Store what the correction observed, not just what it scored, so a
             # second correction reads the current board rather than the original.
-            update_payload.update({
+            board_patch.update({
                 "board_winner": outcome["board_winner"],
                 "coins_remaining_with": restated("coins_remaining_with", "coins_remaining_with"),
                 "coins_remaining": restated("coins_remaining", "coins_remaining"),
@@ -474,34 +568,33 @@ async def update_board(
                 "scoring_warnings": outcome["warnings"] or None,
             })
 
-        if not board_detail_available(admin_db):
+        detail_available = board_detail_available(admin_db)
+        if not detail_available:
             for key in _BOARD_DETAIL_COLUMNS:
-                update_payload.pop(key, None)
+                board_patch.pop(key, None)
         if data.status == "completed":
-            update_payload["completed_at"] = datetime.utcnow().isoformat()
+            board_patch["completed_at"] = datetime.utcnow().isoformat()
 
-        res = admin_db.table("boards").update(update_payload).eq("match_id", id).eq("board_number", board_number).execute()
-        
-        # Create audit log
-        audit_payload = {
-            "match_id": id,
-            "admin_id": admin["id"],
-            "admin_name": admin["name"],
-            "board_number": board_number,
-            "previous_score": {"player1": pb.get("player1_score", 0), "player2": pb.get("player2_score", 0)},
-            "new_score": {"player1": c_p1, "player2": c_p2},
-            "reason": ("OVERRIDE of a confirmed board: " + reason) if overriding else reason,
-        }
-        admin_db.table("score_audit_logs").insert(audit_payload).execute()
-        
-        # Recalculate match score
-        boards = admin_db.table("boards").select("*").eq("match_id", id).execute().data
-        match_data = admin_db.table("matches").select("*").eq("id", id).execute().data[0]
-        
-        updated_match = recalculate_match_scores(match_data, boards, corrected_rules)
-        
-        # Persist updated match scores
-        corrected_patch = {
+        # Recompute the match from the board set as it will be after this
+        # write, with the engine the submission used, so a correction in a
+        # match played in sets is decided the way its boards were.
+        projected = [{**b, **board_patch} if b is pb else b for b in boards]
+        total_sets, _ = set_layout(match_data, corrected_rules)
+
+        # The engine writes a status only when it decides the match; otherwise
+        # the row's own status comes back out. At submission that row says
+        # 'live' and the answer is right. At correction it usually says
+        # 'completed', because the match was -- so a correction that took the
+        # deciding board away left status='completed' with winner_id NULL: a
+        # finished match nobody won. Recomputing from 'live' makes the engine
+        # earn 'completed' again. A paused match is left paused.
+        baseline = ({**match_data, "status": "live"}
+                    if match_data.get("status") == "completed" else match_data)
+        updated_match = (apply_set_results(baseline, projected, corrected_rules)
+                         if total_sets > 1
+                         else recalculate_match_scores(baseline, projected, corrected_rules))
+
+        match_patch = {
             "player1_board_wins": updated_match["player1BoardWins"],
             "player2_board_wins": updated_match["player2BoardWins"],
             "player1_total_points": updated_match["player1TotalPoints"],
@@ -518,21 +611,50 @@ async def update_board(
         # with no winner as a DRAW -- so correcting one board quietly turned a
         # decided match into a drawn one, awarded both sides the draw points,
         # and left nothing anywhere saying a decision was still owed.
-        if scoring_mode(corrected_rules) == "remaining_coins":
+        #
+        # Both scoring models raise the flag now -- a classic knockout drawn on
+        # board wins as much as a remaining-coins match level on points -- so
+        # it is persisted for both, as submit_board does.
+        if "tieBreakRequired" in updated_match:
             needs_tie_break = bool(updated_match.get("tieBreakRequired"))
-            if board_detail_available(admin_db):
-                corrected_patch["tie_break_required"] = needs_tie_break
-                corrected_patch["tie_break_rule"] = updated_match.get("tieBreakRule")
+            match_patch["tie_break_required"] = needs_tie_break
+            match_patch["tie_break_rule"] = updated_match.get("tieBreakRule")
             if needs_tie_break:
                 # Not finished: it is waiting on a ruling, and saying so is the
                 # difference between a match an organiser can act on and one
                 # that silently reads as a draw.
-                corrected_patch["status"] = "live"
-                corrected_patch["match_completed_at"] = None
+                match_patch["status"] = "live"
+                match_patch["match_completed_at"] = None
+        if total_sets > 1:
+            match_patch["player1_sets_won"] = updated_match.get("player1SetsWon", 0)
+            match_patch["player2_sets_won"] = updated_match.get("player2SetsWon", 0)
+        if not detail_available:
+            # Migration 005 carries the tie-break columns; without it the match
+            # still reopens, it just cannot say a ruling is owed.
+            match_patch.pop("tie_break_required", None)
+            match_patch.pop("tie_break_rule", None)
 
-        admin_db.table("matches").update(corrected_patch).eq("id", id).execute()
+        board_row = apply_board_result(
+            admin_db,
+            match_id=id,
+            board_number=board_number,
+            board_patch=board_patch,
+            match_patch=match_patch,
+            audit={
+                "admin_id": admin["id"],
+                "admin_name": admin["name"],
+                "new_score": {"player1": c_p1, "player2": c_p2},
+                "reason": ("OVERRIDE of a confirmed board: " + reason) if overriding else reason,
+            },
+            # A correction never opens the next board: the submission did that
+            # when the board was first played.
+            next_board_number=None,
+            set_number=pb.get("set_number"),
+        )
 
-        return res.data[0]
+        response = serialize_board(board_row) if board_row else {"status": "ok"}
+        guard.store(response)
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -563,14 +685,15 @@ async def submit_board(
         return cached
 
     try:
-        match_data = _authorise_match(admin_db, id, admin, "match.score")
+        match_data, tournament_row = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.score")
         assert_match_scorable(match_data)
 
         boards = admin_db.table("boards").select("*").eq("match_id", id).order("board_number").execute().data or []
 
         # Board numbers restart in each set, so the set has to be named or the
-        # board is ambiguous. Unset means the match is not played in sets.
-        set_number = data.set_number or 1
+        # board is ambiguous. Unset is only allowed when it cannot be.
+        set_number = _resolve_set(boards, board_number, data.set_number)
         def is_target(b):
             return (b["board_number"] == board_number
                     and (b.get("set_number") or 1) == set_number)
@@ -582,7 +705,7 @@ async def submit_board(
                     board_number, set_number),
             )
 
-        rules = (tournament_rules(admin_db, match_data["tournament_id"]) or {})
+        rules = ((tournament_row or {}).get("rules") or {})
         mode = scoring_mode(rules)
 
         validate_board_score(
@@ -616,6 +739,20 @@ async def submit_board(
                 f"base {outcome['base_points']} + queen {outcome['queen_bonus']} "
                 f"to {outcome['queen_awarded_to']}"
             )
+
+            # Validate what is about to be STORED, not only what was typed.
+            #
+            # Under this mode the scorer enters observations -- who won, who
+            # still held coins, how many -- and the score is derived from them
+            # afterwards. The validate_board_score() call above therefore
+            # checked numbers that are not the ones written to the board, so an
+            # out-of-range observation reached the database as a real result
+            # without ever meeting the ceiling that guards the same column.
+            validate_board_score(
+                p1_final, p2_final, match_data, data.queen_claimed_by,
+                allow_scoreless_queen=True,
+            )
+
             board_patch = {
                 "player1_score": p1_final,
                 "player2_score": p2_final,
@@ -681,9 +818,14 @@ async def submit_board(
             "winner_name": updated_match["winnerName"],
             "match_completed_at": updated_match.get("matchCompletedAt"),
         }
-        if mode == "remaining_coins":
+        if "tieBreakRequired" in updated_match:
             # An all-boards-played draw needs a human decision, so say so on
             # the match rather than quietly leaving it without a winner.
+            #
+            # Both scoring models raise this now. It used to be persisted only
+            # under remaining-coins, so a classic knockout drawn on board wins
+            # -- eight boards at 4-4 -- was stored as completed with no winner
+            # and nothing to tell the organiser a decision was owed.
             match_patch["tie_break_required"] = updated_match.get("tieBreakRequired", False)
             match_patch["tie_break_rule"] = updated_match.get("tieBreakRule")
         if total_sets > 1:
@@ -759,7 +901,8 @@ async def confirm_match(
         return cached
 
     try:
-        m = _authorise_match(admin_db, id, admin, "match.confirm")
+        m, confirm_tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.confirm")
 
         if not m.get("winner_id"):
             # Finishing a match is the organiser's decision, not arithmetic on
@@ -774,7 +917,7 @@ async def confirm_match(
             # every board complete and still recorded as live with no winner.
             boards = admin_db.table("boards").select("*").eq(
                 "match_id", id).order("board_number").execute().data or []
-            rules = tournament_rules(admin_db, m.get("tournament_id")) or {}
+            rules = (confirm_tournament or {}).get("rules") or {}
             recomputed = recalculate_match_scores(m, boards, rules)
 
             p1_points = recomputed["player1TotalPoints"]
@@ -884,6 +1027,155 @@ async def confirm_match(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.post("/{id}/reopen")
+async def reopen_match(id: str, data: MatchReopenSchema, admin = Depends(verify_admin)):
+    """
+    Take a confirmed result back so its boards can be corrected.
+
+    Confirming is final on purpose: it advances the winner, tells everyone and
+    closes the match to scoring. But umpires transpose scores, and a result
+    found wrong after confirmation had no way back -- every scoring route
+    refused a confirmed match and pointed at a correction workflow that did
+    not exist. This is that workflow.
+
+    It is an owner's action, not a scorer's. A scorer records what happened at
+    the board; undoing an official result, and pulling a player back out of
+    the next round, is the organiser's call.
+
+    The state machine lists a match's 'completed' as terminal and says the only
+    way out is a correction workflow. Being that workflow, this changes the
+    status directly rather than through validate_match_transition, which would
+    -- correctly, for every other caller -- refuse the move.
+    """
+    admin_db = get_admin_db()
+    try:
+        match = _authorise_match(admin_db, id, admin, "match.reopen")
+        reason = data.reason
+
+        if not match.get("result_confirmed"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This result has not been confirmed, so there is nothing to "
+                    "reopen. Correct the board directly."
+                ),
+            )
+
+        # The winner may already be playing the next round. Taking their result
+        # back while that match is under way would leave a player in a match
+        # they may no longer have qualified for, with boards already played
+        # against them -- so the later match has to be untouched, or itself
+        # reopened first.
+        next_id = match.get("next_match_id")
+        next_match = None
+        if next_id:
+            rows = admin_db.table("matches").select("*").eq("id", next_id).execute().data
+            next_match = rows[0] if rows else None
+        if next_match is not None:
+            next_boards = admin_db.table("boards").select("*").eq(
+                "match_id", next_id).execute().data or []
+            under_way = (
+                next_match.get("result_confirmed")
+                or next_match.get("status") in ("live", "paused")
+                or any(b.get("status") == "completed" for b in next_boards)
+            )
+            if under_way:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The winner of this match has gone on to match #{} ({} vs {}), "
+                        "which is under way or already played. Reopen that match "
+                        "first, or let this result stand."
+                    ).format(
+                        next_match.get("match_number"),
+                        next_match.get("player1_name") or "TBD",
+                        next_match.get("player2_name") or "TBD",
+                    ),
+                )
+
+        reopened = {
+            "result_confirmed": False,
+            "result_confirmed_at": None,
+            "status": "live",
+            "match_completed_at": None,
+        }
+        res = admin_db.table("matches").update(reopened).eq("id", id).execute()
+
+        # Pull the winner back out of the slot they were advanced into -- and
+        # only them. If someone else is standing there the bracket has been
+        # edited by hand since, and guessing would be worse than leaving it.
+        slot_cleared = None
+        if next_match is not None:
+            slot = match.get("next_match_slot") or "player2"
+            occupant = next_match.get(f"{slot}_id")
+            if occupant is not None and str(occupant) == str(match.get("winner_id")):
+                admin_db.table("matches").update({
+                    f"{slot}_id": None,
+                    f"{slot}_name": None,
+                }).eq("id", next_id).execute()
+                slot_cleared = slot
+
+        record_audit(
+            admin_db, actor=admin, action="match.reopen",
+            entity_type="match", entity_id=id,
+            previous_state={
+                "status": match.get("status"),
+                "result_confirmed": True,
+                "result_confirmed_at": match.get("result_confirmed_at"),
+                "winner_id": match.get("winner_id"),
+            },
+            new_state={
+                "status": "live",
+                "result_confirmed": False,
+                "next_match_slot_cleared": slot_cleared,
+            },
+            request_context={"reason": reason, "tournament_id": match.get("tournament_id")},
+        )
+
+        # The score history is what an organiser reads when a result is
+        # questioned, so the reopening belongs in it, next to the corrections
+        # that follow. It is a match-level entry: 0 is not a board number.
+        totals = {
+            "player1": match.get("player1_total_points") or 0,
+            "player2": match.get("player2_total_points") or 0,
+        }
+        try:
+            admin_db.table("score_audit_logs").insert({
+                "match_id": id,
+                "admin_id": admin["id"],
+                "admin_name": admin["name"],
+                "board_number": 0,
+                "previous_score": totals,
+                "new_score": totals,
+                "reason": "Result reopened for correction: " + reason,
+            }).execute()
+        except Exception as e:
+            # The result is already reopened. Reporting a missing history line
+            # as a failure would invite a retry, and the retry would 409.
+            logger.error(f"Score audit write failed for match.reopen on {id}: {str(e)}")
+
+        fan_out_notification(
+            admin_db,
+            title="Match Result Reopened",
+            message=(
+                f"The result of match #{match.get('match_number')} "
+                f"({match.get('player1_name')} vs {match.get('player2_name')}) has been "
+                f"reopened for correction: {reason}"
+            ),
+            # notifications.type is a CHECK over a fixed list with no entry for
+            # a reopened result. This is the type the result's audience already
+            # receives, and a row with an unlisted type would be rejected and
+            # silently delivered to nobody.
+            type="result_confirmed",
+            tournament_id=match.get("tournament_id"),
+        )
+
+        return serialize_match(res.data[0] if res.data else {**match, **reopened})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @router.post("/{id}/tie-break")
 async def resolve_tie_break(id: str, data: TieBreakSchema, admin = Depends(verify_admin)):
     """
@@ -970,7 +1262,8 @@ async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_
     """
     admin_db = get_admin_db()
     try:
-        match = _authorise_match(admin_db, id, admin, "match.walkover")
+        match, walkover_tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.walkover")
 
         if match.get("result_confirmed"):
             raise HTTPException(
@@ -987,7 +1280,7 @@ async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_
         if not (data.reason or "").strip():
             raise HTTPException(status_code=422, detail="A reason is required for a walkover.")
 
-        rules = tournament_rules(admin_db, match.get("tournament_id")) or {}
+        rules = (walkover_tournament or {}).get("rules") or {}
         max_boards = match.get("max_boards") or rules.get("maxBoardsPerMatch") or 3
         # Enough boards to have taken the match, not all of them: a 3-board
         # match is won 2-0, and recording 3-0 would overstate it.

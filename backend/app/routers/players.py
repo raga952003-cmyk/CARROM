@@ -5,8 +5,11 @@ from app.utils.security import verify_admin, get_optional_profile
 from app.utils.serializers import serialize_player
 from app.services.audit_service import record_audit
 from typing import List, Dict, Any
+import logging
 import uuid
 import secrets
+
+logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/players", tags=["players"])
 
@@ -57,31 +60,62 @@ async def create_player(data: PlayerSchema, admin = Depends(verify_admin)):
         
         if not auth_user or not auth_user.user:
             raise HTTPException(status_code=400, detail="Failed to create auth credentials for player.")
-        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # From here the auth user exists, so every failure has to take it back out
+    # again. Without this the account survived a half-finished creation with no
+    # profiles row: invisible in the players list, unusable to sign in with,
+    # and holding its email address hostage against a retry. Repeated attempts
+    # built up a whole shadow roster that way. Sign-up already had this
+    # rollback; player creation did not.
+    user_id = auth_user.user.id
+    try:
         # Make sure role is set to player in app_metadata
         admin_db.auth.admin.update_user_by_id(
-            auth_user.user.id,
+            user_id,
             attributes={"app_metadata": {"role": "player"}}
         )
 
-        # Update the profiles row (just in case fields weren't fully set by trigger)
-        profile_update = {
+        # UPSERT, not UPDATE. The profiles row is normally created by the
+        # handle_new_user trigger (db/triggers_and_security.sql), but that file
+        # is applied by hand and is not part of the numbered migrations. Where
+        # it is missing, an UPDATE matched nothing, res.data[0] raised
+        # IndexError, and the caller was told "list index out of range".
+        profile_row = {
+            "id": user_id,
+            "email": email,
+            "role": "player",
             "name": data.name,
             "club": data.club or "Independent",
             "city": data.city,
             "rating": data.rating or 1500,
-            "phone": data.phone
+            "phone": data.phone,
         }
-        
-        res = admin_db.table("profiles").update(profile_update).eq("id", auth_user.user.id).execute()
+
+        res = admin_db.table("profiles").upsert(profile_row).execute()
+        if not res.data:
+            raise HTTPException(
+                status_code=500,
+                detail="The player's profile could not be created. Nothing was saved.",
+            )
         record_audit(
             admin_db, actor=admin, action="player.create",
-            entity_type="player", entity_id=auth_user.user.id, new_state=res.data[0],
+            entity_type="player", entity_id=user_id, new_state=res.data[0],
         )
         return serialize_player(res.data[0], include_contact=True)
-    except HTTPException:
-        raise
     except Exception as e:
+        try:
+            admin_db.auth.admin.delete_user(user_id)
+        except Exception as cleanup_error:
+            logger.error(
+                "Could not roll back the auth user %s after a failed player "
+                "creation; it is now an orphan: %s", user_id, str(cleanup_error)
+            )
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.put("/{id}")

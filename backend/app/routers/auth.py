@@ -15,6 +15,32 @@ logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+
+SIGNUP_ROLES = ("player", "admin")
+
+
+def _role_for_signup(requested) -> str:
+    """
+    The role a registration asked for, checked for spelling and nothing else.
+
+    Registration is open in this deployment: whoever fills in the form picks
+    the role and gets it. That is a deliberate choice and worth being plain
+    about -- there is no key, no invitation and no approval step, so anybody
+    who can load the sign-up page can make themselves an administrator of
+    every tournament this instance runs.
+
+    What is still refused is a role that is not one of the two. An unknown
+    value used to fall through to 'player', which turns a typo into an account
+    that quietly is not what its owner believes it is.
+    """
+    role = (requested or "player").strip().lower()
+    if role not in SIGNUP_ROLES:
+        raise HTTPException(
+            status_code=422,
+            detail="Role must be either 'player' or 'admin'.",
+        )
+    return role
+
 def _session_response(session, profile_data) -> Dict[str, Any]:
     """
     Auth response including the refresh token.
@@ -41,6 +67,10 @@ async def signup(data: SignUpSchema):
         raise HTTPException(status_code=500, detail="Database client not configured.")
     
     admin_supabase = get_admin_db()
+
+    # Settled before anything is written, so a bad value costs no account.
+    role = _role_for_signup(data.role)
+
     try:
         logger.info(f"Step 1: Attempting user signup via Admin API for {data.email}")
         user_response = admin_supabase.auth.admin.create_user({
@@ -49,18 +79,18 @@ async def signup(data: SignUpSchema):
             "email_confirm": True,
             "user_metadata": {
                 "name": data.name,
-                # Hard-coded, never taken from the request. app_metadata is what
-                # the API trusts for authorisation, so accepting a role here let
-                # anyone who could reach the sign-up form mint themselves an
-                # admin account.
-                "role": "player",
+                # app_metadata is what the API trusts for authorisation, so
+                # this is the line that makes the choice on the sign-up form
+                # real. It is written from _role_for_signup and nowhere else,
+                # which is what keeps the two copies of the role in step.
+                "role": role,
                 "club": data.club,
                 "city": data.city,
                 "phone": data.phone,
                 "rating": data.rating
             },
             "app_metadata": {
-                "role": "player"
+                "role": role
             }
         })
         
@@ -88,6 +118,12 @@ async def signup(data: SignUpSchema):
                 "phone": data.phone,
             }.items() if v is not None
         }
+        # The role is written here as well as in the metadata above. The
+        # trigger reads it out of app_metadata, but a database without the
+        # trigger has its profile row healed from token claims instead, and an
+        # admin whose profiles row says 'player' is refused at every door --
+        # including the sign-in that would let anyone put it right.
+        profile_extras["role"] = role
         if profile_extras:
             admin_supabase.table("profiles").update(profile_extras).eq("id", user_id).execute()
 
@@ -107,7 +143,7 @@ async def signup(data: SignUpSchema):
             "id": user_id,
             "email": data.email,
             "name": data.name,
-            "role": "player",
+            "role": role,
             "club": data.club,
             "city": data.city,
             "phone": data.phone,
@@ -149,12 +185,16 @@ async def login(data: LoginSchema):
         profile_response = supabase.table("profiles").select("*").eq("id", auth_response.user.id).execute()
         
         if not profile_response.data:
-            # If database record is not present, create it using metadata
-            # Wait, the trigger should have run, but in case of manual sync issues
-            # Falls back to player, not to whatever the caller asked to sign in as:
-            # a missing profile row must not become a promotion.
-            role = (auth_response.user.app_metadata.get("role")
-                    or auth_response.user.user_metadata.get("role") or "player")
+            # No profiles row yet -- the trigger should have made one, but a
+            # database without it has to sign in too.
+            #
+            # app_metadata only. Falling back to user_metadata was reading the
+            # one field the account holder can write for themselves with
+            # nothing but the anon key the browser already ships: set
+            # user_metadata.role to "admin", delete or lose the profiles row,
+            # and sign in as an administrator. It falls back to player, not to
+            # whatever the caller asked to sign in as, for the same reason.
+            role = auth_response.user.app_metadata.get("role") or "player"
             name = auth_response.user.user_metadata.get("name") or "User"
             
             profile_data = {
@@ -169,11 +209,24 @@ async def login(data: LoginSchema):
         else:
             profile_data = profile_response.data[0]
 
-        # Verify the requested role matches their database profile
-        if profile_data.get("role") != data.role:
+        # Verify the requested role matches their database profile.
+        #
+        # The password has already been accepted at this point, so naming the
+        # role the account actually holds tells the caller nothing they could
+        # not find out by trying the other tab -- and it is the difference
+        # between a door that says no and one that says which door to use.
+        actual = profile_data.get("role")
+        if actual != data.role:
+            where = "Player Portal" if actual == "player" else "Admin Console"
             raise HTTPException(
-                status_code=403, 
-                detail=f"Forbidden. You do not have permissions for the role: {data.role}."
+                status_code=403,
+                detail=(
+                    f"This account is registered as {'an' if actual == 'admin' else 'a'} "
+                    f"{actual}, not {'an' if data.role == 'admin' else 'a'} {data.role}. "
+                    f"Sign in through the {where}"
+                    + (", or ask an organiser to promote the account."
+                       if actual == "player" else ".")
+                ),
             )
 
         return _session_response(auth_response.session, profile_data)
@@ -183,18 +236,26 @@ async def login(data: LoginSchema):
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/me")
-async def get_me(profile: Dict[str, Any] = Depends(get_current_user)):
-    # Simply load from security check
-    supabase = get_db()
-    res = supabase.table("profiles").select("*").eq("id", profile.id).execute()
-    if res.data:
-        return serialize_player(res.data[0], include_contact=True)
-    return {
-        "id": profile.id,
-        "email": profile.email,
-        "name": profile.user_metadata.get("name") or "User",
-        "role": profile.app_metadata.get("role") or "player"
-    }
+async def get_me(profile: Dict[str, Any] = Depends(get_user_profile)):
+    """
+    Who the caller is, read from the profiles row that every other route also
+    reads.
+
+    It used to look the row up on the ANON client, which RLS does not let see
+    other people's profiles -- so the read came back empty and the answer was
+    assembled from the token's own claims instead. Two things followed. The
+    role became whatever app_metadata said when the token was minted, so a
+    promotion or demotion was invisible until the token expired, and the app
+    routed a reload on a different source than it routed a sign-in on. And the
+    reply carried four fields instead of the whole profile, so opening Settings
+    after a reload showed an empty club, city, phone and avatar -- and saving
+    that form wrote the blanks back.
+
+    get_user_profile is the same dependency the rest of the API authorises on:
+    service client, heals a missing row rather than inventing an identity, and
+    reports a failed read as a failure instead of guessing.
+    """
+    return serialize_player(profile, include_contact=True)
 
 
 # Roughly 300 KB of base64, which is a generous 256x256 JPEG. The browser

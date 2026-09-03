@@ -2,15 +2,19 @@ from pydantic import BaseModel, EmailStr, Field
 from app.models.tournament import BaseCamelModel
 from typing import Optional
 
-class SignUpSchema(BaseModel):
+class SignUpSchema(BaseCamelModel):
     """
-    Public registration. Everyone who signs up is a player.
+    Public registration, in whichever role the form asked for.
 
-    `role` used to be an ordinary field here, taken from the request and written
-    straight into Supabase app_metadata -- so anyone who could reach the sign-up
-    form could make themselves a full admin, and the form offered it as a
-    visible choice. Admin rights are granted deliberately now, by an existing
-    admin or with db/promote_admin.py, never claimed on the way in.
+    `role` is taken from the request. Registration is therefore OPEN: anyone who
+    can reach the sign-up page can create an administrator account, which is a
+    deliberate choice for this deployment and not an oversight. There is no key
+    and no invitation; the only thing standing between a visitor and admin
+    rights is the sign-up form itself.
+
+    Anything narrower has to be done elsewhere -- put the app behind something,
+    or take the Administrator tab off the form and promote accounts with
+    db/promote_admin.py instead.
     """
     email: EmailStr
     password: str = Field(..., min_length=6)
@@ -19,6 +23,9 @@ class SignUpSchema(BaseModel):
     city: Optional[str] = None
     phone: Optional[str] = None
     rating: Optional[int] = 1500
+    # "player" or "admin". Anything else is refused rather than guessed at,
+    # so a typo cannot quietly create the wrong kind of account.
+    role: Optional[str] = "player"
 
 class LoginSchema(BaseModel):
     email: EmailStr

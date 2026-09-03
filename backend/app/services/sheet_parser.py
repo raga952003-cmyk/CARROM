@@ -19,6 +19,7 @@ is turned into a deterministic email, which makes matching and re-import
 dedupe exact without needing a schema change.
 """
 import io
+import re
 
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -77,6 +78,34 @@ def _text(value: Any) -> Optional[str]:
     if text.lower() in BLANKS:
         return None
     return text
+
+
+# A serial number carried into the name cell: "11. Thameem", "2) Asha",
+# "7 - Lokesh S". Organisers number their rosters, and when the sheet has no
+# separate S.No column the number ends up inside the name.
+_ORDINAL_PREFIX = re.compile(r"^\s*\d{1,3}\s*[.)\-:]\s*(?=\S)")
+
+
+def _person_name(value: Any) -> Optional[str]:
+    """
+    A player's name, without the row number the roster was numbered with.
+
+    Left alone, that prefix travels all the way through: it becomes the name on
+    the profile, on the fixture and on the board sheet, and because the importer
+    de-duplicates people by name, the same person imported once as "Thameem"
+    and once as "11. Thameem" becomes two players with two accounts. It also
+    defeats the exact-name fallback that lets someone whose login is not their
+    roster row find their own fixtures -- "Thameem" does not equal
+    "11. Thameem", so they are told they have no matches.
+
+    Only a leading number followed by a separator is removed. A name that is
+    genuinely just digits is left as it is rather than emptied.
+    """
+    text = _text(value)
+    if text is None:
+        return None
+    stripped = _ORDINAL_PREFIX.sub("", text, count=1).strip()
+    return stripped or text
 
 
 def _emp(value: Any) -> Optional[str]:
@@ -339,7 +368,7 @@ def parse_participants(df: Sheet) -> Tuple[List[Dict[str, Any]], List[str], Dict
 
     for idx, row in df.iterrows():
         line = idx + 2
-        name = _cell(row, primary_col) or _cell(row, cols["name"])
+        name = _person_name(_cell(row, primary_col) or _cell(row, cols["name"]))
         if not name:
             if any(_cell(row, c) for c in columns):
                 errors.append(f"Row {line}: no player name, row skipped.")
@@ -357,7 +386,7 @@ def parse_participants(df: Sheet) -> Tuple[List[Dict[str, Any]], List[str], Dict
 
         self_key = remember(emp, name, club, city, rating, phone, email, own_row=True)
 
-        partner_name = _cell(row, cols["player2"])
+        partner_name = _person_name(_cell(row, cols["player2"]))
         partner_emp = _emp(row[cols["partner_emp"]]) if cols["partner_emp"] and cols["partner_emp"] in row.index else None
         partner_key = None
         if partner_name or partner_emp:

@@ -53,6 +53,11 @@ async def list_fixtures(
 @router.post("/{tournament_id}/generate")
 async def generate(
     tournament_id: str,
+    # Same switch the tournaments route has, so the two paths to a redraw
+    # behave alike: without it a draw with play recorded on it is refused
+    # with 409, and this route would have had no way to say "yes, discard it".
+    force: bool = Query(False,
+                        description="Discard results already recorded and redraw anyway."),
     admin = Depends(verify_admin),
     idempotency_key: str = Depends(get_idempotency_key),
 ):
@@ -64,14 +69,25 @@ async def generate(
     # runs that tournament, not to any admin who knows its id.
     require_tournament_access(get_admin_db(), tournament_id, admin)
 
+    # `force` is part of the request identity: replaying a key that drew
+    # cautiously must not be accepted as consent to discard results.
     guard = IdempotencyGuard(
         get_admin_db(), idempotency_key,
-        f"POST /fixtures/{tournament_id}/generate", {"tournament_id": tournament_id},
+        f"POST /fixtures/{tournament_id}/generate",
+        {"tournament_id": tournament_id, "force": force},
     )
     cached = guard.replay()
     if cached is not None:
         return cached
 
-    result = await _generate_fixtures(tournament_id, admin)
+    # Keyword arguments, deliberately. generate_fixtures is (id, force, admin)
+    # and this used to call it as (tournament_id, admin): the admin profile
+    # slid into `force` and `admin` was left holding FastAPI's Depends marker,
+    # which require_tournament_access then tried to read a role off -- every
+    # call through this route failed with a 400 that named no cause. Passing
+    # `force` explicitly matters too: left to its default it would be the
+    # Query() descriptor, which is truthy, and the guard against deleting
+    # recorded results would silently never fire.
+    result = await _generate_fixtures(id=tournament_id, force=force, admin=admin)
     guard.store(result)
     return result

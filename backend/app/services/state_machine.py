@@ -22,15 +22,26 @@ TOURNAMENT_ALIASES: Dict[str, str] = {
 TOURNAMENT_TRANSITIONS: Dict[str, Set[str]] = {
     "draft": {"registration_open", "cancelled"},
     "registration_open": {"registration_closed", "draft", "cancelled"},
-    # fixture_published is reachable directly, because fixture_generation is not
-    # a value the database will store: the CHECK on tournaments.status allows
-    # draft, registration_open, registration_closed, scheduled, ongoing and
-    # completed, and fixture_generation aliases to none of them. Routing through
-    # it made the path from a closed registration to a running tournament
-    # impassable, which is why no tournament has ever left registration_open.
+    # fixture_published is reachable directly as well as through
+    # fixture_generation. Once migration 002 is applied the CHECK on
+    # tournaments.status accepts every name in this table, fixture_generation
+    # included; on the original schema (draft, registration_open,
+    # registration_closed, scheduled, ongoing, completed) it is written as its
+    # legacy synonym by set_tournament_status below. Either way a draw can go
+    # straight from a closed registration to a published bracket, which is the
+    # path generate_fixtures takes.
+    #
+    # in_progress is reachable from registration_closed and fixture_generation
+    # because a draw does not always move the status: fixtures generated while
+    # the tournament was still a draft leave it there, and the organiser then
+    # opens and closes registration around a bracket that already exists.
+    # POST /tournaments/{id}/start is the only caller that takes these two
+    # edges, and it refuses when the tournament has no matches, so a
+    # tournament cannot be running without a draw to run.
     "registration_closed": {"fixture_generation", "fixture_published",
-                            "registration_open", "cancelled"},
-    "fixture_generation": {"fixture_published", "registration_closed", "cancelled"},
+                            "in_progress", "registration_open", "cancelled"},
+    "fixture_generation": {"fixture_published", "in_progress",
+                           "registration_closed", "cancelled"},
     "fixture_published": {"in_progress", "fixture_generation", "cancelled"},
     "in_progress": {"completed", "fixture_published", "cancelled"},
     "completed": set(),          # terminal
@@ -42,7 +53,12 @@ MATCH_TRANSITIONS: Dict[str, Set[str]] = {
     "ready": {"live", "scheduled", "cancelled", "postponed"},
     "live": {"paused", "completed", "cancelled"},
     "paused": {"live", "completed", "cancelled"},
-    "completed": set(),          # only reachable again via a correction workflow
+    # Terminal as far as this table is concerned. The correction workflow that
+    # takes a match out of it is POST /matches/{id}/reopen, which deliberately
+    # does not go through validate_match_transition: it undoes a confirmed
+    # result under an owner's stated reason and audit trail, and is checked
+    # against the bracket it fed rather than against this table.
+    "completed": set(),
     "cancelled": {"scheduled"},
     "postponed": {"scheduled", "ready", "cancelled"},
 }
@@ -137,7 +153,19 @@ LEGACY_TOURNAMENT_NAMES: Dict[str, str] = {
 }
 
 
-def set_tournament_status(admin_db, tournament_id: str, target: str) -> Optional[str]:
+# The migration that makes every name in TOURNAMENT_TRANSITIONS storable. 002
+# widened the CHECK first; 012 re-asserts it (with 'cancelled', which the
+# original schema never had) alongside the champion and cancellation columns,
+# so it is the one to point an operator at whichever of the two they missed.
+LIFECYCLE_MIGRATION = "db/migrations/012_lifecycle.sql"
+
+
+def set_tournament_status(
+    admin_db,
+    tournament_id: str,
+    target: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     """
     Persist a tournament status, tolerating a database that predates migration 002.
 
@@ -146,25 +174,35 @@ def set_tournament_status(admin_db, tournament_id: str, target: str) -> Optional
     legacy synonym is written instead, so fixture generation and stage
     transitions still work on an un-migrated database.
 
+    `extra` is written in the same update as the status -- the champion of a
+    completed tournament, the reason for a cancelled one -- so the row never
+    shows a terminal state without the facts that go with it. Callers pass it
+    only when they know the columns exist; this function does not probe.
+
     Returns the status actually written, or None if neither name was accepted.
+    'completed' and 'cancelled' have no legacy synonym, so None there means the
+    CHECK constraint itself is out of date and LIFECYCLE_MIGRATION is needed.
     """
+    patch = dict(extra or {})
+    patch["status"] = target
     try:
-        admin_db.table("tournaments").update({"status": target}).eq("id", tournament_id).execute()
+        admin_db.table("tournaments").update(patch).eq("id", tournament_id).execute()
         return target
     except Exception as e:
         fallback = LEGACY_TOURNAMENT_NAMES.get(target)
         if not fallback:
-            logger.error(f"Could not set tournament {tournament_id} status to '{target}': {str(e)}")
+            logger.error(
+                f"Could not set tournament {tournament_id} status to '{target}': {str(e)}. "
+                f"Apply {LIFECYCLE_MIGRATION} if the status was rejected by the CHECK constraint."
+            )
             return None
         logger.warning(
             f"Status '{target}' rejected by the database; writing legacy synonym "
-            f"'{fallback}'. Apply db/migrations/002_serverless_architecture.sql "
-            f"to enable the full state vocabulary."
+            f"'{fallback}'. Apply {LIFECYCLE_MIGRATION} to enable the full state vocabulary."
         )
         try:
-            admin_db.table("tournaments").update({"status": fallback}).eq(
-                "id", tournament_id
-            ).execute()
+            patch["status"] = fallback
+            admin_db.table("tournaments").update(patch).eq("id", tournament_id).execute()
             return fallback
         except Exception as inner:
             logger.error(f"Legacy status fallback also failed for {tournament_id}: {str(inner)}")

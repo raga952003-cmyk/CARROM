@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.models.tournament import BaseCamelModel
@@ -115,6 +115,28 @@ class TieBreakSchema(BaseCamelModel):
     """The organiser's ruling on a match that finished level."""
     winner_id: str
     reason: str
+
+
+class MatchReopenSchema(BaseCamelModel):
+    """
+    Why a confirmed result is being taken back.
+
+    A confirmed result is the official record and may already have moved a
+    player into the next round, so undoing it is the one scoring action that
+    has to explain itself. The reason is checked here, at the boundary, rather
+    than in the handler: a blank string is a missing reason, not a short one.
+    """
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_must_say_something(cls, value: str) -> str:
+        if not (value or "").strip():
+            raise ValueError(
+                "A reason is required to reopen a confirmed result, so the "
+                "correction can be explained later."
+            )
+        return value.strip()
 
 
 class MatchSidesSchema(BaseCamelModel):
