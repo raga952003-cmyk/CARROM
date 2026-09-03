@@ -19,6 +19,7 @@ import {
   Loader2
 } from 'lucide-react';
 import { Tournament, Registration, Player, Team } from '../../types/tournament';
+import { TournamentAccess } from '../../services/accessService';
 import { useTournament } from '../../context/TournamentContext';
 import { useNotify } from '../../context/NotificationContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
@@ -26,9 +27,20 @@ import { ImportParticipantsModal } from './ImportParticipantsModal';
 
 interface RegistrationManagerProps {
   tournament: Tournament;
+  /**
+   * What the signed-in admin may do here.
+   *
+   * Approving an entry, rejecting one and closing registration are all
+   * manager-or-owner on the server. They were shown to any admin, so a scorer
+   * granted access to help run the boards was also offered the entry list's
+   * decisions -- and got a 403 from each.
+   */
+  access?: TournamentAccess;
 }
 
-export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tournament }) => {
+export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tournament, access }) => {
+  // Absent means nobody asked, which is not the same as being allowed.
+  const canManage = access ? access.canManage : false;
   const { 
     approveRegistration, 
     rejectRegistration, 
@@ -351,7 +363,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
             <span>Import Participants</span>
           </button>
 
-          {tournament.status === 'registration_open' && (
+          {tournament.status === 'registration_open' && canManage && (
             <button
               onClick={() => setIsCloseModalOpen(true)}
               disabled={isClosing}
@@ -517,7 +529,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
 
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end space-x-1">
-                          {reg.status !== 'approved' && (
+                          {reg.status !== 'approved' && canManage && (
                             <button
                               onClick={() => approve(reg)}
                               disabled={!!rowBusy}
@@ -530,7 +542,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                             </button>
                           )}
 
-                          {reg.status !== 'rejected' && (
+                          {reg.status !== 'rejected' && canManage && (
                             <button
                               onClick={() => setRejectTarget(reg)}
                               disabled={!!rowBusy}

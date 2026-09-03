@@ -832,6 +832,135 @@ def test_players_can_only_enter_themselves():
           by_organiser.status_code in (200, 201), detail(by_organiser))
 
 
+def test_a_wrong_winner_can_be_corrected():
+    """
+    The organiser's recovery path when the wrong player was clicked.
+
+    A won, B was recorded, and the result was confirmed. Confirming is final on
+    purpose -- it advances the winner and tells everyone -- so the way back is
+    to reopen, correct the board, and confirm again. Every step is an
+    organiser's, and every step is on the audit record with a reason.
+
+    Reopening used to leave winner_name behind. The match then sat live and
+    unconfirmed while still announcing the wrong player as the winner, which is
+    the exact thing the organiser reopened it to be rid of.
+    """
+    h = Harness()
+    admin = h.make_user("Correcting Organiser", "admin")
+    a = h.make_user("Correct A")
+    b = h.make_user("Correct B")
+    t = h.seed_tournament(admin, name="Correction")
+    m = h.seed_match(t, a, b, boards=1, round_name="Final", round_index=1)
+
+    def observation(winner):
+        loser = "player1" if winner == "player2" else "player2"
+        return {"boardWinner": winner, "coinsRemainingWith": loser,
+                "coinsRemaining": 5, "queenPocketedBy": "none",
+                "queenCoveredBy": "none", "p1Penalty": 0, "p2Penalty": 0}
+
+    h.post("/api/matches/%s/boards/1/submit" % m,
+           dict(observation("player2"), p1Score=0, p2Score=0, setNumber=1,
+                auditReason="scored"), user_id=admin)
+    h.post("/api/matches/%s/confirm" % m, {}, user_id=admin)
+    wrong = h.db.tables["matches"][0]
+    if not check("the wrong result is confirmed to begin with",
+                 wrong.get("result_confirmed") and wrong.get("winner_id") == b,
+                 wrong.get("winner_name")):
+        return
+
+    reopened = h.post("/api/matches/%s/reopen" % m,
+                      {"reason": "B was clicked by mistake; A won"}, user_id=admin)
+    check("the organiser can reopen a confirmed result",
+          reopened.status_code == 200, detail(reopened))
+    row = h.db.tables["matches"][0]
+    check("reopening puts the match back to live",
+          row.get("status") == "live" and not row.get("result_confirmed"),
+          "%s / %s" % (row.get("status"), row.get("result_confirmed")))
+    check("reopening takes the wrong winner off the match",
+          not row.get("winner_id") and not row.get("winner_name"),
+          "still %r" % row.get("winner_name"))
+
+    corrected = h.put(
+        "/api/matches/%s/boards/1?reason=B%%20was%%20clicked%%20by%%20mistake&override=true" % m,
+        dict(observation("player1"), boardNumber=1, setNumber=1,
+             status="completed", player1Score=5, player2Score=0),
+        user_id=admin)
+    check("the board can then be corrected", corrected.status_code == 200,
+          detail(corrected))
+
+    again = h.post("/api/matches/%s/confirm" % m, {}, user_id=admin)
+    check("and confirmed again", again.status_code == 200, detail(again))
+    row = h.db.tables["matches"][0]
+    check("the right player ends up the winner",
+          row.get("winner_id") == a, row.get("winner_name"))
+
+    reasons = " | ".join(e.get("reason") or "" for e in h.db.tables.get("score_audit_logs", []))
+    check("the reopen is on the record with its reason",
+          "clicked by mistake" in reasons, reasons[:200])
+    check("and so is the override of a confirmed board",
+          "OVERRIDE" in reasons, reasons[:200])
+
+
+def test_correcting_a_classic_board_is_idempotent():
+    """
+    Correcting a board twice must not score it twice.
+
+    Classic scoring STORES the queen-inclusive total, and the correction form
+    prefills from that stored value. The correction then re-applied the queen
+    to it, so a board won 21-3 with the queen went 24-3, then 27-3, then 30-3,
+    climbing by the queen's worth every time anybody opened the board and
+    pressed Save. Nothing refused it -- the ceiling is 60 and the
+    both-reached-target check needs 29 each -- and the board WINNER stayed
+    right, because that is declared rather than compared. It is the points that
+    rotted, and points are the league's tie-break.
+    """
+    h = Harness()
+    admin = h.make_user("Classic Organiser", "admin")
+    t = h.seed_tournament(admin, name="Classic Scoring",
+                          rules={"scoringMode": "classic", "queenPoints": 3})
+    m = h.seed_match(t, h.make_user("Classic A"), h.make_user("Classic B"), boards=1)
+
+    h.post("/api/matches/%s/boards/1/submit" % m,
+           {"p1Score": 10, "p2Score": 4, "setNumber": 1,
+            "queenClaimedBy": "player1", "queenCovered": True,
+            "auditReason": "scored"}, user_id=admin)
+
+    def board():
+        return [b for b in h.db.tables["boards"] if b["match_id"] == m][0]
+
+    check("ten coins and a covered queen is stored as thirteen",
+          board()["player1_score"] == 13, board()["player1_score"])
+
+    h.post("/api/matches/%s/confirm" % m, {}, user_id=admin)
+    h.post("/api/matches/%s/reopen" % m, {"reason": "checking"}, user_id=admin)
+
+    for attempt in (1, 2, 3):
+        current = board()
+        h.put("/api/matches/%s/boards/1?reason=restated&override=true" % m,
+              {"boardNumber": 1, "setNumber": 1, "status": "completed",
+               "player1Score": current["player1_score"],
+               "player2Score": current["player2_score"],
+               "queenClaimedBy": "player1", "queenCovered": True}, user_id=admin)
+        check("restating the board unchanged leaves the score alone (pass %d)" % attempt,
+              board()["player1_score"] == 13, board()["player1_score"])
+
+    # And a real correction still moves it: twelve coins plus the queen.
+    h.put("/api/matches/%s/boards/1?reason=A%%20had%%20twelve&override=true" % m,
+          {"boardNumber": 1, "setNumber": 1, "status": "completed",
+           "player1Score": 15, "player2Score": 4,
+           "queenClaimedBy": "player1", "queenCovered": True}, user_id=admin)
+    check("a real correction is still recorded", board()["player1_score"] == 15,
+          board()["player1_score"])
+
+    # Taking the queen away takes its points with it.
+    h.put("/api/matches/%s/boards/1?reason=no%%20queen&override=true" % m,
+          {"boardNumber": 1, "setNumber": 1, "status": "completed",
+           "player1Score": 15, "player2Score": 4,
+           "queenClaimedBy": "none", "queenCovered": False}, user_id=admin)
+    check("removing the queen removes its points", board()["player1_score"] == 12,
+          board()["player1_score"])
+
+
 SUITES = [
     ("identity branches", test_identity_branches),
     ("profile-less admin scoring", test_profileless_admin_scoring),
@@ -850,6 +979,8 @@ SUITES = [
     ("sign-in role must match", test_signin_role_must_match),
     ("who am I follows the profile", test_me_follows_the_profile),
     ("players enter only themselves", test_players_can_only_enter_themselves),
+    ("a wrong winner can be corrected", test_a_wrong_winner_can_be_corrected),
+    ("classic corrections are idempotent", test_correcting_a_classic_board_is_idempotent),
 ]
 
 

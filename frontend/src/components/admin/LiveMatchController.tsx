@@ -6,6 +6,7 @@ import { useNotify } from '../../context/NotificationContext';
 import { apiClient } from '../../utils/apiClient';
 import confetti from 'canvas-confetti';
 import { Tournament, Match, BoardScore, ScoreAuditLog } from '../../types/tournament';
+import { TournamentAccess } from '../../services/accessService';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { ReasonModal } from '../common/ReasonModal';
@@ -20,6 +21,17 @@ interface LiveMatchControllerProps {
   tournament: Tournament;
   match: Match;
   onBack: () => void;
+  /**
+   * What the signed-in admin may do here.
+   *
+   * Scoring is a scorer's job; taking a confirmed result back -- and with it
+   * pulling a player out of the round they were advanced into -- is the
+   * organiser's. The server draws that line (match.reopen is not in
+   * SCORER_ACTIONS) and this screen did not, so the one control that exists to
+   * undo a mistake was offered to the person most likely to have made it, and
+   * answered 403.
+   */
+  access?: TournamentAccess;
 }
 
 /**
@@ -42,7 +54,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   match,
   onBack,
   notice,
-  onDismissNotice
+  onDismissNotice,
+  access
 }) => {
   const { 
     startMatch, 
@@ -57,6 +70,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     allPlayers,
     role
   } = useTournament();
+
+  // Undoing an official result is the organiser's call, not the scorer's --
+  // the server keeps match.reopen out of SCORER_ACTIONS. Offering it to
+  // everyone meant the person most likely to have made the mistake was the one
+  // person who could not fix it, and found that out from a 403.
+  const canReopen = role === 'admin' && (access ? access.canManage : false);
 
   const rules = tournament.rules || ({} as any);
   const totalSets = Math.max(1, match.numberOfSets || rules.numberOfSets || 1);
@@ -778,7 +797,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             {/* A confirmed result is not the end of the road: a board entered
                 against the wrong player is found from the points table, after
                 confirmation. Reopening is the correction workflow. */}
-            {role === 'admin' && (
+            {canReopen && (
               <button
                 id="reopen-result-btn"
                 onClick={openReopen}
@@ -860,15 +879,19 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-700">
             <span className="flex items-center gap-1.5">
               <AlertCircle className="w-3.5 h-3.5 text-gray-500 shrink-0" />
-              This result is confirmed, so its boards are locked. To correct a board, reopen the result first.
+              {canReopen
+                ? 'This result is confirmed, so its boards are locked. To correct a board — the wrong player recorded as the winner, say — reopen the result first.'
+                : 'This result is confirmed, so its boards are locked. Only the organiser who runs this tournament can reopen it to be corrected.'}
             </span>
-            <button
-              onClick={openReopen}
-              disabled={!!busy}
-              className="font-bold text-[#0B5D3B] hover:underline disabled:opacity-40"
-            >
-              Reopen result
-            </button>
+            {canReopen && (
+              <button
+                onClick={openReopen}
+                disabled={!!busy}
+                className="font-bold text-[#0B5D3B] hover:underline disabled:opacity-40"
+              >
+                Reopen result
+              </button>
+            )}
           </div>
         )}
 

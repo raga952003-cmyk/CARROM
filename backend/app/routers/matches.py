@@ -6,7 +6,7 @@ from app.models.match import (
 )
 from app.utils.security import verify_admin
 from app.services.scoring_engine import (
-    recalculate_match_scores, apply_queen_points, board_result, scoring_mode,
+    recalculate_match_scores, apply_queen_points, queen_award, board_result, scoring_mode,
     apply_set_results, summarise_sets, set_layout,
 )
 from app.services.notification_service import fan_out_notification, resolve_tournament_audience
@@ -529,8 +529,24 @@ async def update_board(
                 data.player1_score, data.player2_score, match_data,
                 data.queen_claimed_by,
             )
+            # The classic board STORES the queen-inclusive score, and a
+            # correction restates what is on the screen -- which is that stored
+            # total, not the coin count the original submission took. Applying
+            # the award to it again added the queen a second time, and a third,
+            # and a fourth: a board won 21-3 with the queen was stored 24-3,
+            # then 27-3 on the first correction, 30-3 on the next, with nothing
+            # refusing it. The ceiling is 60 and both-reached-target needs 29
+            # each, so it climbed in silence. Board wins stayed right, because
+            # the winner is declared; it is the POINTS that rotted, and points
+            # are the league's tie-break.
+            #
+            # So take back the award the board is already carrying, then apply
+            # the one the correction states. Restating a board unchanged is now
+            # what it looks like: no change.
+            had1, had2, _ = queen_award(
+                pb.get("queen_claimed_by"), pb.get("queen_covered"), corrected_rules)
             c_p1, c_p2, _ = apply_queen_points(
-                data.player1_score, data.player2_score,
+                data.player1_score - had1, data.player2_score - had2,
                 data.queen_claimed_by, data.queen_covered, corrected_rules,
             )
 
@@ -1098,6 +1114,15 @@ async def reopen_match(id: str, data: MatchReopenSchema, admin = Depends(verify_
             "result_confirmed_at": None,
             "status": "live",
             "match_completed_at": None,
+            # The winner goes too. Confirming recomputes it from the boards, so
+            # keeping it here bought nothing and cost the one thing the
+            # organiser reopened the match to be rid of: a match sitting live
+            # and unconfirmed while still announcing the wrong player as the
+            # winner, on the fixture card and on the public board. The slot
+            # clearing below reads `match`, which was fetched before this
+            # write, so it still knows who to pull out of the next round.
+            "winner_id": None,
+            "winner_name": None,
         }
         res = admin_db.table("matches").update(reopened).eq("id", id).execute()
 

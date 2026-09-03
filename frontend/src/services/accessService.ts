@@ -59,9 +59,27 @@ export interface GrantableAdmin {
   email: string;
 }
 
-/** Assumed when the check itself fails, so a lookup problem cannot lock an admin out of their own screen. */
+/**
+ * Assumed when the check itself fails.
+ *
+ * Permissive on purpose: a lookup that failed says nothing about what the
+ * caller may do, and locking an organiser out of their own tournament because
+ * one request timed out is the worse of the two mistakes. The server is still
+ * the one that decides -- every one of these controls is checked again there,
+ * and refused with a message naming the owner -- so the cost of being wrong
+ * this way is a button that answers 403, not an action that should not have
+ * happened.
+ *
+ * `status` is 'unknown' rather than a real status, so a screen can tell "we
+ * could not find out" from "you are not allowed".
+ */
 export const PERMISSIVE_ACCESS: TournamentAccess = {
   isOwner: false, role: null, canManage: true, canScore: true, enforced: false, status: 'unknown' as AccessStatus,
+};
+
+/** What an admin who is definitively not let in may do here: nothing. */
+export const NO_ACCESS: TournamentAccess = {
+  isOwner: false, role: null, canManage: false, canScore: false, enforced: true, status: null,
 };
 
 export const accessService = {

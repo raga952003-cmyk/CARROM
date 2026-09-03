@@ -387,6 +387,7 @@ export const AdminDashboard: React.FC = () => {
           <LiveMatchController
             tournament={currentTournament}
             match={liveActiveMatch}
+            access={access}
             onBack={() => setActiveMatch(null)}
             notice={matchNotice}
             onDismissNotice={() => setMatchNotice('')}
@@ -782,12 +783,13 @@ export const AdminDashboard: React.FC = () => {
                     // two tournaments swapped their remembered filters over.
                     key={currentTournament.id}
                     tournament={currentTournament}
+                    access={access}
                     onOpenMatch={(m) => setActiveMatch(m)}
                   />
                 )}
 
                 {activeTab === 'registrations' && (
-                  <RegistrationManager tournament={currentTournament} />
+                  <RegistrationManager tournament={currentTournament} access={access} />
                 )}
 
                 {activeTab === 'players' && (
@@ -841,7 +843,9 @@ export const AdminDashboard: React.FC = () => {
                       ) : (
                         <button
                           onClick={startEditing}
-                          className="w-full sm:w-auto px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all"
+                          disabled={!access.canManage}
+                          title={access.canManage ? undefined : 'Only the tournament owner can change the settings.'}
+                          className="w-full sm:w-auto px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           Edit Rules & Venue Details
                         </button>

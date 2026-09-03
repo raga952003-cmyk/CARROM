@@ -2,6 +2,7 @@ import React, { useState, useMemo, useDeferredValue, useEffect } from 'react';
 import { compareMatches } from '../../utils/matchOrder';
 import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle, Search, X, Loader2 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
+import { TournamentAccess } from '../../services/accessService';
 import { useTournament } from '../../context/TournamentContext';
 import { useNotify } from '../../context/NotificationContext';
 import { apiClient } from '../../utils/apiClient';
@@ -12,6 +13,20 @@ import { AddMatchModal } from './AddMatchModal';
 interface FixtureScheduleViewProps {
   tournament: Tournament;
   onOpenMatch: (match: Match) => void;
+  /**
+   * What the signed-in admin may do here, from the owner's access record.
+   *
+   * Everything in the toolbar below -- drawing the fixtures, scheduling,
+   * publishing, adding a match -- is manager-or-owner on the server. It was
+   * gated on `role === 'admin'`, which is a different question: an admin who
+   * does not own this tournament, or who was granted SCORER access to help
+   * out, saw every one of those buttons and got a 403 from each. A refused
+   * request is written to the browser console before any JavaScript can
+   * intervene, so the only way to be rid of it is not to send it.
+   *
+   * Omitted by the player dashboard, which renders this read-only anyway.
+   */
+  access?: TournamentAccess;
 }
 
 /**
@@ -48,7 +63,8 @@ type ActionKey = 'generate' | 'schedule' | 'publish' | 'reschedule';
 
 export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   tournament,
-  onOpenMatch
+  onOpenMatch,
+  access
 }) => {
   const {
     generateFixturesForTournament,
@@ -121,6 +137,11 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const [playerSearch, setPlayerSearch] = useState(
     () => lastFilters.get(tournament.id)?.search ?? '');
 
+
+  // Manager or owner. Absent access means this is the player dashboard, which
+  // never shows these controls anyway; `role` still has the final say so a
+  // player cannot reach them through a stale access object.
+  const canManage = role === 'admin' && (access ? access.canManage : false);
 
   const allMatches = tournament.matches || [];
 
@@ -240,7 +261,13 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
 
         {/* Action Controls */}
         <div className="flex flex-wrap items-center gap-2">
-          {role === 'admin' && (
+          {role === 'admin' && !canManage && (
+            <span className="text-[11px] text-gray-500 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 max-w-sm">
+              The draw and the schedule belong to whoever runs this tournament.
+              Ask them for manager access from the Access tab.
+            </span>
+          )}
+          {canManage && (
             <>
               {/* Rest buffer slider/selector */}
               <div className="flex items-center bg-gray-50 px-2.5 py-1.5 rounded-xl border border-gray-200 text-xs">
@@ -490,7 +517,7 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           <p className="text-xs text-gray-500 max-w-md mx-auto mb-4">
             Click "Generate Fixtures" to automatically compute all round-robin pairings or seeded knockout brackets according to tournament rules.
           </p>
-          {role === 'admin' && (
+          {canManage && (
             <button
               onClick={runGenerate}
               disabled={!!busy}
