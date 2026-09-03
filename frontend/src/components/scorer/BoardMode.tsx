@@ -4,6 +4,8 @@ import { ArrowLeft, Minus, Plus, Play, Check, Crown, Loader2 } from 'lucide-reac
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { apiClient } from '../../utils/apiClient';
+import { messageOf } from '../../context/NotificationContext';
+import { ReasonModal } from '../common/ReasonModal';
 import { exitToApp } from '../../utils/useHashRoute';
 import { MatchTimer } from '../admin/MatchTimer';
 import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from '../admin/BoardResultForm';
@@ -12,6 +14,57 @@ interface BoardModeProps {
   boardNumber: number;
   tournamentId?: string;
 }
+
+/**
+ * One score, with a big target either side of it for a thumb.
+ *
+ * Declared here rather than inside BoardMode. A component defined during a
+ * render is a NEW component type on every render, so React unmounted and
+ * rebuilt this whole subtree each time -- which meant the number input was
+ * destroyed and recreated on every keystroke, taking the focus and the caret
+ * with it. Entering a two-digit score meant tapping the field again between
+ * the digits. It happened on every realtime refresh too, mid-entry.
+ *
+ * The setter is passed, not a plain callback: each tap must derive from the
+ * latest value. With `onChange(value + 1)` every tap in a quick burst read
+ * the same rendered `value`, so rapid tapping on a phone silently dropped
+ * increments.
+ */
+const Stepper: React.FC<{
+  label: string;
+  value: number;
+  onChange: React.Dispatch<React.SetStateAction<number>>;
+  highlight: boolean;
+}> = ({ label, value, onChange, highlight }) => (
+  <div className={`rounded-2xl border-2 p-3 ${highlight ? 'border-[#0B5D3B] bg-emerald-50/60' : 'border-gray-200'}`}>
+    <div className="text-[11px] font-bold text-gray-700 truncate mb-2">{label}</div>
+    <div className="flex items-center justify-between gap-2">
+      <button
+        type="button"
+        aria-label={`Decrease ${label}`}
+        onClick={() => onChange(v => Math.max(0, v - 1))}
+        className="w-12 h-12 rounded-xl bg-gray-100 active:bg-gray-200 flex items-center justify-center shrink-0"
+      >
+        <Minus className="w-5 h-5" />
+      </button>
+      <input
+        type="number"
+        inputMode="numeric"
+        value={value}
+        onChange={e => onChange(Math.max(0, Number(e.target.value) || 0))}
+        className="w-full text-center text-3xl font-black text-gray-900 bg-transparent outline-hidden"
+      />
+      <button
+        type="button"
+        aria-label={`Increase ${label}`}
+        onClick={() => onChange(v => v + 1)}
+        className="w-12 h-12 rounded-xl bg-[#0B5D3B] text-white active:bg-[#08472d] flex items-center justify-center shrink-0"
+      >
+        <Plus className="w-5 h-5" />
+      </button>
+    </div>
+  </div>
+);
 
 /**
  * Scoring screen for one board (spec 73).
@@ -23,7 +76,7 @@ interface BoardModeProps {
 export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId }) => {
   const {
     tournaments, currentTournament, startMatch, submitBoardScore,
-    confirmMatchResult, refreshData, addBoardToMatch,
+    confirmMatchResult, addBoardToMatch,
   } = useTournament();
 
   const tournament: Tournament | undefined =
@@ -45,6 +98,9 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   // tenth -- and React tears the screen down with "Rendered more hooks than
   // during the previous render". That is the umpire's phone, mid-match.
   const [obs, setObs] = useState<BoardObservation>(emptyObservation);
+  // The side a level match is about to be awarded to; the ReasonModal is open
+  // while this is set. Up here with the others for the same reason as `obs`.
+  const [tieBreakTarget, setTieBreakTarget] = useState<{ id: string; name: string } | null>(null);
 
   // Matches on this board that still need playing, in running order.
   const queue = useMemo(() => {
@@ -60,27 +116,47 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   const match: Match | undefined =
     queue.find(m => m.status === 'live' || m.status === 'paused') || queue[0];
 
+  // The board waiting to be scored, taken in set order.
+  //
+  // A board is identified by its set AND its number -- numbering restarts at 1
+  // in every set -- and this used to pick by number alone and submit without a
+  // set. The server defaults a missing set to 1, so the moment a multi-set
+  // match reached set 2, scoring its board 1 rewrote board 1 of SET 1: a
+  // played result silently replaced, and the set the umpire was actually on
+  // never filled.
   const activeBoard = useMemo(() => {
     if (!match) return null;
-    const boards = match.boards || [];
+    const boards = [...(match.boards || [])].sort((a, b) =>
+      ((a.setNumber || 1) - (b.setNumber || 1)) || (a.boardNumber - b.boardNumber));
     return boards.find(b => b.status === 'in_progress')
       || boards.find(b => b.status === 'pending')
       || null;
   }, [match]);
 
+  // A new board, or a new match, starts blank. `obs` was left out of this:
+  // under remaining-coins scoring the classic fields reset and the observation
+  // -- the winner, the queen, the coins left on the board -- did not, so it
+  // carried into the next fixture on this board and the umpire had to notice
+  // and clear it themselves.
   useEffect(() => {
     setP1(0); setP2(0); setQueen('none'); setError('');
+    setObs(emptyObservation);
   }, [match?.id, activeBoard?.boardNumber]);
 
   const target = match?.targetPoints || tournament?.rules?.targetScore || 29;
 
-  const run = async (fn: () => Promise<void>, success?: string) => {
+  // Says whether the write went through, so a modal can stay open on a refusal
+  // and close only on success.
+  const run = async (fn: () => Promise<unknown>, success?: string): Promise<boolean> => {
+    if (busy) return false;
     setBusy(true); setError(''); setNote('');
     try {
       await fn();
       if (success) setNote(success);
-    } catch (e: any) {
-      setError(e?.message || 'That did not work.');
+      return true;
+    } catch (e) {
+      setError(messageOf(e, 'That did not work.'));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -110,47 +186,16 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
 
   const decided = match.status === 'completed' || !!match.winnerId;
-  // The setter is passed, not a plain callback: each tap must derive from the
-  // latest value. With `onChange(value + 1)` every tap in a quick burst read
-  // the same rendered `value`, so rapid tapping on a phone silently dropped
-  // increments.
-  const Stepper = ({
-    label, value, onChange, highlight,
-  }: {
-    label: string;
-    value: number;
-    onChange: React.Dispatch<React.SetStateAction<number>>;
-    highlight: boolean;
-  }) => (
-    <div className={`rounded-2xl border-2 p-3 ${highlight ? 'border-[#0B5D3B] bg-emerald-50/60' : 'border-gray-200'}`}>
-      <div className="text-[11px] font-bold text-gray-700 truncate mb-2">{label}</div>
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          aria-label={`Decrease ${label}`}
-          onClick={() => onChange(v => Math.max(0, v - 1))}
-          className="w-12 h-12 rounded-xl bg-gray-100 active:bg-gray-200 flex items-center justify-center shrink-0"
-        >
-          <Minus className="w-5 h-5" />
-        </button>
-        <input
-          type="number"
-          inputMode="numeric"
-          value={value}
-          onChange={e => onChange(Math.max(0, Number(e.target.value) || 0))}
-          className="w-full text-center text-3xl font-black text-gray-900 bg-transparent outline-hidden"
-        />
-        <button
-          type="button"
-          aria-label={`Increase ${label}`}
-          onClick={() => onChange(v => v + 1)}
-          className="w-12 h-12 rounded-xl bg-[#0B5D3B] text-white active:bg-[#08472d] flex items-center justify-center shrink-0"
-        >
-          <Plus className="w-5 h-5" />
-        </button>
-      </div>
-    </div>
-  );
+
+  const awardTieBreak = async (reason: string) => {
+    if (!tieBreakTarget) return;
+    const { id: winnerId, name } = tieBreakTarget;
+    const ok = await run(
+      () => apiClient.post(`/matches/${match.id}/tie-break`, { winnerId, reason }),
+      `Awarded to ${name}.`
+    );
+    if (ok) setTieBreakTarget(null);
+  };
 
   return (
     <Shell boardNumber={boardNumber} tournamentName={tournament.name}>
@@ -233,20 +278,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
               ].filter(p => p.id).map(p => (
                 <button
                   key={p.id}
-                  onClick={async () => {
-                    const reason = window.prompt(
-                      `Award this match to ${p.name}?
-
-Say why — it is recorded with the result.`,
-                      'Umpire ruling'
-                    );
-                    if (reason === null || !reason.trim()) return;
-                    await run(
-                      () => apiClient.post(`/matches/${match.id}/tie-break`,
-                        { winnerId: p.id, reason: reason.trim() }),
-                      `Awarded to ${p.name}.`
-                    );
-                  }}
+                  onClick={() => { setError(''); setTieBreakTarget({ id: p.id!, name: p.name }); }}
                   disabled={busy}
                   className="py-3 rounded-2xl bg-white border-2 border-amber-300 text-gray-800 font-bold text-xs disabled:opacity-50"
                 >
@@ -337,9 +369,13 @@ Say why — it is recorded with the result.`,
                 ? obs.winner === 'none' && obs.queenPocketedBy === 'none'
                 : p1 === 0 && p2 === 0)}
               onClick={() => run(async () => {
+                // Which set the board belongs to travels with it; without it
+                // the server writes to set 1 whatever the umpire is scoring.
+                const setNumber = activeBoard.setNumber;
                 if (usesRemainingCoins) {
                   const preview = previewBoard(obs, rules);
                   await submitBoardScore(tournament.id, match.id, activeBoard.boardNumber, {
+                    ...(setNumber ? { setNumber } : {}),
                     p1Score: preview.p1,
                     p2Score: preview.p2,
                     boardWinner: obs.winner,
@@ -354,6 +390,7 @@ Say why — it is recorded with the result.`,
                   setObs(emptyObservation);
                 } else {
                   await submitBoardScore(tournament.id, match.id, activeBoard.boardNumber, {
+                    ...(setNumber ? { setNumber } : {}),
                     p1Score: p1, p2Score: p2,
                     queenClaimedBy: queen, queenCovered,
                     auditReason: 'Board mode',
@@ -384,7 +421,6 @@ Say why — it is recorded with the result.`,
               disabled={busy}
               onClick={() => run(async () => {
                 await confirmMatchResult(tournament.id, match.id);
-                await refreshData();
               }, 'Result confirmed. Next match loaded.')}
               className="w-full py-4 rounded-2xl bg-[#0B5D3B] text-white font-black text-sm disabled:opacity-50"
             >
@@ -396,6 +432,21 @@ Say why — it is recorded with the result.`,
         <div className="pt-2 text-[11px] text-gray-500 text-center">
           {queue.length - 1} more match{queue.length - 1 === 1 ? '' : 'es'} queued on this board
         </div>
+
+        {/* The page-level error box sits behind this overlay while it is open,
+            so the same message is passed in to be read here. */}
+        <ReasonModal
+          isOpen={!!tieBreakTarget}
+          onClose={() => setTieBreakTarget(null)}
+          onConfirm={awardTieBreak}
+          title={`Award this match to ${tieBreakTarget?.name || ''}?`}
+          description="The scores are level, so this is the umpire's ruling. Say why — it is recorded with the result."
+          placeholder="e.g. Umpire ruling — opponent conceded the deciding board"
+          confirmLabel={`Award to ${tieBreakTarget?.name || ''}`}
+          busy={busy}
+          error={tieBreakTarget ? error : ''}
+          variant="warning"
+        />
       </div>
     </Shell>
   );

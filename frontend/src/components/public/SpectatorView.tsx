@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { compareMatches } from '../../utils/matchOrder';
 import { Trophy, Clock, MapPin, Search, RefreshCw, Radio } from 'lucide-react';
 import { Tournament, Match, StandingsBreakdown } from '../../types/tournament';
@@ -25,24 +25,48 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  const loadStandings = async (id: string) => {
+    if (!id) return;
+    setStandings(await tournamentService.getStandings(id).catch(() => null) as any);
+  };
+
+  // Whether a load is under way or done, so the subscription's pull on connect
+  // does not repeat one this view has already started for itself.
+  //
+  // Started, not finished: the socket comes up in a few hundred milliseconds
+  // and reading the whole draw takes longer than that, so a flag set on
+  // completion would still be false when the pull arrives and would skip
+  // nothing. Cleared again if the load fails, so the pull is still there to
+  // rescue a screen that has nothing on it.
+  const started = useRef(false);
+
   const load = async () => {
+    started.current = true;
     try {
       const list = await tournamentService.getAllTournaments();
       setTournaments(list);
       const id = selectedId || tournamentId || list[0]?.id || '';
       if (id !== selectedId) setSelectedId(id);
-      if (id) {
-        setStandings(await tournamentService.getStandings(id).catch(() => null) as any);
-      }
+      await loadStandings(id);
       setError('');
     } catch (e: any) {
+      started.current = false;
       setError(e?.message || 'Could not load tournaments.');
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [selectedId]);
+  // The draw, once. This used to be keyed on `selectedId`, which load() sets
+  // itself the first time it runs -- so opening the board fetched every
+  // tournament, every fixture and every board, then immediately did it again
+  // because resolving the selection had changed the dependency. The heaviest
+  // read in the app, twice, on every visit to a public page.
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+
+  // Switching tournament needs nothing but its table: the list response
+  // already carries every tournament's fixtures.
+  useEffect(() => { loadStandings(selectedId); /* eslint-disable-next-line */ }, [selectedId]);
 
   // Live updates without a session: the anon key plus RLS is exactly what
   // Realtime is for -- when it is configured. It was not, on the deployed site,
@@ -60,7 +84,14 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
     const stopPolling = () => { if (poll) { clearInterval(poll); poll = null; } };
 
     const handle = subscribeToTournamentData({
-      onChange: load,
+      onChange: ({ observedAt }) => {
+        // observedAt 0 is the pull the subscription does on connect, so a
+        // screen that opens with the socket is current from its first frame.
+        // This one already loaded on mount a moment earlier, so taking that
+        // pull as well read the entire draw twice for every visitor. A real
+        // change still reloads, and a mount that has not landed is not skipped.
+        if (observedAt || !started.current) load();
+      },
       onStatus: status => {
         const live = status === 'live';
         setIsLive(live);

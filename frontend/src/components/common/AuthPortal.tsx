@@ -27,7 +27,6 @@ export const AuthPortal: React.FC = () => {
   const [activeRole, setActiveRole] = useState<'player' | 'admin'>('player');
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
   const [errorMsg, setErrorMsg] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [forgotSent, setForgotSent] = useState(false);
   const [forgotNote, setForgotNote] = useState('');
@@ -39,12 +38,10 @@ export const AuthPortal: React.FC = () => {
   const [phone, setPhone] = useState('');
   const [club, setClub] = useState('');
   const [city, setCity] = useState('');
-  const [securityCode, setSecurityCode] = useState('');
 
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
-    setSuccessMsg('');
     setLoading(true);
 
     try {
@@ -54,14 +51,13 @@ export const AuthPortal: React.FC = () => {
           setErrorMsg(res.error || 'Invalid credentials');
         }
       } else {
-        // Sign up
-        if (activeRole === 'admin' && securityCode !== 'AICF2026' && securityCode !== '') {
-          // Optional security check for admin sign up during mock/dev
-          setErrorMsg('Invalid Administrator Security Key');
-          setLoading(false);
-          return;
-        }
-
+        // The chosen tab is the role, and it is sent. There used to be a
+        // security key checked here against a literal in this very file --
+        // which is not a check: the string shipped in the bundle, the
+        // comparison passed on an EMPTY key anyway, and the role it was
+        // guarding was discarded before the request went out, so registering
+        // as an admin produced a player account and signed you into it
+        // without a word.
         const metadata = {
           name,
           phone,
@@ -71,8 +67,9 @@ export const AuthPortal: React.FC = () => {
 
         const res = await signUpUser(email, password, activeRole, metadata);
         if (res.success) {
-          setSuccessMsg('Account created successfully! You can now log in.');
-          setAuthMode('signin');
+          // Signing up signs you in; it always did, and the message telling
+          // people to go and log in was never reachable -- the app had already
+          // moved to their dashboard behind it.
           setPassword('');
         } else {
           setErrorMsg(res.error || 'Failed to create account');
@@ -143,7 +140,6 @@ export const AuthPortal: React.FC = () => {
               onClick={() => {
                 setActiveRole('player');
                 setErrorMsg('');
-                setSuccessMsg('');
               }}
               className={`flex-1 py-3 text-xs font-bold flex items-center justify-center gap-1.5 border-b-2 transition-all ${
                 activeRole === 'player'
@@ -158,7 +154,6 @@ export const AuthPortal: React.FC = () => {
               onClick={() => {
                 setActiveRole('admin');
                 setErrorMsg('');
-                setSuccessMsg('');
               }}
               className={`flex-1 py-3 text-xs font-bold flex items-center justify-center gap-1.5 border-b-2 transition-all ${
                 activeRole === 'admin'
@@ -204,12 +199,6 @@ export const AuthPortal: React.FC = () => {
               <div className="p-3 bg-red-50 border border-red-200 text-red-800 text-[11px] font-medium rounded-xl flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-600 shrink-0" />
                 <span>{errorMsg}</span>
-              </div>
-            )}
-            {successMsg && (
-              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-medium rounded-xl flex items-center gap-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 shrink-0" />
-                <span>{successMsg}</span>
               </div>
             )}
 
@@ -280,25 +269,7 @@ export const AuthPortal: React.FC = () => {
                     </div>
                   )}
 
-                  {activeRole === 'admin' && (
-                    <div>
-                      <label className="block font-bold text-gray-700 mb-1 flex justify-between">
-                        <span>Admin Security Key</span>
-                        <span className="text-[10px] text-gray-400 font-normal">Defaults to none / any</span>
-                      </label>
-                      <div className="relative">
-                        <KeyRound className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                        <input
-                          type="password"
-                          value={securityCode}
-                          onChange={e => setSecurityCode(e.target.value)}
-                          autoComplete="off"
-                          className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B5D3B]"
-                          placeholder="Enter security key if required"
-                        />
-                      </div>
-                    </div>
-                  )}
+
                 </>
               )}
 
@@ -398,7 +369,6 @@ export const AuthPortal: React.FC = () => {
                 onClick={() => {
                   setAuthMode(authMode === 'signin' ? 'signup' : 'signin');
                   setErrorMsg('');
-                  setSuccessMsg('');
                 }}
                 className="text-[#0B5D3B] font-bold hover:underline capitalize"
               >

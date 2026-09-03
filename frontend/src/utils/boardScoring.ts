@@ -52,6 +52,7 @@ export function previewBoard(
   const who = (side: Side) => (side === 'none' ? 'nobody' : names[side]);
   const queenPoints = rules.queenPoints ?? 3;
   const coinValue = rules.coinValue ?? 1;
+  const coinsPerSide = rules.coinsPerSide ?? 9;
   const mustCover = rules.queenMustBeCovered !== false;
   const awardTo = rules.queenAwardTo ?? 'coverer';
   const warnings: string[] = [];
@@ -62,6 +63,16 @@ export function previewBoard(
       warnings.push(`${who(obs.winner)} is marked as both the board winner and the side holding the coins left — no base points.`);
     } else {
       base = Math.max(0, obs.coinsRemaining);
+      // Mirrors the same clamp in board_result(): a side cannot have more
+      // coins left than it started with, and an unclamped count was scored
+      // verbatim — a mistyped 19 became a 19-point board.
+      if (base > coinsPerSide) {
+        warnings.push(
+          `${obs.coinsRemaining} coins remaining is more than the ${coinsPerSide} ` +
+          `a side can hold — scored ${coinsPerSide}.`
+        );
+        base = coinsPerSide;
+      }
     }
   }
 

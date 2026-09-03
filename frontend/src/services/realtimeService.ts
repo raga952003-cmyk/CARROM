@@ -21,15 +21,43 @@ const WATCHED_TABLES = [
   'notifications',
 ] as const;
 
+export type WatchedTable = (typeof WATCHED_TABLES)[number];
+
 export type RealtimeStatus = 'connecting' | 'live' | 'polling' | 'disabled';
 
 export interface RealtimeHandle {
   unsubscribe: () => void;
 }
 
+/** What the debounce window saw, so the caller can re-read only what moved. */
+export interface RealtimeChange {
+  /** The watched tables that changed, deduplicated. */
+  tables: WatchedTable[];
+  /**
+   * When the LAST change in this window reached us (Date.now()).
+   *
+   * The caller uses this to recognise the echo of its own write: a read it
+   * issued after this instant already queried a database where every change in
+   * the window was committed, so re-reading would spend a round trip to learn
+   * what it holds.
+   *
+   * The last and not the first, which is the whole point. A window can hold
+   * our own write AND somebody else's arriving just after it: stamped by the
+   * first, our own follow-up read would look like it covered both, and the
+   * other person's change would be dropped. On a live connection there is no
+   * poll to pick it up again, so it would sit there stale until something
+   * unrelated happened to change.
+   *
+   * Receipt time, not the database's commit timestamp — the two clocks are not
+   * the same one, and the cost of being wrong this way is a redundant read
+   * rather than a stale screen.
+   */
+  observedAt: number;
+}
+
 interface SubscribeOptions {
   /** Called (debounced) whenever any watched table changes. */
-  onChange: () => void;
+  onChange: (change: RealtimeChange) => void;
   /** Called when the connection state changes, so the UI can show live vs fallback. */
   onStatus?: (status: RealtimeStatus) => void;
   /** Debounce window in ms — a score submit touches several tables at once. */
@@ -54,14 +82,27 @@ export function subscribeToTournamentData({
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
+  // What the current debounce window has seen. Which tables moved decides what
+  // the caller re-reads: a board score must not cost a re-read of the player
+  // directory as well.
+  let pendingTables = new Set<WatchedTable>();
+  let pendingLatest = 0;
 
   // Several rows change per score submission; coalesce them into one refresh.
-  const scheduleRefresh = () => {
+  const scheduleRefresh = (table: WatchedTable) => {
     if (closed) return;
+    pendingTables.add(table);
+    // Stamped by the LATEST change in the window. Only a read issued after
+    // that instant can be said to have seen everything in it.
+    pendingLatest = Date.now();
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
-      onChange();
+      const tables = Array.from(pendingTables);
+      const observedAt = pendingLatest;
+      pendingTables = new Set();
+      pendingLatest = 0;
+      onChange({ tables, observedAt });
     }, debounceMs);
   };
 
@@ -73,7 +114,7 @@ export function subscribeToTournamentData({
     channel.on(
       'postgres_changes',
       { event: '*', schema: 'public', table },
-      scheduleRefresh
+      () => scheduleRefresh(table)
     );
   }
 
@@ -81,8 +122,10 @@ export function subscribeToTournamentData({
     if (closed) return;
     if (status === 'SUBSCRIBED') {
       onStatus?.('live');
-      // Pull once on connect so the view is current from the first frame.
-      onChange();
+      // Pull everything once on connect so the view is current from the first
+      // frame. observedAt 0 marks it as unconditional: nothing already read
+      // can be newer than a connection that has just opened.
+      onChange({ tables: [...WATCHED_TABLES], observedAt: 0 });
     } else if (
       status === 'CHANNEL_ERROR' ||
       status === 'TIMED_OUT' ||

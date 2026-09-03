@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useDeferredValue, useEffect } from 'react';
 import { compareMatches } from '../../utils/matchOrder';
-import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle, Search, X } from 'lucide-react';
+import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle, Search, X, Loader2 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { useNotify } from '../../context/NotificationContext';
+import { apiClient } from '../../utils/apiClient';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MatchTimer } from './MatchTimer';
 import { AddMatchModal } from './AddMatchModal';
@@ -12,62 +14,164 @@ interface FixtureScheduleViewProps {
   onOpenMatch: (match: Match) => void;
 }
 
-export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({ 
-  tournament, 
-  onOpenMatch 
+/**
+ * The filters an organiser last had on, per tournament.
+ *
+ * Opening a match replaces this whole view with the scoring screen, so the
+ * view is unmounted and its state goes with it. Every time an organiser
+ * searched for a player, opened their fixture, scored it and came back, the
+ * search box was empty again and the round filter was back to All Rounds --
+ * on every single match of the day.
+ *
+ * Kept in the module rather than lifted into a prop because both the admin
+ * dashboard and the player dashboard render this view, and neither of them
+ * has any other reason to know what is typed in its search box. It lives as
+ * long as the page does, which is exactly as long as it is useful.
+ */
+const lastFilters = new Map<string, {
+  round: string;
+  search: string;
+  category: 'all' | 'singles' | 'doubles';
+}>();
+
+/**
+ * Forget them. Called on sign-out: this map outlives the session, so without
+ * it the next person to sign in on the same device found the previous one's
+ * search term already in the box.
+ */
+export function forgetFixtureFilters(): void {
+  lastFilters.clear();
+}
+
+/** The writes this screen makes, named so the button that started one can show it. */
+type ActionKey = 'generate' | 'schedule' | 'publish' | 'reschedule';
+
+export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
+  tournament,
+  onOpenMatch
 }) => {
-  const { 
-    generateFixturesForTournament, 
-    generateScheduleForTournament, 
+  const {
+    generateFixturesForTournament,
+    generateScheduleForTournament,
     publishScheduleForTournament,
+    refreshTournaments,
     role
   } = useTournament();
+  const notify = useNotify();
 
   const [viewMode, setViewMode] = useState<'rounds' | 'boards'>('rounds');
   // A one-minute turnaround is a real option: on a small draw the boards
   // are free again as soon as the previous pair stand up.
   const [restMinutes, setRestMinutes] = useState(1);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
+  const [isRegenerateModalOpen, setIsRegenerateModalOpen] = useState(false);
+  const [isRescheduleModalOpen, setIsRescheduleModalOpen] = useState(false);
   const [isAddMatchOpen, setIsAddMatchOpen] = useState(false);
-  // Generating deletes the existing draw before writing the new one, so a
-  // second click while the first is running erases what it has just written.
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generateError, setGenerateError] = useState('');
+  // One write at a time. Generating deletes the existing draw before writing
+  // the new one, so a second click while the first is running erases what it
+  // has just written; scheduling and publishing are cheaper to repeat but no
+  // better for it. `busy` names the action so its button can show a spinner.
+  const [busy, setBusy] = useState<ActionKey | null>(null);
+  const [actionError, setActionError] = useState('');
 
-  const runGenerate = async () => {
-    if (isGenerating) return;
-    setIsGenerating(true);
-    setGenerateError('');
+  const runAction = async (key: ActionKey, fn: () => Promise<void>, fallback: string): Promise<boolean> => {
+    if (busy) return false;
+    setBusy(key);
+    setActionError('');
     try {
-      await generateFixturesForTournament(tournament.id);
-    } catch (e: any) {
-      setGenerateError(e?.message || 'Could not generate fixtures.');
+      await fn();
+      return true;
+    } catch (e) {
+      // The toast still fires; this keeps the sentence beside the buttons.
+      setActionError(notify.report(e, fallback));
+      return false;
     } finally {
-      setIsGenerating(false);
+      setBusy(null);
     }
   };
-  const [selectedRoundFilter, setSelectedRoundFilter] = useState<string>('all');
-  const [playerSearch, setPlayerSearch] = useState('');
+
+  const runGenerate = () => runAction('generate',
+    () => generateFixturesForTournament(tournament.id), 'Could not generate fixtures.');
+
+  // Regenerating replaces the draw and everything scored on it. The server
+  // refuses that unless told the organiser has agreed, and the confirmation
+  // modal is where they agree, so this is the one call that passes force.
+  const runRegenerate = () => runAction('generate', async () => {
+    await apiClient.post(`/tournaments/${tournament.id}/fixtures?force=true`, {});
+    await refreshTournaments();
+  }, 'Could not regenerate the fixtures.');
+
+  const runSchedule = () => runAction('schedule',
+    () => generateScheduleForTournament(tournament.id, restMinutes), 'Could not build the schedule.');
+
+  const runPublish = () => runAction('publish',
+    () => publishScheduleForTournament(tournament.id), 'Could not publish the schedule.');
+
+  // Changing a schedule that is already out. The schedule endpoint does not
+  // care whether the schedule was published, and publishing again only
+  // notifies the participants again, so running the two in turn is how a
+  // published schedule is changed. Results are not touched.
+  const runReschedule = () => runAction('reschedule', async () => {
+    await generateScheduleForTournament(tournament.id, restMinutes);
+    await publishScheduleForTournament(tournament.id);
+  }, 'Could not reschedule.');
+
+  const [selectedRoundFilter, setSelectedRoundFilter] = useState<string>(
+    () => lastFilters.get(tournament.id)?.round ?? 'all');
+  const [playerSearch, setPlayerSearch] = useState(
+    () => lastFilters.get(tournament.id)?.search ?? '');
+
 
   const allMatches = tournament.matches || [];
 
+  // Everything below is derived from the draw, and the draw only changes when
+  // the server says so — but this component re-renders on every keystroke in
+  // the search box below, and on every realtime change anywhere in the app.
+  // Unmemoised, one keystroke rescanned all 1520 boards of a 190-fixture draw,
+  // rebuilt the board timeline, and counted every round against every match.
+  // That is the lag an organiser feels while typing a name.
+
+  // What a redraw would throw away, counted the way the server counts it: any
+  // board that is not pending, or carries a score, is play.
+  const { playedBoards, confirmedMatches } = useMemo(() => ({
+    playedBoards: allMatches.reduce((n, m) =>
+      n + (m.boards || []).filter(b => b.status !== 'pending' || b.player1Score || b.player2Score).length, 0),
+    confirmedMatches: allMatches.filter(m => m.resultConfirmed).length,
+  }), [allMatches]);
+
   // Singles and doubles are separate competitions inside one tournament, so
   // the fixture list is filtered by category before anything else.
-  const categoriesPresent = Array.from(
+  const categoriesPresent = useMemo(() => Array.from(
     new Set(allMatches.map(m => m.type).filter(Boolean))
-  ) as ('singles' | 'doubles')[];
+  ) as ('singles' | 'doubles')[], [allMatches]);
   const showCategoryTabs = categoriesPresent.length > 1;
 
-  const [categoryFilter, setCategoryFilter] = React.useState<'all' | 'singles' | 'doubles'>('all');
+  const [categoryFilter, setCategoryFilter] = React.useState<'all' | 'singles' | 'doubles'>(
+    () => lastFilters.get(tournament.id)?.category ?? 'all');
+  // Remembered as they change, so coming back from a match lands where the
+  // organiser left off.
+  useEffect(() => {
+    lastFilters.set(tournament.id, {
+      round: selectedRoundFilter,
+      search: playerSearch,
+      category: categoryFilter,
+    });
+  }, [tournament.id, selectedRoundFilter, playerSearch, categoryFilter]);
 
-  const matches = categoryFilter === 'all'
+  const matches = useMemo(() => categoryFilter === 'all'
     ? allMatches
-    : allMatches.filter(m => m.type === categoryFilter);
+    : allMatches.filter(m => m.type === categoryFilter), [allMatches, categoryFilter]);
   const hasMatches = allMatches.length > 0;
   const isScheduled = tournament.status === 'scheduled' || tournament.status === 'ongoing' || tournament.status === 'completed';
 
-  // Group matches by round, within the selected category
-  const rounds = Array.from(new Set(matches.map(m => m.roundName)));
+  // Group matches by round, within the selected category, and count each one
+  // once. The tabs used to re-filter the whole draw per round, which is every
+  // fixture read nineteen times over to print nineteen small numbers.
+  const { rounds, roundCounts } = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of matches) counts.set(m.roundName, (counts.get(m.roundName) || 0) + 1);
+    return { rounds: Array.from(counts.keys()), roundCounts: counts };
+  }, [matches]);
 
   // Find a player's or a team's fixtures.
   //
@@ -75,31 +179,40 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   // question you could only answer by reading every card. Matching on the two
   // side names covers doubles as well, because a doubles fixture carries the
   // team's name rather than the two people in it.
-  const needle = playerSearch.trim().toLowerCase();
-  const searchedMatches = needle
-    ? matches.filter(m =>
-        (m.player1Name || '').toLowerCase().includes(needle) ||
-        (m.player2Name || '').toLowerCase().includes(needle))
-    : matches;
+  // The box keeps up with the typist; the list of 190 cards catches up a beat
+  // later. Without this every character re-rendered the whole draw before the
+  // next one could be accepted.
+  const needle = useDeferredValue(playerSearch).trim().toLowerCase();
 
   // A search is a question about one person, so the round tabs stop applying:
   // their next match is very unlikely to be in the round being looked at.
-  const displayedMatches = needle
-    ? searchedMatches
-    : selectedRoundFilter === 'all'
+  const displayedMatches = useMemo(() => {
+    if (needle) {
+      return matches.filter(m =>
+        (m.player1Name || '').toLowerCase().includes(needle) ||
+        (m.player2Name || '').toLowerCase().includes(needle));
+    }
+    return selectedRoundFilter === 'all'
       ? matches
       : matches.filter(m => m.roundName === selectedRoundFilter);
+  }, [matches, needle, selectedRoundFilter]);
+
+  // While a search is running the displayed set IS the search result — the
+  // round filter is deliberately ignored — so the summary line below reads it
+  // under the name that says what it is.
+  const searchedMatches = displayedMatches;
 
   // Group matches by board for board timeline
-  const boardMap: Map<number, Match[]> = new Map();
-  for (let b = 1; b <= tournament.numberOfBoards; b++) {
-    boardMap.set(b, []);
-  }
-  matches.forEach(m => {
-    const list = boardMap.get(m.boardNumber) || [];
-    list.push(m);
-    boardMap.set(m.boardNumber, list);
-  });
+  const boardMap = useMemo(() => {
+    const map: Map<number, Match[]> = new Map();
+    for (let b = 1; b <= tournament.numberOfBoards; b++) map.set(b, []);
+    matches.forEach(m => {
+      const list = map.get(m.boardNumber) || [];
+      list.push(m);
+      map.set(m.boardNumber, list);
+    });
+    return map;
+  }, [matches, tournament.numberOfBoards]);
 
   return (
     <div id="fixture-schedule-view" className="space-y-5">
@@ -150,34 +263,42 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                 <button
                   id="generate-fixtures-btn"
                   onClick={runGenerate}
-                  disabled={isGenerating}
-                  className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5"
+                  disabled={!!busy}
+                  className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  <Sparkles className="w-4 h-4 text-[#D4A72C]" />
-                  <span>{isGenerating ? 'Generating…' : 'Generate Fixtures'}</span>
+                  {busy === 'generate'
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Sparkles className="w-4 h-4 text-[#D4A72C]" />}
+                  <span>{busy === 'generate' ? 'Generating…' : 'Generate Fixtures'}</span>
                 </button>
               ) : (
                 <>
+                  {/* Redrawing deletes every match and every board scored on
+                      them, so it asks first rather than hinting in a tooltip. */}
                   <button
                     id="generate-fixtures-btn"
-                    onClick={runGenerate}
-                  disabled={isGenerating}
-                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#0B5D3B] text-xs font-bold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1.5"
-                    title="Regenerate pairings & match bracket"
+                    onClick={() => setIsRegenerateModalOpen(true)}
+                    disabled={!!busy}
+                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#0B5D3B] text-xs font-bold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1.5 disabled:opacity-50"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>{isGenerating ? 'Generating…' : 'Generate Fixtures'}</span>
+                    {busy === 'generate'
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      : <RefreshCw className="w-3.5 h-3.5" />}
+                    <span>{busy === 'generate' ? 'Generating…' : 'Regenerate Fixtures'}</span>
                   </button>
 
                   {!tournament.scheduledPublished && (
                     <button
                       id="auto-schedule-btn"
-                      onClick={() => generateScheduleForTournament(tournament.id, restMinutes)}
-                      className="px-3.5 py-2 bg-amber-50 hover:bg-[#D4A72C]/10 text-amber-800 text-xs font-bold rounded-xl border border-amber-200 transition-colors flex items-center gap-1.5"
+                      onClick={runSchedule}
+                      disabled={!!busy}
+                      className="px-3.5 py-2 bg-amber-50 hover:bg-[#D4A72C]/10 text-amber-800 text-xs font-bold rounded-xl border border-amber-200 transition-colors flex items-center gap-1.5 disabled:opacity-50"
                       title="Generate conflict-free boards, timings, and rest periods"
                     >
-                      <Calendar className="w-3.5 h-3.5 text-[#D4A72C]" />
-                      <span>Auto-Schedule</span>
+                      {busy === 'schedule'
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Calendar className="w-3.5 h-3.5 text-[#D4A72C]" />}
+                      <span>{busy === 'schedule' ? 'Scheduling…' : 'Auto-Schedule'}</span>
                     </button>
                   )}
 
@@ -185,10 +306,30 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                     <button
                       id="publish-schedule-btn"
                       onClick={() => setIsPublishModalOpen(true)}
-                      className="px-4 py-2 bg-[#D4A72C] hover:bg-[#c29623] text-[#202522] text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5"
+                      disabled={!!busy}
+                      className="px-4 py-2 bg-[#D4A72C] hover:bg-[#c29623] text-[#202522] text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50"
                     >
-                      <Send className="w-3.5 h-3.5 text-[#202522]" />
-                      <span>Publish Schedule</span>
+                      {busy === 'publish'
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Send className="w-3.5 h-3.5 text-[#202522]" />}
+                      <span>{busy === 'publish' ? 'Publishing…' : 'Publish Schedule'}</span>
+                    </button>
+                  )}
+
+                  {/* A published schedule can still change: a board breaks, a
+                      session runs late. Auto-Schedule and Publish disappear
+                      once it is out, so this is the one control left for it. */}
+                  {tournament.scheduledPublished && (
+                    <button
+                      id="reschedule-btn"
+                      onClick={() => setIsRescheduleModalOpen(true)}
+                      disabled={!!busy}
+                      className="px-3.5 py-2 bg-amber-50 hover:bg-[#D4A72C]/10 text-amber-800 text-xs font-bold rounded-xl border border-amber-200 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {busy === 'reschedule'
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Calendar className="w-3.5 h-3.5 text-[#D4A72C]" />}
+                      <span>{busy === 'reschedule' ? 'Rescheduling…' : 'Reschedule'}</span>
                     </button>
                   )}
 
@@ -232,6 +373,15 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Directly under the buttons that caused it, not at the foot of a page
+          of fixtures where it used to be. */}
+      {actionError && (
+        <div role="alert" className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 flex items-start gap-1.5">
+          <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-600" />
+          <span className="flex-1 leading-snug">{actionError}</span>
+        </div>
+      )}
 
       {/* Who plays whom, and when. Rendered above the view toggle, because it
           used to live inside the rounds branch and vanished on Board Grid. */}
@@ -343,11 +493,13 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           {role === 'admin' && (
             <button
               onClick={runGenerate}
-                  disabled={isGenerating}
-              className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md inline-flex items-center gap-2"
+              disabled={!!busy}
+              className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md inline-flex items-center gap-2 disabled:opacity-50"
             >
-              <Sparkles className="w-4 h-4 text-[#D4A72C]" />
-              <span>{isGenerating ? 'Generating…' : 'Generate Automatic Fixtures'}</span>
+              {busy === 'generate'
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <Sparkles className="w-4 h-4 text-[#D4A72C]" />}
+              <span>{busy === 'generate' ? 'Generating…' : 'Generate Automatic Fixtures'}</span>
             </button>
           )}
         </div>
@@ -401,7 +553,7 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                 All Rounds ({matches.length})
               </button>
               {rounds.map(roundName => {
-                const count = matches.filter(m => m.roundName === roundName).length;
+                const count = roundCounts.get(roundName) || 0;
                 return (
                   <button
                     key={roundName}
@@ -610,12 +762,6 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
         </div>
       )}
 
-      {generateError && (
-        <div className="mb-3 p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800">
-          {generateError}
-        </div>
-      )}
-
       {isAddMatchOpen && (
         <AddMatchModal
           tournament={tournament}
@@ -628,11 +774,37 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
       <ConfirmationModal
         isOpen={isPublishModalOpen}
         onClose={() => setIsPublishModalOpen(false)}
-        onConfirm={() => publishScheduleForTournament(tournament.id)}
+        onConfirm={runPublish}
         title="Publish Official Schedule?"
         description="Publishing the schedule makes all match timings and board allocations visible to all players and enables live match scoring."
         confirmLabel="Publish Schedule to Players"
         variant="primary"
+      />
+
+      <ConfirmationModal
+        isOpen={isRegenerateModalOpen}
+        onClose={() => setIsRegenerateModalOpen(false)}
+        onConfirm={runRegenerate}
+        title="Regenerate the draw?"
+        description={
+          `This deletes all ${allMatches.length} matches and every board scored on them, along with their correction history, and draws the tournament again from the approved entries. `
+          + (playedBoards > 0 || confirmedMatches > 0
+              ? `${playedBoards} board${playedBoards === 1 ? '' : 's'} with play recorded and ${confirmedMatches} confirmed result${confirmedMatches === 1 ? '' : 's'} will be discarded. There is no undo. `
+              : 'No board has been played yet, so nothing scored is lost. ')
+          + 'If someone joined late, use Add Match instead.'
+        }
+        confirmLabel={playedBoards > 0 || confirmedMatches > 0 ? 'Discard results and redraw' : 'Redraw fixtures'}
+        variant="danger"
+      />
+
+      <ConfirmationModal
+        isOpen={isRescheduleModalOpen}
+        onClose={() => setIsRescheduleModalOpen(false)}
+        onConfirm={runReschedule}
+        title="Reschedule the published schedule?"
+        description={`Every match — including any already played — is given a fresh board and time using the ${restMinutes}-minute rest buffer, and the new schedule is published straight away, so every participant is notified again. Scores and results are not touched.`}
+        confirmLabel="Reschedule and Republish"
+        variant="warning"
       />
 
     </div>

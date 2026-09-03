@@ -1,13 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Play, Pause, RotateCcw, CheckCircle2, Clock, Trophy, AlertCircle, AlertTriangle, ShieldAlert, Sparkles, History, Check, Edit3, X, ArrowLeft, Crown, Flame, Award, Plus, UserX, Trash2, Loader2 } from 'lucide-react';
 import { WalkoverModal } from './WalkoverModal';
 import { Avatar } from '../common/Avatar';
 import { useNotify } from '../../context/NotificationContext';
 import { apiClient } from '../../utils/apiClient';
 import confetti from 'canvas-confetti';
-import { Tournament, Match, BoardScore } from '../../types/tournament';
+import { Tournament, Match, BoardScore, ScoreAuditLog } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
+import { ReasonModal } from '../common/ReasonModal';
 import { MatchTimer } from './MatchTimer';
 import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from './BoardResultForm';
 import { SetScoreboard, summariseSets } from './SetScoreboard';
@@ -20,6 +21,21 @@ interface LiveMatchControllerProps {
   match: Match;
   onBack: () => void;
 }
+
+/**
+ * The failure, kept beside the control that was pressed. The global toast still
+ * fires, but a toast in the corner is easy to miss from a scoring desk; this is
+ * the copy that stays where the organiser is looking.
+ */
+const InlineError: React.FC<{ message?: string; className?: string }> = ({ message, className = '' }) => {
+  if (!message) return null;
+  return (
+    <div role="alert" className={`flex items-start gap-1.5 text-xs text-red-800 bg-red-50 border border-red-200 rounded-xl px-3 py-2 ${className}`}>
+      <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-red-600" />
+      <span className="flex-1 leading-snug">{message}</span>
+    </div>
+  );
+};
 
 export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   tournament,
@@ -36,7 +52,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     submitBoardScore, 
     updateBoardScore, 
     confirmMatchResult,
-    refreshData,
+    reopenMatch,
+    refreshTournaments,
     allPlayers,
     role
   } = useTournament();
@@ -49,11 +66,31 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [activeSet, setActiveSet] = useState<number>(1);
   const setBoards = match.boards.filter(b => (b.setNumber || 1) === activeSet);
 
+  // A set the organiser chose from the tabs is one they want to look at,
+  // however finished it is. Without this the jump below fired again the moment
+  // they selected a completed set and threw them straight back out of it, so a
+  // finished set could never be reviewed -- or corrected, which is the whole
+  // point of being able to open it.
+  const pinnedSet = useRef(false);
+  const chooseSet = (n: number) => { pinnedSet.current = true; setActiveSet(n); };
+
+  // What the boards actually SAY, not which array object they arrived in.
+  // Every read replaces `match` with freshly parsed JSON, so keying the
+  // release below on match.boards released the pin on the next refresh --
+  // a beat later the organiser was thrown out of the finished set again.
+  const boardsSignature = (match.boards || [])
+    .map(b => `${b.setNumber || 1}:${b.boardNumber}:${b.status}`)
+    .join('|');
+
+  // New play releases the pin, so scoring still rolls on by itself. Declared
+  // before the jump so it has already run when that one looks at the pin.
+  useEffect(() => { pinnedSet.current = false; }, [boardsSignature]);
+
   // When every board of the current set is in, move to the next set that still
   // has boards. Without this the scorer reaches 4 of 4 with no Submit button
   // left and no indication that two more sets are waiting behind a tab.
   useEffect(() => {
-    if (totalSets <= 1) return;
+    if (totalSets <= 1 || pinnedSet.current) return;
     const done = setBoards.length > 0 && setBoards.every(b => b.status === 'completed');
     if (!done) return;
     const nextSet = Array.from({ length: totalSets }, (_, i) => i + 1)
@@ -76,8 +113,73 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [isConfirmResultModalOpen, setIsConfirmResultModalOpen] = useState(false);
   const notify = useNotify();
   const [isWalkoverModalOpen, setIsWalkoverModalOpen] = useState(false);
-  const [removingBoards, setRemovingBoards] = useState(false);
-  const [decidingTie, setDecidingTie] = useState(false);
+  const [isRemoveBoardsModalOpen, setIsRemoveBoardsModalOpen] = useState(false);
+  const [isReopenModalOpen, setIsReopenModalOpen] = useState(false);
+  // The side a level match is about to be awarded to; the ReasonModal is open
+  // while this is set.
+  const [tieBreakTarget, setTieBreakTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // One write at a time. Every control on this screen changes the same match
+  // and then reloads it, so a second click while the first is in flight either
+  // repeats the write or races the reload. `busy` names the action under way so
+  // the control that started it can show a spinner; everything else waits.
+  const [busy, setBusy] = useState<string | null>(null);
+  // Failures keyed by the same action names, so each one can be shown beside
+  // the control that caused it.
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const run = async (key: string, fn: () => Promise<unknown>, fallback: string): Promise<boolean> => {
+    if (busy) return false;
+    setBusy(key);
+    setErrors(prev => ({ ...prev, [key]: '' }));
+    try {
+      await fn();
+      return true;
+    } catch (e) {
+      // report() shows the toast and hands back the sentence it showed, so the
+      // inline copy and the toast never disagree.
+      const message = notify.report(e, fallback);
+      setErrors(prev => ({ ...prev, [key]: message }));
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
+  const errorFor = (...keys: string[]) => keys.map(k => errors[k]).find(Boolean) || '';
+  const clearError = (key: string) => setErrors(prev => ({ ...prev, [key]: '' }));
+
+  // Both reason modals show the error of their own last attempt, so opening
+  // one starts clean rather than with a refusal from an earlier visit.
+  const openReopen = () => { clearError('reopen'); setIsReopenModalOpen(true); };
+  const openTieBreak = (target: { id: string; name: string }) => {
+    clearError('tieBreak');
+    setTieBreakTarget(target);
+  };
+
+  // Score corrections for THIS match, asked for when the match is opened.
+  //
+  // The history used to arrive inside the tournament list, which meant up to
+  // 500 audit rows were read and sent on every refresh -- after every button
+  // an organiser pressed anywhere in the app -- to be rendered on this one
+  // screen and nowhere else. It is asked for here instead, and re-asked
+  // whenever a correction lands (the board scores are what change it).
+  const [auditHistory, setAuditHistory] = useState<ScoreAuditLog[]>(match.auditHistory || []);
+
+  // Bumped when this screen writes a board, which is the only thing that adds
+  // to the history. Keyed on the boards array instead, it re-fetched on every
+  // refresh anywhere in the app -- `boards` is a fresh array each time even
+  // when nothing in it changed.
+  const [historyVersion, setHistoryVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get<ScoreAuditLog[]>(`/audit/scores/${match.id}`)
+      .then(rows => { if (!cancelled) setAuditHistory(rows || []); })
+      // A history that will not load must not take the scoring screen with
+      // it; whatever the match payload carried stays on show.
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [match.id, historyVersion]);
 
   // The match row carries names but not pictures, and player1Details is only
   // ever filled by the local engine, so the picture is looked up by id from the
@@ -91,28 +193,28 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   // A level match under remaining-coins scoring has no winner and cannot be
   // confirmed. Until this existed the screen simply showed nothing and the
   // umpire was told to "finish the remaining boards" they had already finished.
-  const decideTieBreak = async (winnerId: string, winnerName: string) => {
-    if (decidingTie) return;
-    const reason = window.prompt(
-      `Award this match to ${winnerName}?
-
-` +
-      `The scores are level, so this is your ruling. Say why — it is recorded ` +
-      `with the result.`,
-      'Organiser ruling'
-    );
-    if (reason === null || !reason.trim()) return;
-    setDecidingTie(true);
-    try {
-      await apiClient.post(`/matches/${match.id}/tie-break`, {
-        winnerId, reason: reason.trim(),
-      });
+  const decideTieBreak = async (reason: string) => {
+    if (!tieBreakTarget) return;
+    const { id: winnerId, name: winnerName } = tieBreakTarget;
+    const ok = await run('tieBreak', async () => {
+      await apiClient.post(`/matches/${match.id}/tie-break`, { winnerId, reason });
+      await refreshTournaments();
+    }, 'Could not record the ruling.');
+    if (ok) {
       notify.success(`Match awarded to ${winnerName}.`);
-      await refreshData();
-    } catch (e) {
-      notify.report(e, 'Could not record the ruling.');
-    } finally {
-      setDecidingTie(false);
+      setTieBreakTarget(null);
+    }
+  };
+
+  // Undo a confirmation. The server puts the match back to live, clears the
+  // winner out of the next round and records why; a refusal (the next match is
+  // already under way, say) comes back as the error shown in the modal.
+  const reopenResult = async (reason: string) => {
+    const ok = await run('reopen', () => reopenMatch(tournament.id, match.id, reason),
+      'Could not reopen the result.');
+    if (ok) {
+      notify.success('Result reopened. The match is live again and its boards can be corrected.');
+      setIsReopenModalOpen(false);
     }
   };
 
@@ -128,25 +230,24 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   })();
 
   const removeUnplayedBoards = async () => {
-    if (removingBoards) return;
-    const n = allBoards.length;
-    if (!window.confirm(
-      `Remove the boards at the end of this match that were never played?
-
-` +
-      `This match currently has ${n} boards. Boards with a score on them are kept.`
-    )) return;
-    setRemovingBoards(true);
-    try {
+    let message = '';
+    const ok = await run('removeBoards', async () => {
       const res: any = await apiClient.delete(`/matches/${match.id}/boards/unplayed`);
-      notify.success(res?.message || 'Removed the unplayed boards.');
-      await refreshData();
-    } catch (e) {
-      notify.report(e, 'Could not remove the unplayed boards.');
-    } finally {
-      setRemovingBoards(false);
-    }
+      message = res?.message || '';
+      await refreshTournaments();
+    }, 'Could not remove the unplayed boards.');
+    if (ok) notify.success(message || 'Removed the unplayed boards.');
   };
+
+  const completedBoardCount = allBoards.filter(b => b.status === 'completed').length;
+  // Why Confirm Final Result is greyed out, or empty when it is not. Fewer
+  // boards than the maximum is deliberately NOT a reason: the organiser may
+  // settle a match on what was played.
+  const confirmBlocker = match.tieBreakRequired
+    ? 'The match is level. Award it, or add a deciding board and play it, before confirming.'
+    : completedBoardCount === 0 && !match.walkover
+      ? 'No board has been scored yet, so there is no result to confirm.'
+      : '';
   const [selectedBoardForScore, setSelectedBoardForScore] = useState<number>(1);
 
   // Score Input form state
@@ -169,6 +270,10 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const isCompleted = match.status === 'completed';
 
   const handleOpenScoreModal = (boardNum: number, isCorrection: boolean = false) => {
+    // Whatever the last save was refused for belonged to the board it was
+    // about. Left in place it appeared under the NEXT board's form, as if that
+    // one had just been rejected.
+    clearError('saveBoard');
     const currentBoard = setBoards.find(b => b.boardNumber === boardNum);
     setSelectedBoardForScore(boardNum);
     if (currentBoard) {
@@ -181,13 +286,11 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
       setWhiteCoins(currentBoard.whiteCoinsPocketed || 0);
       setBlackCoins(currentBoard.blackCoinsPocketed || 0);
       
-      if (p1S > 0) {
-        setFinishedBy('player1');
-      } else if (p2S > 0) {
-        setFinishedBy('player2');
-      } else {
-        setFinishedBy('none');
-      }
+      // Who won is what the umpire recorded, not something to be guessed back
+      // out of the two scores -- which is wrong precisely when it matters, on
+      // a board won against a covered queen.
+      setFinishedBy((currentBoard.boardWinner as any) ||
+        (p1S > p2S ? 'player1' : p2S > p1S ? 'player2' : 'none'));
 
       setObservation({
         winner: currentBoard.boardWinner || 'none',
@@ -211,7 +314,17 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     }
   };
 
-  const handleSaveBoardScore = () => {
+  // A classic-mode form nobody has touched: no coins either side, no winner,
+  // no queen. Saving that wrote a completed, LOCKED 0-0 board, which then
+  // needed a correction with a written reason to undo -- from one mis-tap on a
+  // button that looked ready. It is only the empty form that is refused; a
+  // 0-0 board WITH a winner recorded is a real, if unusual, result.
+  const classicFormIsEmpty =
+    !usesRemainingCoins &&
+    p1InputScore === 0 && p2InputScore === 0 &&
+    finishedBy === 'none' && queenClaimed === 'none';
+
+  const handleSaveBoardScore = async () => {
     const payload = usesRemainingCoins
       ? (() => {
           const preview = previewBoard(observation, rules);
@@ -233,22 +346,35 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
       : {
           p1Score: p1InputScore,
           p2Score: p2InputScore,
+          // The "Finished / Won By" choice, which used to be collected and
+          // then dropped: the payload carried the scores and the queen and
+          // nothing else, so every classic board reached the server with no
+          // winner and the server fell back to comparing the two totals. That
+          // is backwards on exactly the board the control exists for -- a
+          // board won on coins against an opponent who covered the queen.
+          boardWinner: finishedBy,
           queenClaimedBy: queenClaimed,
           queenCovered,
           auditReason,
         };
 
-    submitBoardScore(tournament.id, match.id, selectedBoardForScore,
-      totalSets > 1 ? { ...payload, setNumber: activeSet } : payload);
-    setIsSubmitScoreModalOpen(false);
+    // The modal stays open until the server has taken the score, so a refusal
+    // is read against the numbers that were refused.
+    const ok = await run('saveBoard', () => submitBoardScore(tournament.id, match.id, selectedBoardForScore,
+      totalSets > 1 ? { ...payload, setNumber: activeSet } : payload), 'Could not save the board score.');
+    if (ok) {
+      setHistoryVersion(v => v + 1);
+      setIsSubmitScoreModalOpen(false);
+    }
   };
 
-  const handleSaveScoreCorrection = () => {
+  const handleSaveScoreCorrection = async () => {
+    if (!auditReason.trim()) return;
     // A correction restates the observations, the same shape the original
     // submission used. Sending the two score numbers instead left the server
     // with nothing to re-score from, so the edit appeared to do nothing.
     const preview = usesRemainingCoins ? previewBoard(observation, rules) : null;
-    updateBoardScore(
+    const ok = await run('saveBoard', () => updateBoardScore(
       tournament.id,
       match.id,
       selectedBoardForScore,
@@ -269,24 +395,34 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
           } as any
         : {
             boardNumber: selectedBoardForScore,
+            // Carried here as well as in the remaining-coins branch above.
+            // Without it the server falls back to set 1, so correcting a board
+            // in set 2 or 3 rewrote the same-numbered board of set 1 instead.
+            setNumber: totalSets > 1 ? activeSet : undefined,
             status: 'completed',
             player1Score: p1InputScore,
             player2Score: p2InputScore,
+            boardWinner: finishedBy,
             queenClaimedBy: queenClaimed,
             queenCovered,
             whiteCoinsPocketed: whiteCoins,
             blackCoinsPocketed: blackCoins
           } as any,
-      auditReason,
+      auditReason.trim(),
       // Opening the correction screen and writing a reason IS the deliberate
       // act that a confirmed board requires.
       true
-    );
-    setIsEditAuditModalOpen(false);
+    ), 'Could not save the correction.');
+    if (ok) {
+      setHistoryVersion(v => v + 1);
+      setIsEditAuditModalOpen(false);
+    }
   };
 
-  const handleExecuteConfirmResult = () => {
-    confirmMatchResult(tournament.id, match.id);
+  const handleExecuteConfirmResult = async () => {
+    const ok = await run('confirm', () => confirmMatchResult(tournament.id, match.id),
+      'Could not confirm the result.');
+    if (!ok) return;
     // Fire festive victory confetti
     try {
       confetti({
@@ -514,10 +650,13 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             </div>
             {match.tieBreakRule === 'additional_board' && (
               <button
-                onClick={() => addBoardToMatch(tournament.id, match.id)}
-                className="w-full mb-2 py-2.5 px-3 rounded-xl text-sm font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white shadow-xs flex items-center justify-center gap-1.5"
+                onClick={() => run('tieAddBoard', () => addBoardToMatch(tournament.id, match.id), 'Could not add a board.')}
+                disabled={!!busy}
+                className="w-full mb-2 py-2.5 px-3 rounded-xl text-sm font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white shadow-xs flex items-center justify-center gap-1.5 disabled:opacity-40"
               >
-                <Plus className="w-4 h-4" />
+                {busy === 'tieAddBoard'
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Plus className="w-4 h-4" />}
                 <span>Add a deciding board</span>
               </button>
             )}
@@ -528,14 +667,15 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               ].filter(p => p.id).map(p => (
                 <button
                   key={p.id}
-                  onClick={() => decideTieBreak(p.id!, p.name)}
-                  disabled={decidingTie}
+                  onClick={() => openTieBreak({ id: p.id!, name: p.name })}
+                  disabled={!!busy}
                   className="py-2.5 px-3 rounded-xl text-sm font-bold bg-white border-2 border-amber-300 text-gray-800 hover:border-[#0B5D3B] hover:text-[#0B5D3B] transition-colors disabled:opacity-40"
                 >
                   Award to {p.name}
                 </button>
               ))}
             </div>
+            <InlineError message={errorFor('tieAddBoard', 'tieBreak')} className="mt-2" />
           </div>
         )}
 
@@ -546,20 +686,27 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               {!isLive ? (
                 <button
                   id="start-match-timer-btn"
-                  onClick={() => startMatch(tournament.id, match.id)}
-                  disabled={isCompleted}
+                  onClick={() => run('start',
+                    () => isPaused ? resumeMatch(tournament.id, match.id) : startMatch(tournament.id, match.id),
+                    isPaused ? 'Could not resume the match.' : 'Could not start the match.')}
+                  disabled={isCompleted || !!busy}
                   className="px-5 py-2.5 bg-[#D4A72C] hover:opacity-90 text-[#0B5D3B] text-xs font-black rounded-lg shadow-md transition-all flex items-center gap-1.5 disabled:opacity-40"
                 >
-                  <Play className="w-4 h-4 fill-current" />
+                  {busy === 'start'
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Play className="w-4 h-4 fill-current" />}
                   <span>{isPaused ? 'Resume Match' : 'Start Match & Timer'}</span>
                 </button>
               ) : (
                 <button
                   id="pause-match-timer-btn"
-                  onClick={() => pauseMatch(tournament.id, match.id)}
-                  className="px-5 py-2.5 bg-[#202522] hover:bg-black text-white text-xs font-bold rounded-lg shadow-md transition-all flex items-center gap-1.5"
+                  onClick={() => run('pause', () => pauseMatch(tournament.id, match.id), 'Could not pause the match.')}
+                  disabled={!!busy}
+                  className="px-5 py-2.5 bg-[#202522] hover:bg-black text-white text-xs font-bold rounded-lg shadow-md transition-all flex items-center gap-1.5 disabled:opacity-40"
                 >
-                  <Pause className="w-4 h-4" />
+                  {busy === 'pause'
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Pause className="w-4 h-4" />}
                   <span>Pause Timer</span>
                 </button>
               )}
@@ -586,20 +733,31 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               <button
                 id="confirm-match-result-btn"
                 onClick={() => setIsConfirmResultModalOpen(true)}
-                className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-lg shadow-md transition-all flex items-center gap-2"
+                disabled={!!confirmBlocker || !!busy}
+                title={confirmBlocker || undefined}
+                className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-lg shadow-md transition-all flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                <CheckCircle2 className="w-4 h-4 text-[#D4A72C]" />
+                {busy === 'confirm'
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <CheckCircle2 className="w-4 h-4 text-[#D4A72C]" />}
                 <span>Confirm Final Result</span>
               </button>
             )}
             </div>
+            {confirmBlocker && !match.resultConfirmed && (
+              <p className="basis-full text-[11px] text-gray-600 flex items-start gap-1 -mt-1">
+                <AlertCircle className="w-3.5 h-3.5 mt-px shrink-0 text-amber-600" />
+                <span>{confirmBlocker}</span>
+              </p>
+            )}
+            <InlineError message={errorFor('start', 'pause', 'confirm')} className="basis-full" />
           </div>
         )}
       </div>
 
       {/* Winner Banner if match is completed */}
       {match.resultConfirmed && (
-        <div className="bg-gradient-to-r from-amber-500 via-[#D4A72C] to-amber-600 text-[#202522] p-4 rounded-2xl shadow-md flex items-center justify-between">
+        <div className="bg-gradient-to-r from-amber-500 via-[#D4A72C] to-amber-600 text-[#202522] p-4 rounded-2xl shadow-md flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-full bg-white/90 flex items-center justify-center">
               <Trophy className="w-6 h-6 text-amber-600" />
@@ -613,9 +771,26 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               </div>
             </div>
           </div>
-          <span className="px-3 py-1 bg-white/90 font-bold text-xs rounded-xl shadow-xs">
-            Points Table & Brackets Updated
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="px-3 py-1 bg-white/90 font-bold text-xs rounded-xl shadow-xs">
+              Points Table & Brackets Updated
+            </span>
+            {/* A confirmed result is not the end of the road: a board entered
+                against the wrong player is found from the points table, after
+                confirmation. Reopening is the correction workflow. */}
+            {role === 'admin' && (
+              <button
+                id="reopen-result-btn"
+                onClick={openReopen}
+                disabled={!!busy}
+                className="px-3 py-1 bg-[#202522] hover:bg-black text-white font-bold text-xs rounded-xl shadow-xs flex items-center gap-1 disabled:opacity-40"
+                title="Put the match back to live so its boards can be corrected"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reopen result</span>
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -624,7 +799,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
           match={match}
           boardsPerSet={boardsPerSet}
           activeSet={activeSet}
-          onSelectSet={setActiveSet}
+          onSelectSet={chooseSet}
         />
       )}
 
@@ -647,11 +822,14 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             </div>
             {role === 'admin' && !match.resultConfirmed && (
               <button
-                onClick={() => addBoardToMatch(tournament.id, match.id)}
-                className="px-3 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl border border-transparent shadow-xs transition-colors flex items-center gap-1"
+                onClick={() => run('addBoard', () => addBoardToMatch(tournament.id, match.id), 'Could not add a board.')}
+                disabled={!!busy}
+                className="px-3 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl border border-transparent shadow-xs transition-colors flex items-center gap-1 disabled:opacity-40"
                 title="Add a new board score record to this match"
               >
-                <Plus className="w-3.5 h-3.5" />
+                {busy === 'addBoard'
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <Plus className="w-3.5 h-3.5" />}
                 <span>Add Board</span>
               </button>
             )}
@@ -660,12 +838,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 there has to be a way back. */}
             {role === 'admin' && !match.resultConfirmed && hasUnplayedTail && (
               <button
-                onClick={removeUnplayedBoards}
-                disabled={removingBoards}
+                onClick={() => setIsRemoveBoardsModalOpen(true)}
+                disabled={!!busy}
                 className="px-3 py-1.5 bg-white hover:bg-gray-50 text-gray-700 text-xs font-bold rounded-xl border border-gray-300 shadow-xs transition-colors flex items-center gap-1 disabled:opacity-40"
                 title="Remove boards at the end that were never played"
               >
-                {removingBoards
+                {busy === 'removeBoards'
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <Trash2 className="w-3.5 h-3.5 text-gray-500" />}
                 <span>Remove unplayed</span>
@@ -673,6 +851,26 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             )}
           </div>
         </div>
+
+        <InlineError message={errorFor('addBoard', 'removeBoards')} />
+
+        {/* Once the result is confirmed the server refuses every board write,
+            so the buttons below are locked and this says what unlocks them. */}
+        {role === 'admin' && match.resultConfirmed && (
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-700">
+            <span className="flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+              This result is confirmed, so its boards are locked. To correct a board, reopen the result first.
+            </span>
+            <button
+              onClick={openReopen}
+              disabled={!!busy}
+              className="font-bold text-[#0B5D3B] hover:underline disabled:opacity-40"
+            >
+              Reopen result
+            </button>
+          </div>
+        )}
 
         {/* Boards List */}
         <div className="space-y-3">
@@ -780,7 +978,9 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                       {!isBoardCompleted ? (
                         <button
                           onClick={() => handleOpenScoreModal(board.boardNumber, false)}
-                          className="px-3 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center gap-1"
+                          disabled={match.resultConfirmed || !!busy}
+                          title={match.resultConfirmed ? 'Result confirmed — reopen it to score this board' : undefined}
+                          className="px-3 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-lg shadow-xs transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
                           <span>Submit Score</span>
@@ -788,8 +988,11 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                       ) : (
                         <button
                           onClick={() => handleOpenScoreModal(board.boardNumber, true)}
-                          className="px-3 py-1.5 text-gray-700 hover:bg-gray-100 border border-gray-200 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1"
-                          title="Correct score with audit history"
+                          disabled={match.resultConfirmed || !!busy}
+                          title={match.resultConfirmed
+                            ? 'Result confirmed — reopen it to correct this board'
+                            : 'Correct score with audit history'}
+                          className="px-3 py-1.5 text-gray-700 hover:bg-gray-100 border border-gray-200 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           <History className="w-3.5 h-3.5 text-gray-500" />
                           <span>Edit / Audit</span>
@@ -807,7 +1010,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
       </div>
 
       {/* Score Correction Audit Log Card */}
-      {match.auditHistory && match.auditHistory.length > 0 && (
+      {auditHistory.length > 0 && (
         <div className="bg-white rounded-2xl border border-gray-200/80 p-5 shadow-xs">
           <div className="flex items-center space-x-2 text-gray-900 font-serif font-bold text-sm mb-3">
             <History className="w-4 h-4 text-purple-600" />
@@ -815,7 +1018,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
           </div>
 
           <div className="divide-y divide-gray-100 text-xs">
-            {match.auditHistory.map(item => (
+            {auditHistory.map(item => (
               <div key={item.id} className="py-2.5 flex items-center justify-between text-gray-600">
                 <div>
                   <span className="font-semibold text-gray-900">Board {item.boardNumber}: </span>
@@ -852,7 +1055,9 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                   setIsSubmitScoreModalOpen(false);
                   setIsEditAuditModalOpen(false);
                 }}
-                className="text-gray-400 hover:text-gray-600"
+                disabled={busy === 'saveBoard'}
+                aria-label="Close"
+                className="text-gray-400 hover:text-gray-600 disabled:opacity-40"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -966,6 +1171,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 </div>
               )}
 
+              <InlineError message={errors.saveBoard} />
+
             </div>
 
             {/* Actions */}
@@ -976,7 +1183,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                   setIsSubmitScoreModalOpen(false);
                   setIsEditAuditModalOpen(false);
                 }}
-                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl"
+                disabled={busy === 'saveBoard'}
+                className="px-4 py-2 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl disabled:opacity-40"
               >
                 Cancel
               </button>
@@ -984,9 +1192,23 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               <button
                 type="button"
                 onClick={isEditAuditModalOpen ? handleSaveScoreCorrection : handleSaveBoardScore}
-                className="px-5 py-2 text-xs font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white rounded-xl shadow-md flex items-center gap-1.5"
+                disabled={
+                  !!busy
+                  || (isEditAuditModalOpen && !auditReason.trim())
+                  || (!isEditAuditModalOpen && classicFormIsEmpty)
+                }
+                title={
+                  isEditAuditModalOpen && !auditReason.trim()
+                    ? 'A correction needs a reason'
+                    : (!isEditAuditModalOpen && classicFormIsEmpty)
+                      ? 'Enter the board first — a score, a winner, or the queen'
+                      : undefined
+                }
+                className="px-5 py-2 text-xs font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white rounded-xl shadow-md flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                <Check className="w-4 h-4 text-[#D4A72C]" />
+                {busy === 'saveBoard'
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : <Check className="w-4 h-4 text-[#D4A72C]" />}
                 <span>{isEditAuditModalOpen ? 'Save Correction Log' : 'Save Board Score'}</span>
               </button>
             </div>
@@ -1018,11 +1240,47 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         variant="primary"
       />
 
+      <ConfirmationModal
+        isOpen={isRemoveBoardsModalOpen}
+        onClose={() => setIsRemoveBoardsModalOpen(false)}
+        onConfirm={removeUnplayedBoards}
+        title="Remove the unplayed boards?"
+        description={`This match currently has ${allBoards.length} boards. The boards at the end that were never played are removed; any board with a score on it is kept.`}
+        confirmLabel="Remove unplayed boards"
+        variant="warning"
+      />
+
+      <ReasonModal
+        isOpen={!!tieBreakTarget}
+        onClose={() => setTieBreakTarget(null)}
+        onConfirm={decideTieBreak}
+        title={`Award this match to ${tieBreakTarget?.name || ''}?`}
+        description="The scores are level, so this is your ruling. Say why — it is recorded with the result."
+        placeholder="e.g. Organiser ruling — opponent conceded the deciding board"
+        confirmLabel={`Award to ${tieBreakTarget?.name || ''}`}
+        busy={busy === 'tieBreak'}
+        error={errors.tieBreak}
+        variant="warning"
+      />
+
+      <ReasonModal
+        isOpen={isReopenModalOpen}
+        onClose={() => setIsReopenModalOpen(false)}
+        onConfirm={reopenResult}
+        title="Reopen this result?"
+        description={`The match goes back to live so its boards can be corrected, and ${match.winnerName || 'the winner'} is taken out of the next round until the result is confirmed again. Say why — it is recorded with the match.`}
+        placeholder="e.g. Board 3 was entered against the wrong player"
+        confirmLabel="Reopen result"
+        busy={busy === 'reopen'}
+        error={errors.reopen}
+        variant="danger"
+      />
+
       {isWalkoverModalOpen && (
         <WalkoverModal
           match={match}
           onClose={() => setIsWalkoverModalOpen(false)}
-          onDone={() => refreshData()}
+          onDone={() => refreshTournaments()}
         />
       )}
 

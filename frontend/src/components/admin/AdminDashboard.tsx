@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { 
   Plus, 
   Trophy, 
@@ -18,10 +18,13 @@ import {
   Activity,
   Award,
   Edit3,
-  Trash2
+  Trash2,
+  Ban,
+  AlertTriangle
 } from 'lucide-react';
-import { Tournament, Match } from '../../types/tournament';
+import { Tournament, TournamentStatus, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { ConfirmationModal } from '../common/ConfirmationModal';
 import { CreateTournamentModal } from './CreateTournamentModal';
 import { EditTournamentModal } from './EditTournamentModal';
 import { PosterGeneratorModal } from './PosterGeneratorModal';
@@ -38,19 +41,44 @@ import { useNotify } from '../../context/NotificationContext';
 import { accessService, PERMISSIVE_ACCESS, TournamentAccess } from '../../services/accessService';
 import { TournamentAccessPanel } from './TournamentAccessPanel';
 
+/**
+ * 'scheduled' and 'ongoing' are the original schema's names for
+ * 'fixture_published' and 'in_progress', and rows written before migration
+ * 002 still carry them. Everything that decides what the organiser may do
+ * next reads the status through this, so the two spellings behave alike.
+ */
+function canonicalStatus(status: TournamentStatus): TournamentStatus {
+  if (status === 'scheduled') return 'fixture_published';
+  if (status === 'ongoing') return 'in_progress';
+  return status;
+}
+
+/** A timestamp as the organiser reads it; the raw value if it will not parse. */
+function whenText(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+type LifecycleAction = 'open' | 'close' | 'start' | 'complete' | 'cancel';
+
 export const AdminDashboard: React.FC = () => {
-  const { 
-    tournaments, 
-    activeTournamentId, 
+  const {
+    tournaments,
+    activeTournamentId,
     setActiveTournamentId,
     activeMatch,
     setActiveMatch,
     role,
     publishTournament,
+    closeRegistration,
     updateTournament,
     deleteTournament,
     startTournament,
-    finishTournament
+    finishTournament,
+    cancelTournament
   } = useTournament();
 
   const notify = useNotify();
@@ -74,27 +102,40 @@ export const AdminDashboard: React.FC = () => {
 
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
 
+  // Which tournament the answer in flight is about. Clicking along a row of
+  // tournament cards starts one of these per card, and they come back in
+  // whatever order the network chooses -- so a slow answer about the card
+  // before last could arrive last and leave that tournament's permissions on
+  // screen while a different tournament is open. Only the newest is applied.
+  const accessRequestId = useRef(0);
+
   // Re-asked whenever the selected tournament changes. A failure here must not
   // lock the operator out of their own screen, so the assumption on error is
   // permissive and the server still has the final say on every action.
   const refreshAccess = useCallback(() => {
     const id = currentTournament?.id;
+    const ticket = ++accessRequestId.current;
+    const current = () => ticket === accessRequestId.current;
     if (!id) { setAccess(PERMISSIVE_ACCESS); setPendingAccessCount(0); return; }
     accessService.myAccessFor(id)
       .then(a => {
+        if (!current()) return;
         setAccess(a);
         // The badge has to be loaded here rather than by the panel: the panel
         // only mounts once its tab is open, and a request nobody has noticed
         // yet is exactly the thing the badge is for.
         if (a.isOwner) {
           accessService.listRequests(id)
-            .then(rs => setPendingAccessCount((rs || []).filter(r => r.status === 'pending').length))
-            .catch(() => setPendingAccessCount(0));
+            .then(rs => {
+              if (!current()) return;
+              setPendingAccessCount((rs || []).filter(r => r.status === 'pending').length);
+            })
+            .catch(() => { if (current()) setPendingAccessCount(0); });
         } else {
           setPendingAccessCount(0);
         }
       })
-      .catch(() => setAccess(PERMISSIVE_ACCESS));
+      .catch(() => { if (current()) setAccess(PERMISSIVE_ACCESS); });
   }, [currentTournament?.id]);
 
   useEffect(() => { refreshAccess(); }, [refreshAccess]);
@@ -119,52 +160,87 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  const startDay = async () => {
-    if (!currentTournament || busy) return;
+  // The lifecycle controls.
+  //
+  // Which move is in flight, so its own button can say so while the others
+  // wait; `busy` alone cannot tell them apart.
+  const [lifecycleAction, setLifecycleAction] = useState<LifecycleAction | null>(null);
+  // The server's explanation of a refused move, kept next to the buttons. A
+  // toast is not enough here: /complete's 409 lists the matches still open,
+  // and the organiser needs that list in view while they go and finish them.
+  const [lifecycleError, setLifecycleError] = useState('');
+  const [isCompleteModalOpen, setIsCompleteModalOpen] = useState(false);
+  // Cancelling needs a reason before there is anything to confirm, so the
+  // button first reveals a field for one and only then offers the confirmation.
+  const [isCancelPanelOpen, setIsCancelPanelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
+
+  // A refusal, or a half-typed reason, belongs to the tournament it was about.
+  useEffect(() => {
+    setLifecycleError('');
+    setIsCancelPanelOpen(false);
+    setCancelReason('');
+  }, [currentTournament?.id]);
+
+  const stage = currentTournament ? canonicalStatus(currentTournament.status) : null;
+  const isTerminal = stage === 'completed' || stage === 'cancelled';
+
+  // What /complete will hold against us. The server is the judge -- it lists
+  // exactly what is open when it refuses -- but the count in the confirmation
+  // means the refusal is not a surprise.
+  const unfinishedMatches = (currentTournament?.matches || []).filter(
+    m => !m.resultConfirmed && !m.walkover && (m.status as string) !== 'cancelled'
+  ).length;
+
+  // One path for every move: the button says what it is doing, and whatever
+  // the server answers is shown where the button is. Resolves to whether the
+  // move landed, so a caller can tidy up (close a panel) only on success.
+  const runLifecycle = async (
+    action: LifecycleAction,
+    move: (id: string) => Promise<void>,
+    done: string,
+    fallback: string,
+  ): Promise<boolean> => {
+    if (!currentTournament || busy) return false;
     setBusy(true);
+    setLifecycleAction(action);
+    setLifecycleError('');
     try {
-      await startTournament(currentTournament.id);
-      notify.success('Match day started.');
+      await move(currentTournament.id);
+      notify.success(done);
+      return true;
     } catch (e) {
-      notify.report(e, 'Could not start the tournament.');
+      setLifecycleError(notify.report(e, fallback));
+      return false;
     } finally {
       setBusy(false);
+      setLifecycleAction(null);
     }
   };
 
-  const finishDay = async () => {
-    if (!currentTournament || busy) return;
-    const unconfirmed = (currentTournament.matches || []).filter(m => !m.resultConfirmed).length;
-    const ok = window.confirm(
-      unconfirmed
-        ? `${unconfirmed} match(es) are not yet confirmed. Finish the tournament anyway?
-
-The standings become final as they are.`
-        : 'Finish the tournament? The standings become final.'
+  const openRegistrationNow = () =>
+    runLifecycle('open', publishTournament, 'Registration is open.', 'Could not open registration.');
+  const closeRegistrationNow = () =>
+    runLifecycle('close', closeRegistration, 'Registration is closed.', 'Could not close registration.');
+  const startNow = () =>
+    runLifecycle('start', startTournament, 'The tournament is under way.', 'Could not start the tournament.');
+  const completeNow = () =>
+    runLifecycle('complete', finishTournament, 'Tournament complete.', 'Could not complete the tournament.');
+  const cancelNow = async () => {
+    const reason = cancelReason.trim();
+    if (!reason) return;
+    const ok = await runLifecycle(
+      'cancel', id => cancelTournament(id, reason), 'Tournament cancelled.', 'Could not cancel the tournament.'
     );
-    if (!ok) return;
-    setBusy(true);
-    try {
-      await finishTournament(currentTournament.id);
-      notify.success('Tournament complete.');
-    } catch (e) {
-      notify.report(e, 'Could not finish the tournament.');
-    } finally {
-      setBusy(false);
+    if (ok) {
+      setIsCancelPanelOpen(false);
+      setCancelReason('');
     }
   };
 
-  const publish = async () => {
-    if (!currentTournament || busy) return;
-    setBusy(true);
-    try {
-      await publishTournament(currentTournament.id);
-    } catch (e) {
-      notify.report(e, 'Could not publish the tournament.');
-    } finally {
-      setBusy(false);
-    }
-  };
+  const lifecycleLabel = (action: LifecycleAction, idle: string, working: string) =>
+    lifecycleAction === action ? working : idle;
 
   const [isEditingRules, setIsEditingRules] = useState(false);
   const [scoringForm, setScoringForm] = useState<ScoringRules>(defaultScoringRules);
@@ -219,12 +295,20 @@ The standings become final as they are.`
         queenAwardTo: r.queenAwardTo || 'coverer',
         tieBreak: r.tieBreak || 'additional_board',
       });
+      setRulesError('');
       setIsEditingRules(true);
     }
   };
 
+  // Saving the rules is a write and a reload of the whole draw, so it is not
+  // instant. It had no guard and no catch: a second click sent a second
+  // request, and a refusal left the form open with nothing said and the
+  // organiser's edits apparently accepted.
+  const [savingRules, setSavingRules] = useState(false);
+  const [rulesError, setRulesError] = useState('');
+
   const saveRulesChanges = async () => {
-    if (currentTournament) {
+    if (currentTournament && !savingRules) {
       const updates = {
         venue: rulesForm.venue,
         numberOfBoards: rulesForm.numberOfBoards,
@@ -246,8 +330,17 @@ The standings become final as they are.`
         }
       };
 
-      await updateTournament(currentTournament.id, updates);
-      setIsEditingRules(false);
+      setSavingRules(true);
+      setRulesError('');
+      try {
+        await updateTournament(currentTournament.id, updates);
+        notify.success('Settings saved.');
+        setIsEditingRules(false);
+      } catch (e) {
+        setRulesError(notify.report(e, 'Could not save the settings.'));
+      } finally {
+        setSavingRules(false);
+      }
     }
   };
 
@@ -346,12 +439,13 @@ The standings become final as they are.`
                   {/* Status & Category Pills */}
                   <div className="flex items-center justify-between mb-3">
                     <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                      t.status === 'ongoing' ? 'bg-orange-100 text-orange-800' :
+                      t.status === 'ongoing' || t.status === 'in_progress' ? 'bg-orange-100 text-orange-800' :
                       t.status === 'registration_open' ? 'bg-emerald-100 text-emerald-800' :
                       t.status === 'completed' ? 'bg-gray-100 text-gray-700' :
+                      t.status === 'cancelled' ? 'bg-red-100 text-red-800' :
                       'bg-blue-100 text-blue-800'
                     }`}>
-                      {t.status.replace('_', ' ')}
+                      {t.status.replace(/_/g, ' ')}
                     </span>
 
                     <span className="text-[11px] font-bold text-gray-500 uppercase">
@@ -432,8 +526,12 @@ The standings become final as they are.`
                     <h3 className="text-xl sm:text-2xl font-bold text-gray-900">
                       {currentTournament.name}
                     </h3>
-                    <span className="px-3 py-0.5 bg-[#2E7D3222] text-[#2E7D32] text-xs font-bold rounded-full border border-[#2E7D32]">
-                      {currentTournament.status === 'ongoing' ? 'Ongoing' : currentTournament.status.replace('_', ' ').toUpperCase()}
+                    <span className={`px-3 py-0.5 text-xs font-bold rounded-full border ${
+                      stage === 'cancelled'
+                        ? 'bg-red-50 text-red-700 border-red-300'
+                        : 'bg-[#2E7D3222] text-[#2E7D32] border-[#2E7D32]'
+                    }`}>
+                      {currentTournament.status.replace(/_/g, ' ').toUpperCase()}
                     </span>
                   </div>
                 </div>
@@ -472,54 +570,165 @@ The standings become final as they are.`
                   </button>
                   )}
 
-                  {currentTournament.status === 'draft' && (
+                  {/* The lifecycle: only the moves that are legal from where
+                      the tournament stands. The server refuses the rest with a
+                      409, and offering them was what produced that click.
+                      Owner and managers only -- a scorer's role carries no
+                      tournament.lifecycle permission, so for them the buttons
+                      would only ever come back 403. */}
+                  {access.canManage && stage === 'draft' && (
                     <button
-                      onClick={publish}
-                      disabled={busy}
-                      className="px-4 py-2 bg-[#D4A72C] hover:opacity-90 text-[#0B5D3B] text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5"
-                    >
-                      <Share2 className="w-3.5 h-3.5" />
-                      <span>Publish Tournament</span>
-                    </button>
-                  )}
-
-                  {/* The rest of the lifecycle, which had no controls at all.
-                      Until now a tournament stayed at "registration open" while
-                      its draw was already fixed -- still inviting entries it
-                      could not accommodate -- and could never be finished. */}
-                  {(currentTournament.status === 'registration_closed'
-                    || currentTournament.status === 'scheduled') && access.canManage && (
-                    <button
-                      onClick={startDay}
-                      disabled={busy}
-                      className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-40"
-                      title="Mark the tournament as under way. Registration closes to new entries."
-                    >
-                      <Play className="w-3.5 h-3.5" />
-                      <span>Start Match Day</span>
-                    </button>
-                  )}
-
-                  {currentTournament.status === 'ongoing' && access.canManage && (
-                    <button
-                      onClick={finishDay}
+                      onClick={openRegistrationNow}
                       disabled={busy}
                       className="px-4 py-2 bg-[#D4A72C] hover:opacity-90 text-[#0B5D3B] text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-40"
-                      title="Close the tournament. The standings become final."
+                      title="Publish the tournament and start taking entries."
                     >
-                      <Trophy className="w-3.5 h-3.5" />
-                      <span>Finish Tournament</span>
+                      <Share2 className="w-3.5 h-3.5" />
+                      <span>{lifecycleLabel('open', 'Open registration', 'Opening…')}</span>
                     </button>
                   )}
 
-                  {currentTournament.status === 'completed' && (
-                    <span className="px-4 py-2 bg-emerald-50 text-emerald-800 text-xs font-black rounded-xl border border-emerald-200 flex items-center gap-1.5">
+                  {access.canManage && stage === 'registration_open' && (
+                    <button
+                      onClick={closeRegistrationNow}
+                      disabled={busy}
+                      className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-40"
+                      title="Stop taking entries so the draw can be made."
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>{lifecycleLabel('close', 'Close registration', 'Closing…')}</span>
+                    </button>
+                  )}
+
+                  {access.canManage && (stage === 'registration_closed'
+                    || stage === 'fixture_generation'
+                    || stage === 'fixture_published') && (
+                    <button
+                      onClick={startNow}
+                      disabled={busy}
+                      className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-40"
+                      title="Mark the tournament as under way. It needs a draw first."
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      <span>{lifecycleLabel('start', 'Start tournament', 'Starting…')}</span>
+                    </button>
+                  )}
+
+                  {access.canManage && stage === 'in_progress' && (
+                    <button
+                      onClick={() => setIsCompleteModalOpen(true)}
+                      disabled={busy}
+                      className="px-4 py-2 bg-[#D4A72C] hover:opacity-90 text-[#0B5D3B] text-xs font-black rounded-xl shadow-md transition-colors flex items-center gap-1.5 disabled:opacity-40"
+                      title="Close the tournament and record the champion. Every match must be settled first."
+                    >
                       <Trophy className="w-3.5 h-3.5" />
-                      <span>Tournament complete</span>
-                    </span>
+                      <span>{lifecycleLabel('complete', 'Complete tournament', 'Completing…')}</span>
+                    </button>
+                  )}
+
+                  {access.canManage && stage && !isTerminal && (
+                    <button
+                      onClick={() => { setIsCancelPanelOpen(v => !v); setLifecycleError(''); }}
+                      disabled={busy}
+                      aria-expanded={isCancelPanelOpen}
+                      className={`px-3.5 py-2 text-xs font-bold rounded-xl border flex items-center gap-1.5 transition-colors shadow-xs disabled:opacity-40 ${
+                        isCancelPanelOpen
+                          ? 'bg-red-600 border-red-600 text-white hover:bg-red-700'
+                          : 'bg-red-50 hover:bg-red-100 text-red-800 border-red-300'
+                      }`}
+                      title="Call the tournament off. Every participant is told, and why."
+                    >
+                      <Ban className={`w-3.5 h-3.5 ${isCancelPanelOpen ? 'text-white' : 'text-red-600'}`} />
+                      <span>{lifecycleLabel('cancel', 'Cancel tournament', 'Cancelling…')}</span>
+                    </button>
                   )}
                 </div>
               </div>
+
+              {/* What the lifecycle has to say: a refused move, the
+                  cancellation form, or how the tournament ended. Below the
+                  header rather than in it so a long refusal can wrap. */}
+              {(lifecycleError || isCancelPanelOpen || isTerminal) && (
+                <div className="px-4 sm:px-6 py-3 bg-white border-b border-gray-200/80 space-y-3">
+                  {lifecycleError && (
+                    <div
+                      role="alert"
+                      className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 leading-relaxed"
+                    >
+                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                      <span className="whitespace-pre-line">{lifecycleError}</span>
+                    </div>
+                  )}
+
+                  {isCancelPanelOpen && !isTerminal && (
+                    <form
+                      onSubmit={e => { e.preventDefault(); if (cancelReason.trim() && !busy) setIsCancelModalOpen(true); }}
+                      className="flex flex-col sm:flex-row sm:items-end gap-2 p-3 rounded-xl bg-red-50/60 border border-red-200"
+                    >
+                      <label className="flex-1 text-[11px] font-bold text-red-900 uppercase tracking-wider">
+                        Why is the tournament being cancelled?
+                        <input
+                          type="text"
+                          value={cancelReason}
+                          onChange={e => setCancelReason(e.target.value)}
+                          disabled={busy}
+                          autoFocus
+                          maxLength={500}
+                          placeholder="e.g. Venue unavailable on the tournament dates"
+                          className="mt-1 w-full px-3 py-2 text-xs font-medium normal-case tracking-normal text-gray-900 bg-white border border-red-200 rounded-lg focus:border-red-500 focus:ring-1 focus:ring-red-500 outline-none"
+                        />
+                      </label>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => { setIsCancelPanelOpen(false); setCancelReason(''); }}
+                          disabled={busy}
+                          className="px-3.5 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 rounded-xl transition-colors disabled:opacity-40"
+                        >
+                          Keep tournament
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={!cancelReason.trim() || busy}
+                          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-black rounded-xl shadow-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          Cancel tournament…
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {stage === 'completed' && (
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+                      <span className="flex items-center gap-1.5 font-black">
+                        <Trophy className="w-4 h-4 text-[#D4A72C]" />
+                        Tournament complete
+                      </span>
+                      <span>
+                        Champion: <strong>{currentTournament.championName || 'not recorded'}</strong>
+                      </span>
+                      {currentTournament.completedAt && (
+                        <span className="text-emerald-800/80">Completed {whenText(currentTournament.completedAt)}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {stage === 'cancelled' && (
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-900">
+                      <span className="flex items-center gap-1.5 font-black">
+                        <Ban className="w-4 h-4 text-red-600" />
+                        Tournament cancelled
+                      </span>
+                      <span>
+                        Reason: <strong>{currentTournament.cancelReason || 'not recorded'}</strong>
+                      </span>
+                      {currentTournament.cancelledAt && (
+                        <span className="text-red-800/80">Cancelled {whenText(currentTournament.cancelledAt)}</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Sub-Tabs Navigation */}
               <OperationsBar tournament={currentTournament} />
@@ -566,6 +775,12 @@ The standings become final as they are.`
               <div className="p-6 bg-[#F8F6F0]/40">
                 {activeTab === 'fixtures' && (
                   <FixtureScheduleView
+                    // Keyed by tournament so it remounts when a different one
+                    // is selected. Without this it kept the previous
+                    // tournament's search and round filter -- and then saved
+                    // them under the NEW tournament's id, so switching between
+                    // two tournaments swapped their remembered filters over.
+                    key={currentTournament.id}
                     tournament={currentTournament}
                     onOpenMatch={(m) => setActiveMatch(m)}
                   />
@@ -603,17 +818,24 @@ The standings become final as they are.`
                     <div className="flex flex-col sm:flex-row sm:justify-end gap-2 bg-white p-3 rounded-2xl border border-gray-200 shadow-2xs">
                       {isEditingRules ? (
                         <>
+                          {rulesError && (
+                            <span role="alert" className="flex-1 text-xs text-red-800 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                              {rulesError}
+                            </span>
+                          )}
                           <button
                             onClick={() => setIsEditingRules(false)}
-                            className="w-full sm:w-auto px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-xl transition-colors"
+                            disabled={savingRules}
+                            className="w-full sm:w-auto px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold rounded-xl transition-colors disabled:opacity-50"
                           >
                             Cancel
                           </button>
                           <button
                             onClick={saveRulesChanges}
-                            className="w-full sm:w-auto px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all"
+                            disabled={savingRules}
+                            className="w-full sm:w-auto px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all disabled:opacity-60"
                           >
-                            Save Rules & Venue Details
+                            {savingRules ? 'Saving…' : 'Save Rules & Venue Details'}
                           </button>
                         </>
                       ) : (
@@ -883,6 +1105,44 @@ The standings become final as they are.`
           isOpen={isEditModalOpen}
           onClose={() => setIsEditModalOpen(false)}
           tournament={currentTournament}
+        />
+      )}
+
+      {/* Completing is final and cancelling is final; both get a second look.
+          Neither modal awaits anything -- runLifecycle owns the busy state and
+          the error, and catches its own rejection, so the floating call here
+          cannot reach the console. */}
+      {currentTournament && (
+        <ConfirmationModal
+          isOpen={isCompleteModalOpen}
+          onClose={() => setIsCompleteModalOpen(false)}
+          onConfirm={() => { completeNow(); }}
+          title={`Complete "${currentTournament.name}"?`}
+          description={
+            unfinishedMatches > 0
+              ? `${unfinishedMatches} match${unfinishedMatches === 1 ? ' is' : 'es are'} not yet settled. ` +
+                'The tournament only closes once every match is confirmed, a walkover, or cancelled; ' +
+                'if any are still open the server will refuse and list them here.'
+              : 'Every match is settled. The standings become final, the champion is recorded, and every participant is told.'
+          }
+          confirmLabel="Complete tournament"
+          variant="primary"
+        />
+      )}
+
+      {currentTournament && (
+        <ConfirmationModal
+          isOpen={isCancelModalOpen}
+          onClose={() => setIsCancelModalOpen(false)}
+          onConfirm={() => { cancelNow(); }}
+          title={`Cancel "${currentTournament.name}"?`}
+          description={
+            `Every registered participant will be told the tournament is off, and why: "${cancelReason.trim()}". ` +
+            'A cancelled tournament cannot be reopened, redrawn or scored.'
+          }
+          confirmLabel="Cancel tournament"
+          cancelLabel="Keep tournament"
+          variant="danger"
         />
       )}
 

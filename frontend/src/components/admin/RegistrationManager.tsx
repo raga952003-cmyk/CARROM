@@ -15,10 +15,12 @@ import {
   AlertCircle,
   Trophy,
   CheckCircle2,
-  Upload
+  Upload,
+  Loader2
 } from 'lucide-react';
 import { Tournament, Registration, Player, Team } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { useNotify } from '../../context/NotificationContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { ImportParticipantsModal } from './ImportParticipantsModal';
 
@@ -43,7 +45,17 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const [isCloseModalOpen, setIsCloseModalOpen] = useState(false);
   const [isAddPlayerModalOpen, setIsAddPlayerModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
-  
+  const notify = useNotify();
+  // The entry a reject is being confirmed for; the modal is open while set.
+  const [rejectTarget, setRejectTarget] = useState<Registration | null>(null);
+  // Which row's approve or reject is in flight, as "<regId>:<action>", and the
+  // last failure per row, kept in the row so it is read next to the button
+  // that was pressed. The toast still fires as well.
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
+  const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  const [isClosing, setIsClosing] = useState(false);
+  const [closeError, setCloseError] = useState('');
+
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>(allPlayers[0]?.id || '');
   const [selectedTeamId, setSelectedTeamId] = useState<string>(allTeams[0]?.id || '');
   const [regType, setRegType] = useState<'singles' | 'doubles'>('singles');
@@ -214,6 +226,81 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
     }
   };
 
+  const runRow = async (reg: Registration, action: 'approve' | 'reject', fn: () => Promise<void>, fallback: string) => {
+    if (rowBusy) return;
+    setRowBusy(`${reg.id}:${action}`);
+    setRowErrors(prev => ({ ...prev, [reg.id]: '' }));
+    try {
+      await fn();
+    } catch (e) {
+      setRowErrors(prev => ({ ...prev, [reg.id]: notify.report(e, fallback) }));
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const approve = (reg: Registration) =>
+    runRow(reg, 'approve', () => approveRegistration(tournament.id, reg.id), 'Could not approve this entry.');
+
+  const reject = () => {
+    if (!rejectTarget) return;
+    const reg = rejectTarget;
+    return runRow(reg, 'reject', () => rejectRegistration(tournament.id, reg.id), 'Could not reject this entry.');
+  };
+
+  const runClose = async () => {
+    if (isClosing) return;
+    setIsClosing(true);
+    setCloseError('');
+    try {
+      await closeRegistration(tournament.id);
+    } catch (e) {
+      setCloseError(notify.report(e, 'Could not close registration.'));
+    } finally {
+      setIsClosing(false);
+    }
+  };
+
+  const entryName = (reg: Registration) => reg.type === 'singles'
+    ? reg.player?.name || 'This player'
+    : reg.team?.name || `${reg.team?.player1?.name || ''} & ${reg.team?.player2?.name || ''}`;
+
+  // What the row says about money. Every entry used to read "(Paid)" whatever
+  // had happened, which is the one thing a payment column must not do. The
+  // registration carries its own status, so that is shown; a row without one
+  // shows the fee and makes no claim about whether it was paid.
+  const paymentCell = (reg: Registration) => {
+    if (!tournament.entryFee) {
+      return <span className="text-[11px] font-medium text-gray-600">Free entry</span>;
+    }
+    const fee = `₹${tournament.entryFee}`;
+    switch (reg.paymentStatus) {
+      case 'paid':
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
+            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+            {fee} · Paid
+          </span>
+        );
+      case 'waived':
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-blue-700">
+            <ShieldCheck className="w-3 h-3 text-blue-600" />
+            {fee} · Waived
+          </span>
+        );
+      case 'pending':
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700">
+            <Clock className="w-3 h-3 text-amber-600" />
+            {fee} · Payment pending
+          </span>
+        );
+      default:
+        return <span className="text-[11px] font-medium text-gray-600">{fee}</span>;
+    }
+  };
+
   return (
     <div id="registration-manager" className="space-y-5">
       
@@ -243,7 +330,8 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
         </div>
 
         {/* Action CTAs */}
-        <div className="flex items-center space-x-2 shrink-0">
+        <div className="flex flex-col items-stretch md:items-end gap-1.5 shrink-0">
+        <div className="flex items-center space-x-2">
           <button
             type="button"
             onClick={() => setIsAddPlayerModalOpen(true)}
@@ -266,12 +354,19 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
           {tournament.status === 'registration_open' && (
             <button
               onClick={() => setIsCloseModalOpen(true)}
-              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+              disabled={isClosing}
+              className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
             >
-              <Lock className="w-4 h-4" />
-              <span>Close Registration</span>
+              {isClosing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+              <span>{isClosing ? 'Closing…' : 'Close Registration'}</span>
             </button>
           )}
+        </div>
+        {closeError && (
+          <div role="alert" className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5 font-medium">
+            {closeError}
+          </div>
+        )}
         </div>
       </div>
 
@@ -405,10 +500,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                       </td>
 
                       <td className="px-3 py-3">
-                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                          ₹{tournament.entryFee} (Paid)
-                        </span>
+                        {paymentCell(reg)}
                       </td>
 
                       <td className="px-3 py-3">
@@ -427,24 +519,35 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                         <div className="flex items-center justify-end space-x-1">
                           {reg.status !== 'approved' && (
                             <button
-                              onClick={() => approveRegistration(tournament.id, reg.id)}
-                              className="p-1 text-emerald-700 hover:bg-emerald-100 rounded transition-colors"
+                              onClick={() => approve(reg)}
+                              disabled={!!rowBusy}
+                              className="p-1 text-emerald-700 hover:bg-emerald-100 rounded transition-colors disabled:opacity-40"
                               title="Approve entry"
                             >
-                              <Check className="w-4 h-4" />
+                              {rowBusy === `${reg.id}:approve`
+                                ? <Loader2 className="w-4 h-4 animate-spin" />
+                                : <Check className="w-4 h-4" />}
                             </button>
                           )}
 
                           {reg.status !== 'rejected' && (
                             <button
-                              onClick={() => rejectRegistration(tournament.id, reg.id)}
-                              className="p-1 text-red-600 hover:bg-red-100 rounded transition-colors"
+                              onClick={() => setRejectTarget(reg)}
+                              disabled={!!rowBusy}
+                              className="p-1 text-red-600 hover:bg-red-100 rounded transition-colors disabled:opacity-40"
                               title="Reject entry"
                             >
-                              <X className="w-4 h-4" />
+                              {rowBusy === `${reg.id}:reject`
+                                ? <Loader2 className="w-4 h-4 animate-spin" />
+                                : <X className="w-4 h-4" />}
                             </button>
                           )}
                         </div>
+                        {rowErrors[reg.id] && (
+                          <div role="alert" className="mt-1 text-[10px] text-red-700 font-medium">
+                            {rowErrors[reg.id]}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -459,11 +562,27 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
       <ConfirmationModal
         isOpen={isCloseModalOpen}
         onClose={() => setIsCloseModalOpen(false)}
-        onConfirm={() => closeRegistration(tournament.id)}
+        onConfirm={runClose}
         title="Close Registration Window?"
         description="Closing registrations will finalize the player pool and unlock automatic fixture and schedule generation. New player registrations will be disabled."
         confirmLabel="Close Registration"
         variant="warning"
+      />
+
+      {/* Rejecting used to happen on the click, with no way back but finding
+          the row again and approving it. */}
+      <ConfirmationModal
+        isOpen={!!rejectTarget}
+        onClose={() => setRejectTarget(null)}
+        onConfirm={reject}
+        title="Reject this entry?"
+        description={
+          `${rejectTarget ? entryName(rejectTarget) : 'This entry'} is marked rejected and left out of the draw.`
+          + (rejectTarget?.status === 'approved' ? ' They are approved at the moment, so this withdraws that approval.' : '')
+          + ' The entry can be approved again later if that changes.'
+        }
+        confirmLabel="Reject Entry"
+        variant="danger"
       />
 
       {/* Add Player / Team Modal */}

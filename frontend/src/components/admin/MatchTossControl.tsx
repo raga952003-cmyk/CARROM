@@ -35,7 +35,7 @@ const STEPS: { key: Step; label: string }[] = [
 export const MatchTossControl: React.FC<MatchTossControlProps> = ({
   tournament, match, onBack, onStarted,
 }) => {
-  const { recordToss, startMatch, refreshData } = useTournament();
+  const { recordToss, startMatch, refreshTournaments } = useTournament();
 
   const [step, setStep] = useState<Step>('intro');
   const [spinning, setSpinning] = useState(false);
@@ -100,7 +100,7 @@ export const MatchTossControl: React.FC<MatchTossControlProps> = ({
       if (match.status !== 'live') {
         await startMatch(tournament.id, match.id);
       } else {
-        await refreshData();
+        await refreshTournaments();
       }
       onStarted(tossWarning || undefined);
     } catch (e: any) {

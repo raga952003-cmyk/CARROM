@@ -1,10 +1,20 @@
-import React, { useState } from 'react';
-import { Users, Search, UserPlus, Edit3, Trash2, X, Check, ShieldAlert } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { Users, Search, UserPlus, Edit3, Trash2, X, Check, ShieldAlert, Loader2 } from 'lucide-react';
 import { Player } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { useNotify } from '../../context/NotificationContext';
 
 export const ManagePlayersTab: React.FC = () => {
   const { allPlayers, createPlayerAccount, updatePlayerAccount, deletePlayerAccount } = useTournament();
+  const notify = useNotify();
+
+  // Creating a player is an auth account, a profile row and a reload of the
+  // directory. Without a guard a second click during that -- and it is not
+  // fast -- created a second player, and a failure closed nothing and said
+  // nothing, so the form looked stuck.
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -17,13 +27,19 @@ export const ManagePlayersTab: React.FC = () => {
   const [rating, setRating] = useState(1500);
   const [seed, setSeed] = useState<number | undefined>(undefined);
 
-  const filteredPlayers = allPlayers.filter(p => 
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (p.club && p.club.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (p.city && p.city.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  // Lowercased once, not once per player per keystroke.
+  const filteredPlayers = useMemo(() => {
+    const needle = searchTerm.trim().toLowerCase();
+    if (!needle) return allPlayers;
+    return allPlayers.filter(p =>
+      p.name.toLowerCase().includes(needle) ||
+      (p.club && p.club.toLowerCase().includes(needle)) ||
+      (p.city && p.city.toLowerCase().includes(needle))
+    );
+  }, [allPlayers, searchTerm]);
 
   const handleOpenAdd = () => {
+    setFormError('');
     setEditingPlayer(null);
     setName('');
     setClub('');
@@ -34,6 +50,7 @@ export const ManagePlayersTab: React.FC = () => {
   };
 
   const handleOpenEdit = (p: Player) => {
+    setFormError('');
     setEditingPlayer(p);
     setName(p.name);
     setClub(p.club || '');
@@ -45,6 +62,7 @@ export const ManagePlayersTab: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     const playerData = {
       name,
       club: club || undefined,
@@ -53,17 +71,39 @@ export const ManagePlayersTab: React.FC = () => {
       seed: seed ? Number(seed) : undefined
     };
 
-    if (editingPlayer) {
-      await updatePlayerAccount(editingPlayer.id, playerData);
-    } else {
-      await createPlayerAccount(playerData);
+    setBusy(true);
+    setFormError('');
+    try {
+      if (editingPlayer) {
+        await updatePlayerAccount(editingPlayer.id, playerData);
+        notify.success(`Updated ${name}.`);
+      } else {
+        await createPlayerAccount(playerData);
+        notify.success(`Added ${name} to the directory.`);
+      }
+      setIsModalOpen(false);
+    } catch (err) {
+      setFormError(notify.report(err, editingPlayer
+        ? 'Could not update the player.'
+        : 'Could not create the player.'));
+    } finally {
+      setBusy(false);
     }
-    setIsModalOpen(false);
   };
 
   const handleDelete = async (id: string, playerName: string) => {
-    if (window.confirm(`Are you sure you want to permanently delete player account "${playerName}"?`)) {
+    if (deletingId) return;
+    if (!window.confirm(`Are you sure you want to permanently delete player account "${playerName}"?`)) return;
+    setDeletingId(id);
+    try {
       await deletePlayerAccount(id);
+      notify.success(`Deleted ${playerName}.`);
+    } catch (err) {
+      // Previously this rejection went nowhere: the row stayed put and the
+      // organiser was told nothing at all.
+      notify.report(err, `Could not delete ${playerName}.`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -164,6 +204,7 @@ export const ManagePlayersTab: React.FC = () => {
                         </button>
                         <button
                           onClick={() => handleDelete(player.id, player.name)}
+                          disabled={deletingId === player.id}
                           className="p-1.5 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                           title="Delete player account"
                         >
@@ -271,21 +312,35 @@ export const ManagePlayersTab: React.FC = () => {
                 </div>
               )}
 
+              {formError && (
+                <div role="alert" className="p-2.5 bg-red-50 border border-red-200 text-red-800 rounded-xl text-[11px]">
+                  {formError}
+                </div>
+              )}
+
               {/* Actions */}
               <div className="pt-2 flex justify-end space-x-2">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-600 hover:bg-gray-100"
+                  disabled={busy}
+                  className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-xl text-gray-600 hover:bg-gray-100 disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#094e32] text-white font-bold rounded-xl shadow-sm flex items-center gap-1.5"
+                  disabled={busy}
+                  className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#094e32] text-white font-bold rounded-xl shadow-sm flex items-center gap-1.5 disabled:opacity-60"
                 >
-                  <Check className="w-4 h-4 text-[#D4A72C]" />
-                  <span>{editingPlayer ? 'Update Profile' : 'Create Profile'}</span>
+                  {busy
+                    ? <Loader2 className="w-4 h-4 animate-spin text-[#D4A72C]" />
+                    : <Check className="w-4 h-4 text-[#D4A72C]" />}
+                  <span>
+                    {busy
+                      ? (editingPlayer ? 'Updating…' : 'Creating…')
+                      : (editingPlayer ? 'Update Profile' : 'Create Profile')}
+                  </span>
                 </button>
               </div>
             </form>

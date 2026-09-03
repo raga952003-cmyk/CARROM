@@ -6,13 +6,13 @@
 import { apiClient } from '../utils/apiClient';
 
 /**
- * Registration always creates a player.
+ * Registration, in whichever role the form asked for.
  *
- * `role` used to be sent from here and written straight into the account's
- * app_metadata, so anyone could register as an admin. The server now ignores
- * anything sent, and the field is gone from this type so nothing goes on
- * pretending otherwise. Admin rights are granted by an existing admin, or with
- * backend/db/promote_admin.py.
+ * `role` is sent from the browser and the server writes it, so registration is
+ * OPEN: anybody who can load the sign-up page can create an administrator
+ * account. That is deliberate for this deployment. The server still refuses a
+ * role that is neither 'player' nor 'admin', so a typo cannot create an
+ * account that is not what its owner thinks it is.
  */
 export interface SignUpData {
   email: string;
@@ -22,6 +22,8 @@ export interface SignUpData {
   city?: string;
   phone?: string;
   rating?: number;
+  /** 'player' or 'admin'. Defaults to a player when not sent. */
+  role?: 'player' | 'admin';
 }
 
 export interface LoginData {

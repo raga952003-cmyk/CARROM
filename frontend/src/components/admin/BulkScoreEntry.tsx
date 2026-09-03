@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { X, Check, Loader2, AlertTriangle, Zap } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { apiClient } from '../../utils/apiClient';
 
 interface BulkScoreEntryProps {
   tournament: Tournament;
@@ -25,20 +26,24 @@ interface Row {
  * outcomes rather than failing the whole batch.
  */
 export const BulkScoreEntry: React.FC<BulkScoreEntryProps> = ({ tournament, isOpen, onClose }) => {
-  const { submitBoardScore, confirmMatchResult, refreshData } = useTournament();
+  const { refreshTournaments } = useTournament();
 
   const [category, setCategory] = useState<'all' | 'singles' | 'doubles'>('all');
   const [rows, setRows] = useState<Record<string, Row>>({});
   const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<{ ok: number; failed: string[] } | null>(null);
 
+  // Only while the sheet is actually open, and keyed on the matches rather
+  // than the whole tournament: this filtered and sorted the entire draw on
+  // every refresh anywhere in the app, closed or not.
   const pending = useMemo(() => {
+    if (!isOpen) return [];
     return (tournament.matches || [])
       .filter(m => !m.resultConfirmed && m.player1Id && m.player2Id)
       .filter(m => category === 'all' || m.type === category)
       .sort((a, b) => a.matchNumber - b.matchNumber)
       .slice(0, 60);
-  }, [tournament, category]);
+  }, [tournament.matches, category, isOpen]);
 
   if (!isOpen) return null;
 
@@ -82,7 +87,15 @@ export const BulkScoreEntry: React.FC<BulkScoreEntryProps> = ({ tournament, isOp
         // remaining and score the board 0-0.
         const usesRemainingCoins = (tournament.rules as any)?.scoringMode === 'remaining_coins';
         const winner = p1 === p2 ? 'none' : (p1 > p2 ? 'player1' : 'player2');
-        await submitBoardScore(tournament.id, row.match.id, 1,
+        // Posted directly, not through the context.
+        //
+        // Every context write re-reads the draw when it returns, which is
+        // right for one button and catastrophic for sixty: entering a full
+        // round meant a hundred and twenty whole-tournament reads, one after
+        // another, while the sheet sat there. It also re-filtered the list
+        // between rows, so the fixture the organiser was about to type into
+        // moved. One read at the end says the same thing.
+        await apiClient.post(`/matches/${row.match.id}/boards/1/submit`,
           usesRemainingCoins
             ? {
                 p1Score: p1,
@@ -100,14 +113,14 @@ export const BulkScoreEntry: React.FC<BulkScoreEntryProps> = ({ tournament, isOp
                 auditReason: 'Bulk entry',
               }
         );
-        await confirmMatchResult(tournament.id, row.match.id);
+        await apiClient.post(`/matches/${row.match.id}/confirm`, {});
         ok += 1;
       } catch (e: any) {
         failed.push(`#${row.match.matchNumber}: ${e?.message || 'failed'}`);
       }
     }
 
-    await refreshData();
+    await refreshTournaments();
     setResults({ ok, failed });
     setRows({});
     setBusy(false);

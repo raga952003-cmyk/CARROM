@@ -8,6 +8,29 @@ interface OperationsBarProps {
 }
 
 /**
+ * One match-day button.
+ *
+ * Declared here rather than inside OperationsBar. A component defined during a
+ * render is a new component type every render, so React threw all seven of
+ * these away and rebuilt them on every refresh -- which now happens on every
+ * realtime change anywhere in the tournament.
+ */
+const Btn: React.FC<{ onClick: () => void; children: React.ReactNode; tone?: 'gold' }> =
+  ({ onClick, children, tone }) => (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border shrink-0 transition-colors ${
+        tone === 'gold'
+          ? 'bg-[#D4A72C] border-[#D4A72C] text-[#202522] hover:bg-[#c29623]'
+          : 'bg-white border-gray-200 text-gray-700 hover:border-gray-300'
+      }`}
+    >
+      {children}
+    </button>
+  );
+
+/**
  * Match-day entry points: paper sheets, a board's scoring screen, and the
  * public board.
  *
@@ -36,21 +59,6 @@ export const OperationsBar: React.FC<OperationsBarProps> = ({ tournament }) => {
       window.prompt('Public link', publicUrl);
     }
   };
-
-  const Btn: React.FC<{ onClick: () => void; children: React.ReactNode; tone?: 'gold' }> =
-    ({ onClick, children, tone }) => (
-      <button
-        type="button"
-        onClick={onClick}
-        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border shrink-0 transition-colors ${
-          tone === 'gold'
-            ? 'bg-[#D4A72C] border-[#D4A72C] text-[#202522] hover:bg-[#c29623]'
-            : 'bg-white border-gray-200 text-gray-700 hover:border-gray-300'
-        }`}
-      >
-        {children}
-      </button>
-    );
 
   return (
     <div className="px-3 sm:px-6 py-2.5 bg-white border-b border-gray-200/80">

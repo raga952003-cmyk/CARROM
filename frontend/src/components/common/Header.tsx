@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Trophy, User, ShieldAlert, Bell, PlusCircle, RotateCcw, Sparkles, ChevronDown, CheckCircle2, Calendar, Layers, LogOut, Settings } from 'lucide-react';
+import { Trophy, User, ShieldAlert, Bell, PlusCircle, Sparkles, ChevronDown, CheckCircle2, Calendar, Layers, LogOut, Settings } from 'lucide-react';
 import { Avatar } from './Avatar';
 import { ProfileSettings } from './ProfileSettings';
 import { useTournament } from '../../context/TournamentContext';
@@ -23,7 +23,6 @@ export const Header: React.FC<HeaderProps> = ({
     tournaments, 
     activeTournamentId, 
     setActiveTournamentId,
-    resetToSampleData,
     realtimeStatus
   } = useTournament();
 
@@ -117,11 +116,12 @@ export const Header: React.FC<HeaderProps> = ({
                     >
                       <span className="truncate pr-2">{t.name}</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded capitalize ${
-                        t.status === 'ongoing' ? 'bg-amber-100 text-amber-800' :
+                        t.status === 'ongoing' || t.status === 'in_progress' ? 'bg-amber-100 text-amber-800' :
                         t.status === 'registration_open' ? 'bg-emerald-100 text-emerald-800' :
+                        t.status === 'cancelled' ? 'bg-red-100 text-red-800' :
                         'bg-gray-100 text-gray-600'
                       }`}>
-                        {t.status.replace('_', ' ')}
+                        {t.status.replace(/_/g, ' ')}
                       </span>
                     </button>
                   ))}
@@ -130,7 +130,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Right Section: Role Switcher, Reset, Notifs, Actions */}
+          {/* Right Section: Role Switcher, Notifs, Actions */}
           {/* shrink-0 + tighter gaps: on a 375px screen this cluster used to
               push the page wider than the viewport. */}
           <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
@@ -231,20 +231,6 @@ export const Header: React.FC<HeaderProps> = ({
                   {unreadCount > 9 ? '9+' : unreadCount}
                 </span>
               )}
-            </button>
-
-            {/* Reset sample data */}
-            <button
-              id="reset-sample-data-btn"
-              onClick={() => {
-                if (confirm("Reset all tournaments and scores to standard sample state?")) {
-                  resetToSampleData();
-                }
-              }}
-              className="p-2 rounded-lg bg-emerald-900/40 hover:bg-emerald-900/80 text-emerald-300 hover:text-white transition-colors text-xs"
-              title="Reset Sample Data"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
             </button>
 
           </div>

@@ -1,6 +1,22 @@
 export type TournamentFormat = 'round_robin' | 'knockout' | 'league_knockout';
 export type MatchType = 'singles' | 'doubles';
-export type TournamentStatus = 'draft' | 'registration_open' | 'registration_closed' | 'scheduled' | 'ongoing' | 'completed';
+/**
+ * 'scheduled' and 'ongoing' are the original schema's names for
+ * 'fixture_published' and 'in_progress'. Rows written before migration 002
+ * still carry them, so both spellings stay in the union and every status
+ * check has to accept either.
+ */
+export type TournamentStatus =
+  | 'draft'
+  | 'registration_open'
+  | 'registration_closed'
+  | 'fixture_generation'
+  | 'fixture_published'
+  | 'scheduled'
+  | 'in_progress'
+  | 'ongoing'
+  | 'completed'
+  | 'cancelled';
 export type MatchStatus = 'scheduled' | 'live' | 'paused' | 'completed';
 export type BoardStatus = 'pending' | 'in_progress' | 'completed';
 export type UserRole = 'admin' | 'player';
@@ -264,7 +280,16 @@ export interface Tournament {
   posterConfig: PosterConfig;
   createdAt: string;
   publishedAt?: string;
-  
+
+  // How it ended. Written by POST /complete and POST /cancel; absent from the
+  // wire on a database without migration 012, null before the tournament has
+  // reached either end, so a missing value is not "no champion yet".
+  championId?: string | null;
+  championName?: string | null;
+  completedAt?: string | null;
+  cancelledAt?: string | null;
+  cancelReason?: string | null;
+
   // Attached items
   registrations: Registration[];
   matches: Match[];

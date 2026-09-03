@@ -9,6 +9,8 @@ import { apiClient, AUTH_EXPIRED_EVENT } from '../utils/apiClient';
 import { authService } from '../services/authService';
 import { tournamentService } from '../services/tournamentService';
 import { subscribeToTournamentData, RealtimeStatus } from '../services/realtimeService';
+import { Resource, ALL_RESOURCES, resourcesToRefresh } from '../utils/refreshScope';
+import { forgetFixtureFilters } from '../components/admin/FixtureScheduleView';
 import {
   Tournament,
   Match,
@@ -72,7 +74,19 @@ interface TournamentContextType {
   setActiveMatch: (match: Match | null) => void;
   
   // Auth Operations
-  signUpUser: (email: string, password: string, role: UserRole, metadata: Partial<Player>) => Promise<{ success: boolean; error?: string }>;
+  /**
+   * Register in the given role, and sign in as whatever comes back.
+   *
+   * Registration is open: the role travels with the request and the server
+   * writes it, so the Administrator tab on the sign-up form really does make
+   * an administrator.
+   */
+  signUpUser: (
+    email: string,
+    password: string,
+    role: UserRole,
+    metadata: Partial<Player>,
+  ) => Promise<{ success: boolean; error?: string }>;
   signInUser: (email: string, password: string, role: UserRole) => Promise<{ success: boolean; error?: string }>;
   signOutUser: () => Promise<void>;
   
@@ -80,10 +94,21 @@ interface TournamentContextType {
   createTournament: (tournamentData: Partial<Tournament>) => Promise<string>;
   updateTournament: (id: string, updates: Partial<Tournament>) => Promise<void>;
   deleteTournament: (id: string) => Promise<void>;
+  // The lifecycle. Each of these is one legal move on the server's state
+  // machine; the server refuses (409, with the reason) when the tournament is
+  // not where the move starts from, and callers show that reason.
+  /** draft -> registration_open */
   publishTournament: (id: string) => Promise<void>;
+  /** registration_open -> registration_closed */
   closeRegistration: (id: string) => Promise<void>;
+  /** registration_closed or a published draw -> in_progress */
   startTournament: (id: string) => Promise<void>;
+  /** in_progress -> completed, once every match is settled */
   finishTournament: (id: string) => Promise<void>;
+  /** Any non-terminal state -> cancelled. The reason is required. */
+  cancelTournament: (id: string, reason: string) => Promise<void>;
+  /** Undo a confirmed result so a board can be corrected. Owner or manager only. */
+  reopenMatch: (tournamentId: string, matchId: string, reason: string) => Promise<void>;
   generateFixturesForTournament: (id: string) => Promise<void>;
   generateScheduleForTournament: (id: string, restMinutes?: number) => Promise<void>;
   publishScheduleForTournament: (id: string) => Promise<void>;
@@ -143,8 +168,14 @@ interface TournamentContextType {
   addNotification: (title: string, message: string, type: TournamentNotification['type'], tournamentId?: string) => Promise<void>;
   
   // Utilities
-  resetToSampleData: () => void;
+  /** Re-read everything. Sign-in and first load; a mutation should not need it. */
   refreshData: () => Promise<void>;
+  /**
+   * Re-read the draw alone — tournaments with their entries, matches and
+   * boards. What almost every admin action actually needs, and a quarter of
+   * the requests refreshData() sends.
+   */
+  refreshTournaments: () => Promise<void>;
   refreshCurrentUser: () => Promise<void>;
   /** Points table computed server-side from official results (spec 74). */
   fetchStandings: (tournamentId: string) => Promise<StandingsRow[]>;
@@ -187,70 +218,112 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   activeMatchRef.current = activeMatch;
   activeTournamentIdRef.current = activeTournamentId;
 
-  // Realtime changes, the fallback interval and every explicit call all reach
-  // refreshData. Without a guard they overlap, so one page reload aborted five
-  // copies of the same request and logged five identical failures.
-  const refreshInFlight = useRef<Promise<void> | null>(null);
+  // The four reads behind the screen, kept apart on purpose.
+  //
+  // They used to be one function: every admin action, and every realtime
+  // change, re-read the tournaments AND the player directory AND the saved
+  // teams AND the notifications. Scoring one board therefore cost four
+  // requests, three of which could not have changed — and it replaced all four
+  // state arrays, so every screen holding any of them re-rendered too. Now a
+  // caller names only what its write could have touched.
+  //
+  // Per resource: the read in flight, the single follow-up queued behind it,
+  // and when the most recent read was ISSUED — which is what tells an echo of
+  // our own write apart from somebody else's change.
+  const inFlight = useRef<Partial<Record<Resource, Promise<void>>>>({});
+  const queued = useRef<Partial<Record<Resource, Promise<void>>>>({});
+  const issuedAt = useRef<Partial<Record<Resource, number>>>({});
   const lastRefreshError = useRef<string>('');
 
-  const refreshData = async () => {
-    if (refreshInFlight.current) return refreshInFlight.current;
-    const run = doRefresh().finally(() => { refreshInFlight.current = null; });
-    refreshInFlight.current = run;
+  const reportRefreshFailure = (error: any) => {
+    // A request torn down by navigation is not a failure, and an expired
+    // session already signs out through AUTH_EXPIRED_EVENT.
+    if (error?.isNavigationAbort) return;
+    const message = error?.message || '';
+    if (/sign in again|Not authenticated|expired/i.test(message)) return;
+    // An outage reports itself on every cycle; say it once.
+    if (message === lastRefreshError.current) return;
+    lastRefreshError.current = message;
+    console.error('Failed to refresh data from Python Backend:', error);
+  };
+
+  const readResource = async (resource: Resource): Promise<void> => {
+    // Held until the read comes back. The stamp says "a read that SUCCEEDED
+    // was issued at this instant", and only a successful read can be said to
+    // have seen anything: stamping on the way out meant a request that then
+    // failed still suppressed the realtime event for the change it missed, and
+    // on a live connection there is no poll behind it — the change stayed off
+    // the screen for good.
+    const startedAt = Date.now();
+    switch (resource) {
+      case 'tournaments': {
+        const tournamentsData = await tournamentService.getAllTournaments();
+        setTournaments(tournamentsData);
+        if (tournamentsData.length > 0 && !activeTournamentIdRef.current) {
+          setActiveTournamentId(tournamentsData[0].id);
+        }
+        // Reload the open match from the data just fetched.
+        const openMatch = activeMatchRef.current;
+        if (openMatch) {
+          const freshT = tournamentsData.find(t => t.id === openMatch.tournamentId);
+          const freshM = freshT?.matches?.find(m => m.id === openMatch.id);
+          if (freshM) setActiveMatch(freshM);
+        }
+        break;
+      }
+      case 'players':
+        setAllPlayers(await apiClient.get<Player[]>('/players'));
+        break;
+      case 'teams':
+        setAllTeams((await tournamentService.getTeams()) as Team[]);
+        break;
+      case 'notifications':
+        setNotifications(await apiClient.get<TournamentNotification[]>('/notifications'));
+        break;
+    }
+    issuedAt.current[resource] = startedAt;
+    lastRefreshError.current = '';
+  };
+
+  const runResource = (resource: Resource): Promise<void> => {
+    // Someone who asks while a read is already running cannot use that read's
+    // answer: it was issued BEFORE whatever they just changed.
+    //
+    // Handing it to them anyway is what made a paused timer come back still
+    // running — the write had landed, the read that reported it had not been
+    // issued yet. That reads as the button having done nothing, so the umpire
+    // taps again, and joins the same stale promise.
+    //
+    // So: wait for the run in flight, then do exactly one more, and let
+    // everyone who arrived in the meantime share that single follow-up. Still
+    // at most two requests per resource however many callers pile up.
+    const running = inFlight.current[resource];
+    if (running) {
+      let follow = queued.current[resource];
+      if (!follow) {
+        follow = running
+          .catch(() => undefined)
+          .then(() => {
+            queued.current[resource] = undefined;
+            return runResource(resource);
+          });
+        queued.current[resource] = follow;
+      }
+      return follow;
+    }
+    const run = readResource(resource)
+      .catch(reportRefreshFailure)
+      .finally(() => { inFlight.current[resource] = undefined; });
+    inFlight.current[resource] = run;
     return run;
   };
 
-  const doRefresh = async () => {
-    try {
-      // Four independent reads, issued together.
-      //
-      // They used to run one after another: tournaments (3.5s on the deployed
-      // API), then players, then teams, then notifications — about five seconds
-      // of waterfall for four requests that never needed each other. Now the
-      // wait is the slowest one rather than the sum, and this whole function
-      // re-runs on every realtime change, so the saving lands on every board
-      // an umpire scores rather than only on first load.
-      const [tournamentsData, playersData, teamsData, notificationsData] = await Promise.all([
-        tournamentService.getAllTournaments(),
-        apiClient.get<Player[]>('/players'),
-        tournamentService.getTeams(),
-        apiClient.get<TournamentNotification[]>('/notifications'),
-      ]);
+  /** Re-read the named resources together, and wait for all of them. */
+  const refresh = (resources: Resource[] = ALL_RESOURCES): Promise<void> =>
+    Promise.all(resources.map(runResource)).then(() => undefined);
 
-      setTournaments(tournamentsData);
-      if (tournamentsData.length > 0 && !activeTournamentIdRef.current) {
-        setActiveTournamentId(tournamentsData[0].id);
-      }
-      setAllPlayers(playersData);
-      setAllTeams(teamsData as Team[]);
-      setNotifications(notificationsData);
-
-      // Reload the open match from the data just fetched.
-      lastRefreshError.current = '';
-
-      const openMatch = activeMatchRef.current;
-      if (openMatch) {
-        const freshT = tournamentsData.find(t => t.id === openMatch.tournamentId);
-        const freshM = freshT?.matches?.find(m => m.id === openMatch.id);
-        if (freshM) {
-          setActiveMatch(freshM);
-        }
-      }
-    } catch (error: any) {
-      // An expired session already triggers a sign-out through
-      // AUTH_EXPIRED_EVENT; logging every polled failure just floods the
-      // console with the same message.
-      // A request torn down by navigation is not a failure, and an expired
-      // session already signs out through AUTH_EXPIRED_EVENT.
-      if (error?.isNavigationAbort) return;
-      const message = error?.message || '';
-      if (/sign in again|Not authenticated|expired/i.test(message)) return;
-      // Polling means the same outage reports itself every cycle; say it once.
-      if (message === lastRefreshError.current) return;
-      lastRefreshError.current = message;
-      console.error('Failed to refresh data from Python Backend:', error);
-    }
-  };
+  const refreshData = (): Promise<void> => refresh();
+  const refreshTournaments = (): Promise<void> => refresh(['tournaments']);
 
   // A dead session must end the session in the app too. Previously the token
   // was cleared but isAuthenticated stayed true, so the refresh loop kept
@@ -274,7 +347,15 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   }, []);
 
   // Renew the access token shortly before it expires, so an open dashboard
-  // does not die mid-session.
+  // does not die mid-session -- and while we are asking, check who we still
+  // are.
+  //
+  // The role only ever came from the sign-in response, and nothing re-read it.
+  // So an organiser promoting somebody mid-event changed nothing on that
+  // person's screen: they went on seeing the player dashboard until they
+  // signed out and back in, with no way to know they had been promoted. A
+  // demotion was worse -- the admin screens stayed up, offering controls the
+  // server had already started refusing.
   useEffect(() => {
     if (!isAuthenticated) return;
 
@@ -283,6 +364,9 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       if (remaining !== null && remaining < 120) {
         await authService.refresh();
       }
+      // Cheap, once a minute, and it fails quietly: a blip must not sign
+      // anyone out in the middle of a tournament.
+      await refreshCurrentUser();
     };
 
     tick();
@@ -337,7 +421,12 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     };
 
     const handle = subscribeToTournamentData({
-      onChange: () => { refreshData(); },
+      onChange: ({ tables, observedAt }) => {
+        // Re-read only what moved, and not the echo of our own write. Both
+        // decisions live in refreshScope.ts, where they can be tested.
+        const stale = resourcesToRefresh(tables, observedAt, issuedAt.current);
+        if (stale.length) refresh(stale);
+      },
       onStatus: (status) => {
         setRealtimeStatus(status);
         if (status === 'live') {
@@ -359,10 +448,10 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
 
   // Auth Operations
   const signUpUser = async (
-    email: string, 
-    password: string, 
-    selectedRole: UserRole, 
-    metadata: Partial<Player>
+    email: string,
+    password: string,
+    selectedRole: UserRole,
+    metadata: Partial<Player>,
   ): Promise<{ success: boolean; error?: string }> => {
     try {
       const response = await authService.signUp({
@@ -372,9 +461,17 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         club: metadata.club,
         city: metadata.city,
         phone: metadata.phone,
-        rating: metadata.rating || 1500
+        rating: metadata.rating || 1500,
+        // The role the form asked for. It used to be taken here and then
+        // dropped on the floor -- the form offered Administrator, the request
+        // never mentioned it, and the new account was signed straight in as a
+        // player with nothing said about it.
+        role: selectedRole === 'admin' ? 'admin' : 'player',
       });
-      
+
+      // Still read back from the server rather than assumed: it is the one
+      // that decides, and a refusal must not leave the app believing
+      // otherwise.
       setCurrentUserState(toCurrentUser(response.user));
       setRoleState(response.user.role as UserRole);
       setIsAuthenticated(true);
@@ -410,6 +507,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
 
   const signOutUser = async () => {
     authService.logout();
+    forgetFixtureFilters();
     setCurrentUserState(null);
     setRoleState(null);
     setIsAuthenticated(false);
@@ -423,74 +521,95 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   // Tournament operations
   const createTournament = async (tournamentData: Partial<Tournament>): Promise<string> => {
     const response = await tournamentService.createTournament(tournamentData);
-    await refreshData();
+    await refresh(['tournaments']);
     return response.id;
   };
 
   const updateTournament = async (id: string, updates: Partial<Tournament>) => {
     await tournamentService.updateTournament(id, updates);
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const deleteTournament = async (id: string) => {
     await tournamentService.deleteTournament(id);
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
+  // The lifecycle goes through its own verbs, not PUT {status}. Writing the
+  // word directly changed nothing but the word: a tournament could be started
+  // without a draw, finished with matches still open, and nobody was told.
+  // The verbs do the work each move implies -- /complete records the champion
+  // and refuses while anything is unfinished, /cancel puts the reason on the
+  // record -- and the errors they raise carry the explanation, so they are
+  // left to propagate for the screen to show.
   const publishTournament = async (id: string) => {
-    await tournamentService.updateTournament(id, { status: 'registration_open' });
-    await refreshData();
+    await tournamentService.openRegistration(id);
+    await refresh(['tournaments']);
   };
 
   const closeRegistration = async (id: string) => {
-    await tournamentService.updateTournament(id, { status: 'registration_closed' });
-    await refreshData();
+    await tournamentService.closeRegistration(id);
+    await refresh(['tournaments']);
   };
 
-  // The rest of the lifecycle. Registration could be opened and closed and
-  // nothing further: no screen ever wrote 'scheduled', 'ongoing' or 'completed',
-  // so a tournament stayed advertised as open for entries while its draw was
-  // already fixed, and could never be finished at all.
   const startTournament = async (id: string) => {
-    await tournamentService.updateTournament(id, { status: 'ongoing' } as any);
-    await refreshData();
+    await tournamentService.startTournament(id);
+    await refresh(['tournaments']);
   };
 
   const finishTournament = async (id: string) => {
-    await tournamentService.updateTournament(id, { status: 'completed' } as any);
-    await refreshData();
+    await tournamentService.completeTournament(id);
+    await refresh(['tournaments', 'notifications']);
+  };
+
+  const cancelTournament = async (id: string, reason: string) => {
+    await tournamentService.cancelTournament(id, reason);
+    // Calling a tournament off tells everyone entered, the organiser included.
+    await refresh(['tournaments', 'notifications']);
+  };
+
+  // tournamentId is taken for symmetry with the other match operations; the
+  // API addresses the match alone.
+  const reopenMatch = async (tournamentId: string, matchId: string, reason: string) => {
+    await tournamentService.reopenMatch(matchId, reason);
+    // Reopening a result is announced to both players and to the organisers.
+    await refresh(['tournaments', 'notifications']);
   };
 
   const generateFixturesForTournament = async (id: string) => {
     await apiClient.post(`/tournaments/${id}/fixtures`, {});
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const generateScheduleForTournament = async (id: string, restMinutes: number = 10) => {
     await apiClient.post(`/tournaments/${id}/schedule?restMinutes=${restMinutes}`, {});
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const publishScheduleForTournament = async (id: string) => {
     await apiClient.post(`/tournaments/${id}/publish-schedule`, {});
-    await refreshData();
+    await refresh(['tournaments', 'notifications']);
   };
 
   // Player directory operations
   const createPlayerAccount = async (playerData: Omit<Player, 'id'> & { id?: string }): Promise<string> => {
     const response = await apiClient.post<Player>('/players', playerData);
-    await refreshData();
+    await refresh(['players']);
     return response.id;
   };
 
   const updatePlayerAccount = async (id: string, updates: Partial<Player>) => {
     await apiClient.put(`/players/${id}`, updates);
-    await refreshData();
+    // Entries and teams carry the joined profile row, not just its id, so a
+    // rename that only re-read the directory left the old name on every
+    // fixture and every entry until something else reloaded the draw.
+    await refresh(['players', 'tournaments']);
   };
 
   const deletePlayerAccount = async (id: string) => {
     await apiClient.delete(`/players/${id}`);
-    await refreshData();
+    // A deleted player disappears from the draw and its entries too.
+    await refresh(['players', 'tournaments', 'teams']);
   };
 
   // Registrations
@@ -522,7 +641,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       };
 
       await tournamentService.registerForTournament(tournamentId, payload);
-      await refreshData();
+      await refresh(['tournaments', 'teams', 'players']);
       return true;
     } catch (e: any) {
       console.error('Registration failed:', e);
@@ -532,18 +651,18 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
 
   const approveRegistration = async (tournamentId: string, regId: string) => {
     await tournamentService.approveRegistration(regId);
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const rejectRegistration = async (tournamentId: string, regId: string) => {
     await tournamentService.rejectRegistration(regId);
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   // Match operations
   const addManualMatch = async (tournamentId: string, match: any) => {
     await apiClient.post(`/tournaments/${tournamentId}/matches`, match);
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const recordToss = async (matchId: string, toss: any) => {
@@ -552,22 +671,22 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
 
   const startMatch = async (tournamentId: string, matchId: string) => {
     await apiClient.post(`/matches/${matchId}/start`, {});
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const pauseMatch = async (tournamentId: string, matchId: string) => {
     await apiClient.post(`/matches/${matchId}/pause`, {});
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const resumeMatch = async (tournamentId: string, matchId: string) => {
     await apiClient.post(`/matches/${matchId}/resume`, {});
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const addBoardToMatch = async (tournamentId: string, matchId: string) => {
     await apiClient.post(`/matches/${matchId}/boards`, {});
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const updateBoardScore = async (
@@ -583,7 +702,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       + (override ? '&override=true' : ''),
       boardData
     );
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const submitBoardScore = async (
@@ -596,23 +715,24 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       auditReason: 'Board score finalized',
       ...payload,
     });
-    await refreshData();
+    await refresh(['tournaments']);
   };
 
   const confirmMatchResult = async (tournamentId: string, matchId: string) => {
     await apiClient.post(`/matches/${matchId}/confirm`, {});
-    await refreshData();
+    // Confirming can fill the next knockout round and notify both players.
+    await refresh(['tournaments', 'notifications']);
   };
 
   // Notifications
   const markNotificationAsRead = async (id: string) => {
     await apiClient.put(`/notifications/${id}/read`, {});
-    await refreshData();
+    await refresh(['notifications']);
   };
 
   const markAllNotificationsAsRead = async () => {
     await apiClient.put(`/notifications/read-all`, {});
-    await refreshData();
+    await refresh(['notifications']);
   };
 
   const addNotification = async (
@@ -628,7 +748,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
       tournamentId
     };
     await apiClient.post('/notifications', payload);
-    await refreshData();
+    await refresh(['notifications']);
   };
 
   const fetchStandings = async (tournamentId: string): Promise<StandingsRow[]> => {
@@ -638,10 +758,6 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
 
   const fetchStandingsBreakdown = async (tournamentId: string): Promise<StandingsBreakdown> => {
     return tournamentService.getStandings(tournamentId);
-  };
-
-  const resetToSampleData = () => {
-    alert("Resetting sample data is disabled when connected to the Python API Backend server. Please manage entries through the dashboard interface.");
   };
 
   return (
@@ -674,6 +790,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         closeRegistration,
         startTournament,
         finishTournament,
+        cancelTournament,
+        reopenMatch,
         generateFixturesForTournament,
         generateScheduleForTournament,
         publishScheduleForTournament,
@@ -696,8 +814,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         markNotificationAsRead,
         markAllNotificationsAsRead,
         addNotification,
-        resetToSampleData,
         refreshData,
+        refreshTournaments,
         fetchStandings,
         fetchStandingsBreakdown
       }}

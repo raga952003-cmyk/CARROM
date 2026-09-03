@@ -49,7 +49,8 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
     generateFixturesForTournament, 
     generateScheduleForTournament,
     publishScheduleForTournament,
-    allPlayers 
+    allPlayers,
+    refreshData 
   } = useTournament();
 
   const [rawText, setRawText] = useState('');
@@ -57,6 +58,11 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
   const [fileName, setFileName] = useState('');
   const [parsedPlayers, setParsedPlayers] = useState<ParsedPlayer[]>([]);
   const [loading, setLoading] = useState(false);
+  // Off by default, and deliberately so: the server refuses to redraw over
+  // recorded results, but even where it would succeed, adding a late entrant
+  // should not silently rebuild the draw and re-announce the schedule to
+  // everybody. The organiser asks for it.
+  const [autoSchedule, setAutoSchedule] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [step, setStep] = useState<'input' | 'preview'>('input');
@@ -187,8 +193,12 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
 
     try {
       // Use backend bulk import confirmation transaction (accounts creation + registrations + fixtures + scheduling + publish)
-      const response: any = await tournamentService.confirmImport(tournament.id, selectedPlayers);
-      setSuccessMsg(response.message || 'Successfully registered and scheduled players!');
+      const response: any = await tournamentService.confirmImport(
+        tournament.id, selectedPlayers, autoSchedule);
+      setSuccessMsg(response.message || 'Successfully registered the players.');
+      // The import created players, teams, entries and possibly a whole draw,
+      // none of which the screen behind this modal knows about yet.
+      await refreshData();
       // A partial import must not look like a clean one.
       if (response.skipped && response.skipped.length > 0) {
         setErrorMsg(
@@ -436,14 +446,26 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
               <span>Analyze & Preview List</span>
             </button>
           ) : (
-            <button
-              onClick={handleImportAndSchedule}
-              disabled={loading}
-              className="px-5 py-2.5 bg-[#D4A72C] hover:bg-[#c29623] text-[#0B5D3B] text-xs font-black rounded-xl shadow-md flex items-center gap-1.5"
-            >
-              <Calendar className="w-4 h-4 text-[#0B5D3B]" />
-              <span>Confirm Import & Auto-Schedule</span>
-            </button>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoSchedule}
+                  onChange={e => setAutoSchedule(e.target.checked)}
+                  disabled={loading}
+                  className="accent-[#0B5D3B]"
+                />
+                <span>Draw and publish the schedule too</span>
+              </label>
+              <button
+                onClick={handleImportAndSchedule}
+                disabled={loading}
+                className="px-5 py-2.5 bg-[#D4A72C] hover:bg-[#c29623] text-[#0B5D3B] text-xs font-black rounded-xl shadow-md flex items-center gap-1.5"
+              >
+                <Calendar className="w-4 h-4 text-[#0B5D3B]" />
+                <span>{autoSchedule ? 'Confirm Import & Auto-Schedule' : 'Confirm Import'}</span>
+              </button>
+            </div>
           )}
         </div>
 

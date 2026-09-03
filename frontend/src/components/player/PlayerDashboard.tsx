@@ -500,6 +500,12 @@ export const PlayerDashboard: React.FC = () => {
                 {/* Schedule Tab */}
                 {activeTab === 'schedule' && (
                   <FixtureScheduleView
+                    // Keyed by tournament so it remounts when a different one
+                    // is selected. Without this it kept the previous
+                    // tournament's search and round filter -- and then saved
+                    // them under the NEW tournament's id, so switching between
+                    // two tournaments swapped their remembered filters over.
+                    key={currentTournament.id}
                     tournament={currentTournament}
                     onOpenMatch={(m) => setActiveMatch(m)}
                   />

@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { TournamentFormat, MatchType, TournamentRules } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { useNotify } from '../../context/NotificationContext';
 import { GroupStageSettings } from './GroupStageSettings';
 import { ScoringRulesSettings, ScoringRules, defaultScoringRules } from './ScoringRulesSettings';
 
@@ -28,6 +29,15 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   onClose
 }) => {
   const { createTournament, publishTournament } = useTournament();
+  const notify = useNotify();
+  // Kept beside the buttons as well as in a toast: this form is long, and the
+  // organiser pressing Publish is looking at the bottom of it.
+  const [saveError, setSaveError] = useState('');
+  // The draft this form has already written, if the publish step then failed.
+  // Without it a retry created a SECOND tournament: the create had succeeded,
+  // its id went out of scope with the failed attempt, and pressing the button
+  // again started from the top.
+  const [createdId, setCreatedId] = useState<string | null>(null);
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -69,6 +79,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
 
   const handleSave = async (publishImmediately: boolean = false) => {
     if (saving) return;
+    setSaveError('');
     if (!name.trim()) {
       alert('Please enter a tournament name.');
       return;
@@ -90,7 +101,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
     };
 
     try {
-      const newId = await createTournament({
+      const newId = createdId ?? await createTournament({
         name,
         description: description || 'Official Carrom Championship tournament featuring automated scoring, fixtures, and standings.',
         category,
@@ -105,14 +116,28 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
         entryFee,
         prizePool,
         rules,
-        status: publishImmediately ? 'registration_open' : 'draft'
+        // Always born a draft, whichever button was pressed.
+        //
+        // Publishing used to be done twice: the create call wrote
+        // 'registration_open' itself, and then the verb was asked to make the
+        // same move again. A verb that would change nothing is refused on
+        // purpose -- a second /complete would announce the champion twice --
+        // so Publish Tournament ended in a 409 every single time. There was no
+        // catch here, so the rejection went nowhere: the modal stayed open,
+        // said nothing, and the tournament it had in fact just created sat
+        // behind it. Pressing the button again made a second one.
+        status: 'draft'
       });
+      setCreatedId(newId);
 
       if (publishImmediately) {
         await publishTournament(newId);
       }
 
+      setCreatedId(null);
       onClose();
+    } catch (e) {
+      setSaveError(notify.report(e, 'Could not create the tournament.'));
     } finally {
       setSaving(false);
     }
@@ -510,6 +535,11 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
           </button>
 
           <div className="flex items-center space-x-3">
+            {saveError && (
+              <span role="alert" className="text-xs text-red-800 bg-red-50 border border-red-200 rounded-xl px-3 py-2 max-w-md">
+                {saveError}
+              </span>
+            )}
             <button
               type="button"
               onClick={() => handleSave(false)}
