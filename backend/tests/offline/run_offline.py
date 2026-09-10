@@ -40,6 +40,7 @@ SUITES = [
     ("test_integration", "integration   real app + in-memory database", True),
     ("test_system", "system        whole app over HTTP, black box", True),
     ("test_e2e_matchday", "end-to-end    draw -> schedule -> board queues -> scoring", True),
+    ("test_payments", "payments      entry fees, signatures, webhook replay", True),
     ("test_acceptance", "acceptance    user stories per role", True),
 ]
 

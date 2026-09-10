@@ -1,35 +1,67 @@
 -- =============================================================================
 -- Carrom Arena — pending migrations, combined
 --
--- Everything the database is still missing, in one paste. Both parts are
--- idempotent: running this twice is harmless, and running it when half of it
--- is already applied is harmless too.
+-- Everything the database may still be missing, in one paste. All three parts
+-- are idempotent: running this twice is harmless, and running it when some of
+-- it is already applied is harmless too.
 --
---   004  the toss: who called, who won it, and what they chose
---   005  the board detail behind a score, plus board locking and tie-breaks
+--   013  the profiles trigger, and row level security across every table
+--   014  nobody grants themselves a role
+--   015  the payments ledger, so entry fees can be collected through Razorpay
 --
--- Paste the whole file into the Supabase SQL editor and run it once. Then
+-- THE ORDER MATTERS. 013 creates the `update_profiles_self` policy and 014
+-- replaces it with a narrower one. Applying 013 after 014 puts the permissive
+-- version back and undoes the fix -- silently, because both succeed. Paste the
+-- whole file, in this order, rather than picking parts out of it.
+--
+-- Why these three and not the others: 004-012 are all visible to /api/health,
+-- which reports them applied. 013 and 014 leave nothing PostgREST can see, so
+-- health cannot tell whether they have been run -- they are included here
+-- because re-running them costs nothing and being wrong about them is a
+-- privilege escalation. 015 is genuinely pending; health says so.
+--
+-- Paste the whole file into the Supabase SQL editor and run it once. Each part
+-- prints a RAISE NOTICE, so the output should end with three notices. Then
 -- GET /api/health should report  "migrations": "all applied".
 -- =============================================================================
 
 -- ==========================================================================
--- 004_match_toss.sql
+-- 013_profiles_trigger_and_rls.sql
 -- ==========================================================================
 
 -- =============================================================================
--- 004 — Match toss
+-- 013 — The sign-up trigger and row-level security, as a numbered migration
 --
--- A carrom match starts with a toss: a coin decides which side calls, the
--- winning side is recorded, and they choose either to strike first or to take
--- a side. None of that was stored, so the umpire's decision lived only in
--- their head and could not be shown on the match card, printed, or audited.
+-- Everything here used to live in db/triggers_and_security.sql, a file outside
+-- the numbered sequence. That is how it got skipped: a fresh project had
+-- schema.sql and every migration applied and still no handle_new_user trigger,
+-- so a sign-up created an auth user and no profiles row, and the next write
+-- that expected the row found nothing to update. The application grew
+-- fallbacks for the missing row (routers/auth.py, routers/players.py), but the
+-- trigger is what is supposed to be there.
+--
+-- Same trigger, same RLS switches, same policies, in the form the rest of the
+-- migrations take: idempotent, guarded, and announcing itself at the end. The
+-- original file stays in the repository for reference and must not be run --
+-- see the note at its top.
+--
+-- One deliberate difference. The original's select_profiles policy read every
+-- column of every profile to anyone holding the anon key, which migration 011
+-- closed by replacing it with select_own_profile and a public_profiles view.
+-- Re-running the original after 011 would quietly reopen that. This file
+-- carries 011's policy, so it is correct whichever order the two run in.
+--
+-- The health probe cannot see any of this -- a trigger on auth.users and RLS
+-- policies are invisible through PostgREST -- so /api/health lists 013 under
+-- unprobeable_migrations rather than claiming it applied. Check for the NOTICE
+-- below in the SQL editor's output instead.
 --
 -- Safe to re-run.
 -- =============================================================================
 
 DO $$
 BEGIN
-    IF to_regclass('public.matches') IS NULL THEN
+    IF to_regclass('public.profiles') IS NULL OR to_regclass('public.matches') IS NULL THEN
         RAISE EXCEPTION
             'Base schema missing in this database (current_database=%). '
             'Run db/schema.sql first, or switch to the project whose ref '
@@ -37,819 +69,273 @@ BEGIN
     END IF;
 END $$;
 
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS toss_coin_result TEXT
-        CHECK (toss_coin_result IS NULL OR toss_coin_result IN ('black', 'white'));
-
-ALTER TABLE public.matches
-    -- The side that won the toss: a profile id for singles, a team id for
-    -- doubles, matching player1_id / player2_id on the same row.
-    ADD COLUMN IF NOT EXISTS toss_winner_id UUID;
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS toss_winner_name TEXT;
-
-ALTER TABLE public.matches
-    -- 'strike' = take the striker and break first; 'side' = choose the side.
-    ADD COLUMN IF NOT EXISTS toss_choice TEXT
-        CHECK (toss_choice IS NULL OR toss_choice IN ('strike', 'side'));
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS toss_recorded_at TIMESTAMPTZ;
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS toss_recorded_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL;
-
-CREATE INDEX IF NOT EXISTS idx_matches_toss ON public.matches(tournament_id, toss_recorded_at);
-
-DO $$
+-- -----------------------------------------------------------------------------
+-- 1. Sync user registration from Supabase Auth to profiles
+--
+-- Copies only what the sign-up form carries. The role is read from
+-- app_metadata first because that is the half the user cannot edit; the
+-- user_metadata fallback is for accounts created before roles were stamped
+-- there.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger AS $$
 BEGIN
-    RAISE NOTICE 'Migration 004 applied: match toss recorded on matches.';
-END $$;
-
-
--- ==========================================================================
--- 005_board_detail.sql
--- ==========================================================================
-
--- =============================================================================
--- 005 — Board detail: independent umpire observations
---
--- A board was stored as two numbers and a queen flag, so three separate facts
--- had to be squeezed into one: who won it, who took the queen, and whose coins
--- were left on the board. They are genuinely independent — a player can win the
--- board while their opponent covers the queen — and forcing them together made
--- real results impossible to record.
---
--- player1_score / player2_score keep their meaning as the FINAL board points,
--- so standings, print sheets and brackets are untouched. Everything added here
--- is the working that produced those numbers.
---
--- Safe to re-run.
--- =============================================================================
-
-DO $$
-BEGIN
-    IF to_regclass('public.boards') IS NULL THEN
-        RAISE EXCEPTION
-            'Base schema missing in this database (current_database=%). '
-            'Run db/schema.sql first, or switch to the project whose ref '
-            'matches SUPABASE_URL in backend/.env.', current_database();
-    END IF;
-END $$;
-
--- ---- what the umpire observed ---------------------------------------------
-
-ALTER TABLE public.boards
-    -- Who finished/won the board. Recorded, never inferred from the scores.
-    ADD COLUMN IF NOT EXISTS board_winner TEXT
-        CHECK (board_winner IS NULL OR board_winner IN ('player1', 'player2', 'none'));
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS p1_coins_pocketed INTEGER
-        CHECK (p1_coins_pocketed IS NULL OR p1_coins_pocketed >= 0);
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS p2_coins_pocketed INTEGER
-        CHECK (p2_coins_pocketed IS NULL OR p2_coins_pocketed >= 0);
-
-ALTER TABLE public.boards
-    -- Which side still had coins on the board when it ended.
-    ADD COLUMN IF NOT EXISTS coins_remaining_with TEXT
-        CHECK (coins_remaining_with IS NULL OR coins_remaining_with IN ('player1', 'player2', 'none'));
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS coins_remaining INTEGER
-        CHECK (coins_remaining IS NULL OR coins_remaining >= 0);
-
--- ---- the queen, as two separate facts --------------------------------------
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS queen_pocketed_by TEXT
-        CHECK (queen_pocketed_by IS NULL OR queen_pocketed_by IN ('player1', 'player2', 'none'));
-
-ALTER TABLE public.boards
-    -- May be the opponent of whoever pocketed it.
-    ADD COLUMN IF NOT EXISTS queen_covered_by TEXT
-        CHECK (queen_covered_by IS NULL OR queen_covered_by IN ('player1', 'player2', 'none'));
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS queen_status TEXT
-        CHECK (queen_status IS NULL OR queen_status IN ('not_pocketed', 'covered', 'returned'));
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS queen_awarded_to TEXT
-        CHECK (queen_awarded_to IS NULL OR queen_awarded_to IN ('player1', 'player2', 'none'));
-
--- ---- penalties --------------------------------------------------------------
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS p1_penalty INTEGER DEFAULT 0
-        CHECK (p1_penalty IS NULL OR p1_penalty >= 0);
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS p2_penalty INTEGER DEFAULT 0
-        CHECK (p2_penalty IS NULL OR p2_penalty >= 0);
-
--- ---- the working, kept so a result can be audited without re-deriving it ----
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS base_points INTEGER;
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS queen_bonus INTEGER;
-
-ALTER TABLE public.boards
-    -- Contradictions the umpire chose to record anyway, e.g. the winner also
-    -- being the side with coins left. Surfaced, never silently corrected.
-    ADD COLUMN IF NOT EXISTS scoring_warnings JSONB;
-
--- ---- confirmation and locking (spec 19, 20) --------------------------------
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS locked BOOLEAN DEFAULT false NOT NULL;
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS confirmed_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL;
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
-
--- ---- tie-break at match level (spec 22, 23) --------------------------------
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS tie_break_required BOOLEAN DEFAULT false NOT NULL;
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS tie_break_rule TEXT;
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS tie_break_result TEXT;
-
-CREATE INDEX IF NOT EXISTS idx_boards_locked ON public.boards(match_id, locked);
-
-
--- =============================================================================
--- apply_board_result — rewritten so a board patch is applied whole
---
--- The 002 version enumerated the columns it would write. Every column added
--- above would have been accepted by the API, passed into the patch, and then
--- silently dropped on the way through this function — leaving the atomic path
--- storing LESS than the non-atomic fallback beside it.
---
--- The patch is now merged onto the existing row as JSON, so a new column is
--- written the moment it exists and this function never needs editing again.
--- =============================================================================
-
-CREATE OR REPLACE FUNCTION public.apply_board_result(
-    p_match_id UUID,
-    p_board_number INTEGER,
-    p_board_patch JSONB,
-    p_match_patch JSONB,
-    p_audit JSONB,
-    p_next_board_number INTEGER DEFAULT NULL
-)
-RETURNS JSONB AS $$
-DECLARE
-    v_prev  public.boards%ROWTYPE;
-    v_next  public.boards%ROWTYPE;
-    v_board public.boards%ROWTYPE;
-BEGIN
-    IF NOT public.is_admin_or_service() THEN
-        RAISE EXCEPTION 'insufficient_privilege: admin rights required to apply a board result';
-    END IF;
-
-    -- Lock the board so two scorers cannot interleave on the same board.
-    SELECT * INTO v_prev
-    FROM public.boards
-    WHERE match_id = p_match_id AND board_number = p_board_number
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'board_not_found: match % board %', p_match_id, p_board_number;
-    END IF;
-
-    -- Keys absent from the patch keep the value already on the row; the id and
-    -- the board's identity are pinned so a stray key cannot move the row.
-    v_next := jsonb_populate_record(
-        v_prev,
-        p_board_patch - 'id' - 'match_id' - 'board_number'
-    );
-
-    UPDATE public.boards SET
-        player1_score        = v_next.player1_score,
-        player2_score        = v_next.player2_score,
-        status               = v_next.status,
-        queen_claimed_by     = v_next.queen_claimed_by,
-        queen_covered        = v_next.queen_covered,
-        fouls_player1        = v_next.fouls_player1,
-        fouls_player2        = v_next.fouls_player2,
-        white_coins_pocketed = v_next.white_coins_pocketed,
-        black_coins_pocketed = v_next.black_coins_pocketed,
-        duration_minutes     = v_next.duration_minutes,
-        notes                = v_next.notes,
-        completed_at         = v_next.completed_at,
-        board_winner         = v_next.board_winner,
-        p1_coins_pocketed    = v_next.p1_coins_pocketed,
-        p2_coins_pocketed    = v_next.p2_coins_pocketed,
-        coins_remaining_with = v_next.coins_remaining_with,
-        coins_remaining      = v_next.coins_remaining,
-        queen_pocketed_by    = v_next.queen_pocketed_by,
-        queen_covered_by     = v_next.queen_covered_by,
-        queen_status         = v_next.queen_status,
-        queen_awarded_to     = v_next.queen_awarded_to,
-        p1_penalty           = v_next.p1_penalty,
-        p2_penalty           = v_next.p2_penalty,
-        base_points          = v_next.base_points,
-        queen_bonus          = v_next.queen_bonus,
-        scoring_warnings     = v_next.scoring_warnings,
-        locked               = v_next.locked,
-        confirmed_by         = v_next.confirmed_by,
-        confirmed_at         = v_next.confirmed_at
-    WHERE match_id = p_match_id AND board_number = p_board_number
-    RETURNING * INTO v_board;
-
-    INSERT INTO public.score_audit_logs (
-        match_id, admin_id, admin_name, board_number, previous_score, new_score, reason
-    ) VALUES (
-        p_match_id,
-        NULLIF(p_audit ->> 'admin_id', '')::UUID,
-        COALESCE(p_audit ->> 'admin_name', 'System'),
-        p_board_number,
-        jsonb_build_object('player1', v_prev.player1_score, 'player2', v_prev.player2_score),
-        COALESCE(p_audit -> 'new_score',
-                 jsonb_build_object('player1', v_board.player1_score, 'player2', v_board.player2_score)),
-        COALESCE(p_audit ->> 'reason', 'Score update')
-    );
-
-    UPDATE public.matches SET
-        player1_board_wins   = COALESCE((p_match_patch ->> 'player1_board_wins')::INTEGER, player1_board_wins),
-        player2_board_wins   = COALESCE((p_match_patch ->> 'player2_board_wins')::INTEGER, player2_board_wins),
-        player1_total_points = COALESCE((p_match_patch ->> 'player1_total_points')::INTEGER, player1_total_points),
-        player2_total_points = COALESCE((p_match_patch ->> 'player2_total_points')::INTEGER, player2_total_points),
-        status               = COALESCE(p_match_patch ->> 'status', status),
-        winner_id            = NULLIF(p_match_patch ->> 'winner_id', '')::UUID,
-        winner_name          = NULLIF(p_match_patch ->> 'winner_name', ''),
-        match_completed_at   = NULLIF(p_match_patch ->> 'match_completed_at', '')::TIMESTAMPTZ,
-        tie_break_required   = COALESCE((p_match_patch ->> 'tie_break_required')::BOOLEAN, tie_break_required),
-        tie_break_rule       = COALESCE(p_match_patch ->> 'tie_break_rule', tie_break_rule)
-    WHERE id = p_match_id;
-
-    -- Activate the following board only while the match is still running.
-    IF p_next_board_number IS NOT NULL
-       AND COALESCE(p_match_patch ->> 'status', '') <> 'completed' THEN
-        UPDATE public.boards
-        SET status = 'in_progress'
-        WHERE match_id = p_match_id
-          AND board_number = p_next_board_number
-          AND status = 'pending';
-    END IF;
-
-    RETURN to_jsonb(v_board);
+  INSERT INTO public.profiles (id, name, email, role, rating)
+  VALUES (
+    new.id,
+    COALESCE(new.raw_user_meta_data->>'name', 'User'),
+    new.email,
+    COALESCE(new.raw_app_meta_data->>'role', new.raw_user_meta_data->>'role', 'player'),
+    COALESCE((new.raw_user_meta_data->>'rating')::integer, 1500)
+  );
+  RETURN new;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-DO $$
-BEGIN
-    RAISE NOTICE 'Migration 005 applied: board detail, queen split, penalties, locking, tie-break.';
-END $$;
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
-
--- ==========================================================================
--- 006_sets_and_sides.sql
--- ==========================================================================
-
--- =============================================================================
--- 006 — Sets, sides and table assignment (Carromite format)
+-- -----------------------------------------------------------------------------
+-- 2. Row-level security
 --
--- A match was a flat list of boards. The Carromite format puts a SET between
--- them: 3 sets of 8 boards is 24 boards, the set is won on total points within
--- it, and the match is won on sets — so a player can score fewer points overall
--- and still win, which a flat board list cannot express at all.
+-- ENABLE ROW LEVEL SECURITY is idempotent on its own.
+-- -----------------------------------------------------------------------------
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tournaments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.registrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.matches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.boards ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.score_audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
+
+-- Whether the active user is an admin, read from the JWT's app_metadata --
+-- the half of the token the user cannot edit.
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN AS $$
+  SELECT COALESCE(auth.jwt() -> 'app_metadata' ->> 'role' = 'admin', false);
+$$ LANGUAGE sql SECURITY DEFINER;
+
+-- -----------------------------------------------------------------------------
+-- 3. Policies
 --
--- Everything here is additive. Existing matches become a single set of the
--- boards they already have, and score exactly as they did before.
---
--- Safe to re-run.
--- =============================================================================
+-- CREATE POLICY has no IF NOT EXISTS, so each one is dropped first; that is
+-- what makes a second run of this file harmless.
+-- -----------------------------------------------------------------------------
 
-DO $$
-BEGIN
-    IF to_regclass('public.boards') IS NULL THEN
-        RAISE EXCEPTION
-            'Base schema missing in this database (current_database=%). '
-            'Run db/schema.sql first, or switch to the project whose ref '
-            'matches SUPABASE_URL in backend/.env.', current_database();
-    END IF;
-END $$;
+-- Profiles. select_profiles is the blanket public read that 011 closed; it is
+-- dropped here as well so that running this file can never bring it back.
+DROP POLICY IF EXISTS select_profiles ON public.profiles;
+DROP POLICY IF EXISTS select_own_profile ON public.profiles;
+DROP POLICY IF EXISTS update_profiles_self ON public.profiles;
+DROP POLICY IF EXISTS admin_all_profiles ON public.profiles;
 
--- ---- tournament configuration ----------------------------------------------
+CREATE POLICY select_own_profile ON public.profiles FOR SELECT USING (auth.uid() = id);
+CREATE POLICY update_profiles_self ON public.profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY admin_all_profiles ON public.profiles FOR ALL USING (public.is_admin());
 
-ALTER TABLE public.tournaments
-    ADD COLUMN IF NOT EXISTS number_of_sets INTEGER DEFAULT 1
-        CHECK (number_of_sets IS NULL OR number_of_sets > 0);
+-- Tournaments
+DROP POLICY IF EXISTS select_tournaments ON public.tournaments;
+DROP POLICY IF EXISTS admin_all_tournaments ON public.tournaments;
 
-ALTER TABLE public.tournaments
-    -- Boards within one set. Falls back to matches.max_boards when unset, so a
-    -- tournament configured before sets existed keeps its shape.
-    ADD COLUMN IF NOT EXISTS boards_per_set INTEGER
-        CHECK (boards_per_set IS NULL OR boards_per_set > 0);
+CREATE POLICY select_tournaments ON public.tournaments FOR SELECT TO public USING (true);
+CREATE POLICY admin_all_tournaments ON public.tournaments FOR ALL USING (public.is_admin());
 
--- ---- which set a board belongs to ------------------------------------------
+-- Teams
+DROP POLICY IF EXISTS select_teams ON public.teams;
+DROP POLICY IF EXISTS insert_teams_member ON public.teams;
+DROP POLICY IF EXISTS admin_all_teams ON public.teams;
 
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS set_number INTEGER NOT NULL DEFAULT 1
-        CHECK (set_number > 0);
+CREATE POLICY select_teams ON public.teams FOR SELECT TO public USING (true);
+CREATE POLICY insert_teams_member ON public.teams FOR INSERT WITH CHECK (auth.uid() = player1_id OR auth.uid() = player2_id);
+CREATE POLICY admin_all_teams ON public.teams FOR ALL USING (public.is_admin());
 
--- Board numbers restart each set, so uniqueness is per set, not per match.
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'unique_board_per_match'
-          AND conrelid = 'public.boards'::regclass
-    ) THEN
-        ALTER TABLE public.boards DROP CONSTRAINT unique_board_per_match;
-    END IF;
+-- Registrations
+DROP POLICY IF EXISTS select_registrations ON public.registrations;
+DROP POLICY IF EXISTS insert_registrations_self ON public.registrations;
+DROP POLICY IF EXISTS admin_all_registrations ON public.registrations;
 
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'unique_board_per_set'
-          AND conrelid = 'public.boards'::regclass
-    ) THEN
-        ALTER TABLE public.boards
-            ADD CONSTRAINT unique_board_per_set UNIQUE (match_id, set_number, board_number);
-    END IF;
-END $$;
-
-CREATE INDEX IF NOT EXISTS idx_boards_set ON public.boards(match_id, set_number, board_number);
-
--- ---- the set itself ---------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS public.match_sets (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    match_id UUID NOT NULL REFERENCES public.matches(id) ON DELETE CASCADE,
-    set_number INTEGER NOT NULL CHECK (set_number > 0),
-    status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'in_progress', 'completed')),
-    -- Points accumulated across the boards of this set.
-    player1_points INTEGER DEFAULT 0 NOT NULL,
-    player2_points INTEGER DEFAULT 0 NOT NULL,
-    winner_id UUID,
-    winner_name TEXT,
-    completed_at TIMESTAMPTZ,
-    CONSTRAINT unique_set_per_match UNIQUE (match_id, set_number)
+CREATE POLICY select_registrations ON public.registrations FOR SELECT TO public USING (true);
+CREATE POLICY insert_registrations_self ON public.registrations FOR INSERT WITH CHECK (
+  auth.uid() = player_id OR
+  EXISTS (SELECT 1 FROM public.teams WHERE id = team_id AND (player1_id = auth.uid() OR player2_id = auth.uid()))
 );
+CREATE POLICY admin_all_registrations ON public.registrations FOR ALL USING (public.is_admin());
 
-CREATE INDEX IF NOT EXISTS idx_match_sets_match ON public.match_sets(match_id, set_number);
+-- Matches and boards
+DROP POLICY IF EXISTS select_matches ON public.matches;
+DROP POLICY IF EXISTS admin_all_matches ON public.matches;
 
-ALTER TABLE public.match_sets ENABLE ROW LEVEL SECURITY;
+CREATE POLICY select_matches ON public.matches FOR SELECT TO public USING (true);
+CREATE POLICY admin_all_matches ON public.matches FOR ALL USING (public.is_admin());
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_policies
-                   WHERE tablename = 'match_sets' AND policyname = 'select_match_sets') THEN
-        CREATE POLICY select_match_sets ON public.match_sets FOR SELECT USING (true);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_policies
-                   WHERE tablename = 'match_sets' AND policyname = 'write_match_sets') THEN
-        -- Writes go through the API, which does its own authorisation.
-        CREATE POLICY write_match_sets ON public.match_sets FOR ALL
-            USING (public.is_admin_or_service()) WITH CHECK (public.is_admin_or_service());
-    END IF;
-EXCEPTION WHEN undefined_function THEN
-    -- is_admin_or_service() ships with migration 002; without it, leave the
-    -- table readable and let the service key handle writes.
-    NULL;
-END $$;
+DROP POLICY IF EXISTS select_boards ON public.boards;
+DROP POLICY IF EXISTS admin_all_boards ON public.boards;
 
--- ---- match level: sets won, sides, table, referee ---------------------------
+CREATE POLICY select_boards ON public.boards FOR SELECT TO public USING (true);
+CREATE POLICY admin_all_boards ON public.boards FOR ALL USING (public.is_admin());
 
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS number_of_sets INTEGER DEFAULT 1
-        CHECK (number_of_sets IS NULL OR number_of_sets > 0);
+-- Score audit logs
+DROP POLICY IF EXISTS select_score_audit ON public.score_audit_logs;
+DROP POLICY IF EXISTS admin_insert_score_audit ON public.score_audit_logs;
 
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS player1_sets_won INTEGER DEFAULT 0 NOT NULL;
+CREATE POLICY select_score_audit ON public.score_audit_logs FOR SELECT TO public USING (true);
+CREATE POLICY admin_insert_score_audit ON public.score_audit_logs FOR INSERT WITH CHECK (public.is_admin());
 
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS player2_sets_won INTEGER DEFAULT 0 NOT NULL;
+-- Notifications
+DROP POLICY IF EXISTS select_notifications ON public.notifications;
+DROP POLICY IF EXISTS update_own_notifications ON public.notifications;
+DROP POLICY IF EXISTS admin_all_notifications ON public.notifications;
 
-ALTER TABLE public.matches
-    -- The coin each side plays. Stored against the player id, never against a
-    -- screen position, so switching sides on screen cannot reassign it.
-    ADD COLUMN IF NOT EXISTS player1_color TEXT
-        CHECK (player1_color IS NULL OR player1_color IN ('black', 'white'));
+CREATE POLICY select_notifications ON public.notifications FOR SELECT USING (profile_id IS NULL OR profile_id = auth.uid());
+-- Without this, only admins could ever flip `read`, so "mark as read" silently
+-- updated zero rows for every player.
+CREATE POLICY update_own_notifications ON public.notifications FOR UPDATE
+  USING (profile_id = auth.uid())
+  WITH CHECK (profile_id = auth.uid());
+CREATE POLICY admin_all_notifications ON public.notifications FOR ALL USING (public.is_admin());
 
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS player2_color TEXT
-        CHECK (player2_color IS NULL OR player2_color IN ('black', 'white'));
+-- Administrative audit logs
+DROP POLICY IF EXISTS admin_select_audit_logs ON public.audit_logs;
 
-ALTER TABLE public.matches
-    -- Which side is drawn on the left. Presentation only: player1_id stays
-    -- player1_id whichever way round the umpire is standing.
-    ADD COLUMN IF NOT EXISTS sides_swapped BOOLEAN DEFAULT false NOT NULL;
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS table_number INTEGER;
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS referee_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL;
-
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS referee_name TEXT;
-
--- Both sides cannot play the same colour.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conname = 'distinct_coin_colors' AND conrelid = 'public.matches'::regclass
-    ) THEN
-        ALTER TABLE public.matches
-            ADD CONSTRAINT distinct_coin_colors CHECK (
-                player1_color IS NULL OR player2_color IS NULL
-                OR player1_color <> player2_color
-            );
-    END IF;
-END $$;
-
--- ---- board detail the Carromite sheet records -------------------------------
-
-ALTER TABLE public.boards
-    -- Both sides' remaining counts, not just the one side that has coins left.
-    ADD COLUMN IF NOT EXISTS p1_coins_remaining INTEGER
-        CHECK (p1_coins_remaining IS NULL OR p1_coins_remaining >= 0);
-
-ALTER TABLE public.boards
-    ADD COLUMN IF NOT EXISTS p2_coins_remaining INTEGER
-        CHECK (p2_coins_remaining IS NULL OR p2_coins_remaining >= 0);
-
-ALTER TABLE public.boards
-    -- Recorded explicitly rather than inferred from queen_pocketed_by, so
-    -- "not pocketed" and "pocketed by nobody yet" stay distinguishable.
-    ADD COLUMN IF NOT EXISTS queen_pocketed BOOLEAN;
+CREATE POLICY admin_select_audit_logs ON public.audit_logs FOR SELECT USING (public.is_admin());
 
 DO $$
 BEGIN
-    RAISE NOTICE 'Migration 006 applied: sets, coin colours, side swap, table and referee.';
+    RAISE NOTICE 'Migration 013 applied: sign-ups create a profile row, and row-level security is enforced on every table.';
 END $$;
 
 
 -- ==========================================================================
--- 007_apply_board_result_sets.sql
+-- 014_lock_profile_role.sql
 -- ==========================================================================
 
 -- =============================================================================
--- 007 — apply_board_result must know which set a board is in
+-- 014 — Nobody grants themselves a role
 --
--- The transactional write locked a board with
---     WHERE match_id = ... AND board_number = ...
--- which was unambiguous only while board numbers were unique per match. Once
--- board numbers restart each set, board 1 of a three-set match matches three
--- rows and the function fails with "query returned more than one row" — so
--- every score in a set-based match was rejected.
+-- 013 gave everyone the right to edit their own profile:
 --
--- The set is now part of the lookup, defaulting to 1 so a match that is not
--- played in sets behaves exactly as before.
+--     CREATE POLICY update_profiles_self ON public.profiles
+--       FOR UPDATE USING (auth.uid() = id);
 --
--- Safe to re-run.
+-- which is right for a name, a club and a phone number, and wrong for the one
+-- column on that row the API treats as authority. `profiles.role` is what
+-- verify_admin reads, through the service client, bypassing RLS. The policy
+-- has no WITH CHECK and no column list, and nothing revokes UPDATE(role) from
+-- `authenticated`, so the row a player is allowed to write includes the field
+-- that decides whether they are an administrator.
+--
+-- The anon key ships in the browser bundle — migration 011's own header records
+-- it being lifted out of the live bundle and used to read the table — so this
+-- needs no access to the application at all. A signed-in player with their own
+-- token can send:
+--
+--     PATCH /rest/v1/profiles?id=eq.<their own id>     {"role": "admin"}
+--
+-- The row still satisfies auth.uid() = id, so the policy accepts it, and from
+-- the next request onwards every admin-only endpoint agrees they are one.
+--
+-- Two locks, because either alone is a single point of failure. The REVOKE
+-- stops the column being named in an UPDATE at all; the trigger refuses the
+-- change even if a future policy or grant hands the column back. The trigger
+-- is the one that survives somebody re-running an older file.
+--
+-- The service role is untouched. It is what the API writes through when an
+-- organiser genuinely promotes somebody, and what db/promote_admin.py uses.
 -- =============================================================================
 
-DO $$
+-- 1. The column cannot be written by a browser-held key.
+REVOKE UPDATE (role) ON public.profiles FROM anon, authenticated;
+
+-- 2. And cannot be changed even if it could be written.
+--
+-- SECURITY DEFINER so the check runs regardless of the caller. The service
+-- role -- and only it -- is allowed through, which is how a real promotion
+-- lands: the API and promote_admin.py both write with the service key.
+CREATE OR REPLACE FUNCTION public.guard_profile_role()
+RETURNS trigger AS $$
 BEGIN
-    IF to_regclass('public.boards') IS NULL THEN
+    IF NEW.role IS DISTINCT FROM OLD.role
+       AND coalesce(current_setting('request.jwt.claim.role', true), '') <> 'service_role'
+       AND current_user <> 'service_role'
+    THEN
         RAISE EXCEPTION
-            'Base schema missing in this database (current_database=%). '
-            'Run db/schema.sql first, or switch to the project whose ref '
-            'matches SUPABASE_URL in backend/.env.', current_database();
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema = 'public' AND table_name = 'boards'
-                     AND column_name = 'set_number') THEN
-        RAISE EXCEPTION
-            'boards.set_number is missing. Apply 006_sets_and_sides.sql first.';
-    END IF;
-END $$;
-
--- The old six-argument version has to go, or adding a defaulted seventh
--- argument leaves two candidates and every call becomes ambiguous.
-DROP FUNCTION IF EXISTS public.apply_board_result(UUID, INTEGER, JSONB, JSONB, JSONB, INTEGER);
-
-CREATE OR REPLACE FUNCTION public.apply_board_result(
-    p_match_id UUID,
-    p_board_number INTEGER,
-    p_board_patch JSONB,
-    p_match_patch JSONB,
-    p_audit JSONB,
-    p_next_board_number INTEGER DEFAULT NULL,
-    p_set_number INTEGER DEFAULT 1
-)
-RETURNS JSONB AS $$
-DECLARE
-    v_prev  public.boards%ROWTYPE;
-    v_next  public.boards%ROWTYPE;
-    v_board public.boards%ROWTYPE;
-    v_set   INTEGER := COALESCE(p_set_number, 1);
-BEGIN
-    IF NOT public.is_admin_or_service() THEN
-        RAISE EXCEPTION 'insufficient_privilege: admin rights required to apply a board result';
-    END IF;
-
-    -- Lock the board so two scorers cannot interleave on the same board.
-    SELECT * INTO v_prev
-    FROM public.boards
-    WHERE match_id = p_match_id
-      AND board_number = p_board_number
-      AND COALESCE(set_number, 1) = v_set
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'board_not_found: match % set % board %',
-            p_match_id, v_set, p_board_number;
-    END IF;
-
-    -- Keys absent from the patch keep the value already on the row; the id and
-    -- the board's identity are pinned so a stray key cannot move the row.
-    v_next := jsonb_populate_record(
-        v_prev,
-        p_board_patch - 'id' - 'match_id' - 'board_number' - 'set_number'
-    );
-
-    UPDATE public.boards SET
-        player1_score        = v_next.player1_score,
-        player2_score        = v_next.player2_score,
-        status               = v_next.status,
-        queen_claimed_by     = v_next.queen_claimed_by,
-        queen_covered        = v_next.queen_covered,
-        fouls_player1        = v_next.fouls_player1,
-        fouls_player2        = v_next.fouls_player2,
-        white_coins_pocketed = v_next.white_coins_pocketed,
-        black_coins_pocketed = v_next.black_coins_pocketed,
-        duration_minutes     = v_next.duration_minutes,
-        notes                = v_next.notes,
-        completed_at         = v_next.completed_at,
-        board_winner         = v_next.board_winner,
-        p1_coins_pocketed    = v_next.p1_coins_pocketed,
-        p2_coins_pocketed    = v_next.p2_coins_pocketed,
-        p1_coins_remaining   = v_next.p1_coins_remaining,
-        p2_coins_remaining   = v_next.p2_coins_remaining,
-        coins_remaining_with = v_next.coins_remaining_with,
-        coins_remaining      = v_next.coins_remaining,
-        queen_pocketed       = v_next.queen_pocketed,
-        queen_pocketed_by    = v_next.queen_pocketed_by,
-        queen_covered_by     = v_next.queen_covered_by,
-        queen_status         = v_next.queen_status,
-        queen_awarded_to     = v_next.queen_awarded_to,
-        p1_penalty           = v_next.p1_penalty,
-        p2_penalty           = v_next.p2_penalty,
-        base_points          = v_next.base_points,
-        queen_bonus          = v_next.queen_bonus,
-        scoring_warnings     = v_next.scoring_warnings,
-        locked               = v_next.locked,
-        confirmed_by         = v_next.confirmed_by,
-        confirmed_at         = v_next.confirmed_at
-    WHERE match_id = p_match_id
-      AND board_number = p_board_number
-      AND COALESCE(set_number, 1) = v_set
-    RETURNING * INTO v_board;
-
-    INSERT INTO public.score_audit_logs (
-        match_id, admin_id, admin_name, board_number, previous_score, new_score, reason
-    ) VALUES (
-        p_match_id,
-        NULLIF(p_audit ->> 'admin_id', '')::UUID,
-        COALESCE(p_audit ->> 'admin_name', 'System'),
-        p_board_number,
-        jsonb_build_object('player1', v_prev.player1_score, 'player2', v_prev.player2_score),
-        COALESCE(p_audit -> 'new_score',
-                 jsonb_build_object('player1', v_board.player1_score, 'player2', v_board.player2_score)),
-        COALESCE(p_audit ->> 'reason', 'Score update')
-    );
-
-    UPDATE public.matches SET
-        player1_board_wins   = COALESCE((p_match_patch ->> 'player1_board_wins')::INTEGER, player1_board_wins),
-        player2_board_wins   = COALESCE((p_match_patch ->> 'player2_board_wins')::INTEGER, player2_board_wins),
-        player1_total_points = COALESCE((p_match_patch ->> 'player1_total_points')::INTEGER, player1_total_points),
-        player2_total_points = COALESCE((p_match_patch ->> 'player2_total_points')::INTEGER, player2_total_points),
-        player1_sets_won     = COALESCE((p_match_patch ->> 'player1_sets_won')::INTEGER, player1_sets_won),
-        player2_sets_won     = COALESCE((p_match_patch ->> 'player2_sets_won')::INTEGER, player2_sets_won),
-        status               = COALESCE(p_match_patch ->> 'status', status),
-        winner_id            = NULLIF(p_match_patch ->> 'winner_id', '')::UUID,
-        winner_name          = NULLIF(p_match_patch ->> 'winner_name', ''),
-        match_completed_at   = NULLIF(p_match_patch ->> 'match_completed_at', '')::TIMESTAMPTZ,
-        tie_break_required   = COALESCE((p_match_patch ->> 'tie_break_required')::BOOLEAN, tie_break_required),
-        tie_break_rule       = COALESCE(p_match_patch ->> 'tie_break_rule', tie_break_rule)
-    WHERE id = p_match_id;
-
-    -- Activate the following board of the same set, while the match runs on.
-    IF p_next_board_number IS NOT NULL
-       AND COALESCE(p_match_patch ->> 'status', '') <> 'completed' THEN
-        UPDATE public.boards
-        SET status = 'in_progress'
-        WHERE match_id = p_match_id
-          AND board_number = p_next_board_number
-          AND COALESCE(set_number, 1) = v_set
-          AND status = 'pending';
-    END IF;
-
-    RETURN to_jsonb(v_board);
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
-DO $$
-BEGIN
-    RAISE NOTICE 'Migration 007 applied: apply_board_result is set-aware.';
-END $$;
-
-
--- ==========================================================================
--- 008_drop_city_default.sql
--- ==========================================================================
-
--- =============================================================================
--- 008 — Stop defaulting everyone's city to Pune
---
--- profiles.city carried DEFAULT 'Pune', so any player created without a city
--- was recorded as being from Pune. That is a guess presented as a fact: it
--- shows on the player directory and prints on the draw sheet, and nobody typed
--- it. A city nobody supplied should be blank.
---
--- Existing rows are left alone. A player genuinely from Pune and a player who
--- was merely defaulted there are indistinguishable now, so clearing them would
--- discard real answers along with the guesses.
---
--- Safe to re-run.
--- =============================================================================
-
-DO $$
-BEGIN
-    IF to_regclass('public.profiles') IS NULL THEN
-        RAISE EXCEPTION
-            'Base schema missing in this database (current_database=%). '
-            'Run db/schema.sql first, or switch to the project whose ref '
-            'matches SUPABASE_URL in backend/.env.', current_database();
-    END IF;
-END $$;
-
-ALTER TABLE public.profiles ALTER COLUMN city DROP DEFAULT;
-
-DO $$
-BEGIN
-    RAISE NOTICE 'Migration 008 applied: profiles.city no longer defaults to Pune.';
-END $$;
-
--- -----------------------------------------------------------------------------
--- Confirm it landed.
--- -----------------------------------------------------------------------------
-DO $verify$
-DECLARE
-    missing TEXT := '';
-BEGIN
-    IF to_regclass('public.matches') IS NULL THEN
-        RAISE EXCEPTION 'Base schema missing — run db/schema.sql first.';
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema='public' AND table_name='matches' AND column_name='toss_choice')
-        THEN missing := missing || ' matches.toss_choice'; END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema='public' AND table_name='boards' AND column_name='board_winner')
-        THEN missing := missing || ' boards.board_winner'; END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema='public' AND table_name='boards' AND column_name='locked')
-        THEN missing := missing || ' boards.locked'; END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema='public' AND table_name='matches' AND column_name='tie_break_required')
-        THEN missing := missing || ' matches.tie_break_required'; END IF;
-
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema='public' AND table_name='boards' AND column_name='set_number')
-        THEN missing := missing || ' boards.set_number'; END IF;
-    IF to_regclass('public.match_sets') IS NULL
-        THEN missing := missing || ' table match_sets'; END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                   WHERE table_schema='public' AND table_name='matches' AND column_name='player1_color')
-        THEN missing := missing || ' matches.player1_color'; END IF;
-
-    IF missing <> '' THEN
-        RAISE EXCEPTION 'Migration did not complete. Still missing:%', missing;
-    END IF;
-    RAISE NOTICE 'All pending migrations applied. /api/health should now report "all applied".';
-END $verify$;
-
-
-------------------------------------------------------------------------------
--- 009_stop_timer_on_finish.sql
-------------------------------------------------------------------------------
-
--- =============================================================================
--- 009 — Stop the match clock when the match ends
---
--- A match keeps its elapsed time in two halves: timer_elapsed_seconds, which is
--- only added to on pause, and timer_started_at, the epoch milliseconds of the
--- current run. The UI stops counting when is_timer_running goes false.
---
--- Nothing set that flag false when a match finished. Start, pause and resume
--- each maintained the timer, but nothing closed it out, so the clock ran on for
--- as long as the page stayed open and the stored duration stayed at whatever it
--- was at the last pause.
---
--- What ends a match is the umpire confirming the result, NOT the last board
--- being scored. Between those two moments there is still work to do -- checking
--- the boards, settling a dispute, agreeing a tie-break -- and that time belongs
--- to the match. So the clock runs through 'completed' and stops on confirmation.
---
--- Confirmation happens in two places: the application fallback, and a
--- SECURITY DEFINER function whose body differs depending on which of migrations
--- 002, 005 and 007 have been applied. Rather than rewrite several variants of
--- it, a trigger closes the clock whenever result_confirmed becomes true by any
--- route at all -- including a hand correction in the SQL editor.
---
--- The application stops the clock too, so a database without this migration
--- still behaves. The two do not double-count: the trigger only acts when the
--- flag is still set, and the application clears it in the same write.
---
--- Safe to re-run.
--- =============================================================================
-
-DO $$
-BEGIN
-    IF to_regclass('public.matches') IS NULL THEN
-        RAISE EXCEPTION
-            'Base schema missing in this database (current_database=%). '
-            'Run db/schema.sql first, or switch to the project whose ref '
-            'matches SUPABASE_URL in backend/.env.', current_database();
-    END IF;
-END $$;
-
-CREATE OR REPLACE FUNCTION public.stop_timer_on_match_complete()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF NEW.result_confirmed AND NOT COALESCE(OLD.result_confirmed, false)
-       AND NEW.is_timer_running THEN
-        -- Bank the stretch this run has been going before clearing the flag,
-        -- or the recorded duration loses the final part of the match.
-        NEW.timer_elapsed_seconds :=
-            CASE
-                WHEN NEW.timer_started_at IS NOT NULL THEN
-                    COALESCE(NEW.timer_elapsed_seconds, 0)
-                    + GREATEST(
-                        0,
-                        (((EXTRACT(EPOCH FROM now()) * 1000)::BIGINT - NEW.timer_started_at) / 1000)::INTEGER
-                      )
-                ELSE COALESCE(NEW.timer_elapsed_seconds, 0)
-            END;
-        NEW.is_timer_running := false;
+            'profiles.role may only be changed by an organiser (service role); '
+            'use db/promote_admin.py or the admin API.'
+            USING ERRCODE = 'insufficient_privilege';
     END IF;
     RETURN NEW;
-END $$;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
-DROP TRIGGER IF EXISTS trg_stop_timer_on_match_complete ON public.matches;
-CREATE TRIGGER trg_stop_timer_on_match_complete
-    BEFORE UPDATE ON public.matches
-    FOR EACH ROW
-    EXECUTE FUNCTION public.stop_timer_on_match_complete();
+DROP TRIGGER IF EXISTS guard_profile_role ON public.profiles;
+CREATE TRIGGER guard_profile_role
+    BEFORE UPDATE ON public.profiles
+    FOR EACH ROW EXECUTE FUNCTION public.guard_profile_role();
 
--- Matches already confirmed with the clock left running. How long they really
--- took is not recoverable, so only the flag is corrected -- which is the part
--- that stops the display counting. A match that is merely 'completed' is left
--- alone: its clock is meant to still be running.
-UPDATE public.matches
-SET is_timer_running = false
-WHERE result_confirmed = true AND is_timer_running = true;
+-- 3. Say plainly what the self-update policy is now for.
+--
+-- Recreated rather than left as it was, so reading 013 and this file together
+-- does not leave the impression that the policy is what limits the columns.
+-- It does not: the REVOKE and the trigger above do.
+DROP POLICY IF EXISTS update_profiles_self ON public.profiles;
+CREATE POLICY update_profiles_self ON public.profiles
+    FOR UPDATE
+    USING (auth.uid() = id)
+    WITH CHECK (auth.uid() = id);
 
 DO $$
 BEGIN
-    RAISE NOTICE 'Migration 009 applied: the match clock now stops when a result is confirmed.';
+    RAISE NOTICE 'Migration 014 applied: profiles.role can no longer be set by the account holder.';
 END $$;
 
 
-------------------------------------------------------------------------------
--- 010_walkover.sql
-------------------------------------------------------------------------------
+-- ==========================================================================
+-- 015_payments.sql
+-- ==========================================================================
 
 -- =============================================================================
--- 010 — Record a walkover
+-- 015 — Entry fees: what was charged, what was paid, and by whom
 --
--- A player does not turn up, retires injured, or concedes. Until now there was
--- no way to say so: 'match.walkover' existed as a permission but no endpoint
--- implemented it, MatchUpdateSchema was imported and never used, and there was
--- no PUT /matches/{id} at all. The only way to finish a match was to score
--- boards, so an organiser facing a no-show had to invent board scores — which
--- then flowed into the points table as though they had been played.
+-- `tournaments.entry_fee` has existed since the base schema, and the
+-- registration form has always shown it, but nothing ever collected it: the
+-- fee was a number on a poster, settled in cash at the venue, and the badge on
+-- the form said "On-Site / UPI Verified" because no money passed through the
+-- application at all. `registrations.payment_status` could say 'paid', but only
+-- an organiser ticking it by hand ever set it.
 --
--- These two columns let the result say what actually happened. The match still
--- carries a winner, board wins and points so the standings work unchanged; the
--- flag records that no carrom was played, and the reason says why.
+-- This adds the ledger that makes an online entry fee real. One row per
+-- attempt, keyed by Razorpay's own order id, holding what was asked for and
+-- what actually arrived. The registration keeps its own `payment_status` as
+-- the summary; this table is the evidence behind it.
+--
+-- Three properties this table exists to guarantee:
+--
+--   1. The amount is a fact, recorded server-side before the player is sent to
+--      checkout, so a disputed charge can be answered from the database rather
+--      than from what the browser claimed it was paying.
+--   2. `razorpay_payment_id` is UNIQUE, which is what makes the webhook safe to
+--      retry. Razorpay redelivers, and the browser callback can arrive for the
+--      same payment as well; both paths write through this constraint, so a
+--      duplicate is a no-op rather than a second confirmed entry.
+--   3. `signature_verified` is stored, not assumed. A row that reached 'paid'
+--      without a verified signature is a bug, and this makes it findable.
+--
+-- Amounts are in PAISE, as integers, because that is the only unit Razorpay
+-- accepts and because NUMERIC rounding on a currency total is how you end up
+-- one rupee short across a hundred entries. `entry_fee` stays NUMERIC rupees on
+-- the tournament -- that is what an organiser types -- and the conversion
+-- happens once, in the API, when the order is created.
 --
 -- Safe to re-run.
 -- =============================================================================
 
 DO $$
 BEGIN
-    IF to_regclass('public.matches') IS NULL THEN
+    IF to_regclass('public.registrations') IS NULL OR to_regclass('public.tournaments') IS NULL THEN
         RAISE EXCEPTION
             'Base schema missing in this database (current_database=%). '
             'Run db/schema.sql first, or switch to the project whose ref '
@@ -857,101 +343,133 @@ BEGIN
     END IF;
 END $$;
 
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS walkover BOOLEAN NOT NULL DEFAULT false;
+-- -----------------------------------------------------------------------------
+-- 1. The payments ledger
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS walkover_reason TEXT;
+    registration_id UUID NOT NULL REFERENCES public.registrations(id) ON DELETE CASCADE,
+    -- Denormalised so an organiser can total a tournament's takings without
+    -- joining through registrations, and so the row still says which event it
+    -- belonged to while a deletion cascade is in flight.
+    tournament_id UUID NOT NULL REFERENCES public.tournaments(id) ON DELETE CASCADE,
 
--- Who recorded it, so a result nobody played is still accountable.
-ALTER TABLE public.matches
-    ADD COLUMN IF NOT EXISTS walkover_by UUID;
+    -- Razorpay's identifiers. The order is created by us; the payment id
+    -- arrives only once money has actually moved.
+    razorpay_order_id TEXT NOT NULL,
+    razorpay_payment_id TEXT,
+
+    amount_paise INTEGER NOT NULL CHECK (amount_paise > 0),
+    currency TEXT NOT NULL DEFAULT 'INR',
+
+    -- created  : order opened, player sent to checkout, nothing paid yet
+    -- paid     : signature verified, money captured
+    -- failed   : Razorpay reported the attempt failed
+    -- refunded : reversed after the fact
+    status TEXT NOT NULL DEFAULT 'created'
+        CHECK (status IN ('created', 'paid', 'failed', 'refunded')),
+
+    -- Whether the HMAC on the callback (or webhook) checked out. Kept as a
+    -- column rather than inferred from status so that "we took the money" and
+    -- "we proved it was really Razorpay telling us so" stay separable.
+    signature_verified BOOLEAN NOT NULL DEFAULT false,
+
+    -- Which path confirmed it: 'callback' (the browser came back) or
+    -- 'webhook' (Razorpay told us directly). Useful when reconciling a day's
+    -- takings against the dashboard, and the only way to notice that callbacks
+    -- are working while webhooks are not.
+    confirmed_via TEXT CHECK (confirmed_via IN ('callback', 'webhook')),
+
+    -- Razorpay's own failure description, kept verbatim for support.
+    error_description TEXT,
+
+    method TEXT,
+    notes JSONB,
+
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    paid_at TIMESTAMPTZ
+);
+
+-- -----------------------------------------------------------------------------
+-- 2. The uniqueness that makes retries safe
+--
+-- Both constraints are the reason this design does not need a lock. The order
+-- id is unique because one order belongs to one registration attempt; the
+-- payment id is unique because one payment confirms one entry, no matter how
+-- many times Razorpay tells us about it.
+--
+-- The payment id index is PARTIAL: rows sit at NULL between order creation and
+-- payment, and a plain UNIQUE would allow only one unpaid order in the entire
+-- table on databases that treat NULLs as equal. It is written this way so the
+-- intent survives someone reading it later.
+-- -----------------------------------------------------------------------------
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_payments_order
+    ON public.payments(razorpay_order_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_payments_payment
+    ON public.payments(razorpay_payment_id)
+    WHERE razorpay_payment_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_payments_registration
+    ON public.payments(registration_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_payments_tournament
+    ON public.payments(tournament_id, status);
+
+-- -----------------------------------------------------------------------------
+-- 3. Row level security
+--
+-- The API writes through the service-role client, which bypasses all of this.
+-- These policies exist for the anon key that ships in the browser bundle --
+-- migration 011's header records that key being lifted out of the live bundle
+-- and used to read a table directly, so every new table gets locked down on
+-- the way in rather than after the same lesson twice.
+--
+-- A player may READ their own payments, so a receipt can be shown without a
+-- round trip through the API. Nobody may write through PostgREST at all: an
+-- INSERT here is a claim that money arrived, and only the server, holding the
+-- key secret and having checked a signature, is allowed to make it.
+-- -----------------------------------------------------------------------------
+ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS select_payments_self ON public.payments;
+CREATE POLICY select_payments_self ON public.payments
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM public.registrations r
+            LEFT JOIN public.teams t ON t.id = r.team_id
+            WHERE r.id = payments.registration_id
+              AND (
+                  r.player_id = auth.uid()
+                  OR t.player1_id = auth.uid()
+                  OR t.player2_id = auth.uid()
+              )
+        )
+    );
+
+-- No INSERT, UPDATE or DELETE policy is defined, so with RLS enabled every
+-- write through the anon or authenticated role is refused. Stated explicitly
+-- because "there is no policy" and "somebody deleted the policy" look
+-- identical in a schema dump.
+REVOKE INSERT, UPDATE, DELETE ON public.payments FROM anon, authenticated;
+
+-- -----------------------------------------------------------------------------
+-- 4. Registrations gain a fee snapshot
+--
+-- The fee is copied onto the registration at the moment of entry. An organiser
+-- who raises the fee halfway through a registration window must not thereby
+-- change what an already-entered player owes, and a receipt has to be able to
+-- say what THIS entry cost -- which `tournaments.entry_fee` stops being able to
+-- answer the moment it is edited.
+-- -----------------------------------------------------------------------------
+ALTER TABLE public.registrations
+    ADD COLUMN IF NOT EXISTS fee_paise INTEGER CHECK (fee_paise IS NULL OR fee_paise >= 0);
 
 DO $$
 BEGIN
-    RAISE NOTICE 'Migration 010 applied: matches can be recorded as walkovers.';
+    RAISE NOTICE 'Migration 015 applied: payments ledger created, registrations.fee_paise added. Entry fees can now be collected through Razorpay.';
 END $$;
 
 
-------------------------------------------------------------------------------
--- 011_profile_privacy.sql
-------------------------------------------------------------------------------
-
--- =============================================================================
--- 011 — Stop publishing everyone's email address and phone number
---
--- The policy was:
---     CREATE POLICY select_profiles ON public.profiles
---         FOR SELECT TO public USING (true);
---
--- Every row, every column, to anyone. And "anyone" is literal: the anon key
--- that authorises those reads is embedded in the frontend JavaScript bundle
--- served to every visitor, so extracting it and dumping the table takes a
--- browser and about a minute. Verified against the live database with nothing
--- but that public key: 22 profiles came back, with names, emails, clubs,
--- cities and a phone number.
---
--- What the app genuinely needs to show publicly is who is playing: a name, a
--- club, a rating, an avatar. It never needs to show a stranger's email address
--- or phone number.
---
--- So the table keeps its public read, and the contact columns move to a view
--- that the app reads instead. A player still sees their own details, and an
--- admin still sees everyone's -- both of those already had policies and are
--- untouched.
---
--- NOTE: writes were already safe. update_profiles_self requires
--- auth.uid() = id, so the anon key could read but never modify. This migration
--- closes the read.
---
--- Safe to re-run.
--- =============================================================================
-
-DO $$
-BEGIN
-    IF to_regclass('public.profiles') IS NULL THEN
-        RAISE EXCEPTION
-            'Base schema missing in this database (current_database=%). '
-            'Run db/schema.sql first, or switch to the project whose ref '
-            'matches SUPABASE_URL in backend/.env.', current_database();
-    END IF;
-END $$;
-
--- Replace the blanket public read with one that only covers a person's own row
--- (admins are already covered by admin_all_profiles, which is FOR ALL).
-DROP POLICY IF EXISTS select_profiles ON public.profiles;
-
--- Guarded the way 006 guards its policies. CREATE POLICY has no IF NOT EXISTS,
--- so without this a second run of the bundle stops here with
--- "policy select_own_profile for table profiles already exists" -- which is
--- what "safe to re-run" at the top of this file is supposed to mean.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_policies
-                   WHERE tablename = 'profiles' AND policyname = 'select_own_profile') THEN
-        CREATE POLICY select_own_profile ON public.profiles
-            FOR SELECT USING (auth.uid() = id);
-    END IF;
-END $$;
-
--- The public directory: who is playing, without how to contact them.
--- Dropped first rather than CREATE OR REPLACE, which refuses any change to the
--- column list and would strand this migration the day a column is added here.
-DROP VIEW IF EXISTS public.public_profiles;
-
-CREATE VIEW public.public_profiles
-WITH (security_invoker = false) AS
-    SELECT id, name, avatar, club, city, rating, role, created_at
-    FROM public.profiles;
-
-GRANT SELECT ON public.public_profiles TO anon, authenticated;
-
-COMMENT ON VIEW public.public_profiles IS
-    'Player directory without contact details. Read this instead of profiles '
-    'from any browser-side query; profiles itself is now restricted to the '
-    'owner of the row and to admins.';
-
-DO $$
-BEGIN
-    RAISE NOTICE 'Migration 011 applied: emails and phone numbers are no longer world-readable.';
-END $$;
