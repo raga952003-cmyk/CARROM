@@ -12,7 +12,7 @@
  * so the bundle can never ship a live key by accident.
  */
 
-import { apiClient } from '../utils/apiClient';
+import { apiClient, ApiError } from '../utils/apiClient';
 import { Registration } from '../types/tournament';
 
 const CHECKOUT_SRC = 'https://checkout.razorpay.com/v1/checkout.js';
@@ -71,6 +71,73 @@ export class PaymentDismissedError extends Error {
   }
 }
 
+/**
+ * Money left the account but this app could not get confirmation recorded.
+ *
+ * A distinct type because the two failures either side of the payment need
+ * opposite wording. Before the payment, "try again" is correct advice. After
+ * it, "try again" invites a second charge -- and a verify call is exactly where
+ * a phone loses signal: the player has just switched back from their UPI app.
+ *
+ * `paid` is true by construction: this is only thrown once Razorpay's success
+ * handler has fired, which means the charge went through.
+ */
+export class PaymentUnconfirmedError extends Error {
+  readonly paid = true;
+  readonly paymentId: string;
+  constructor(paymentId: string) {
+    super(
+      'Your payment went through, but we could not confirm it just now. ' +
+      'Do not pay again — it will be confirmed automatically, or the organisers can confirm it.'
+    );
+    this.name = 'PaymentUnconfirmedError';
+    this.paymentId = paymentId;
+  }
+}
+
+/** Verify attempts, and the pause between them. */
+const VERIFY_ATTEMPTS = 3;
+const VERIFY_BACKOFF_MS = [600, 1800];
+
+const pause = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+/**
+ * Hand Checkout's result to the server, retrying a transport failure.
+ *
+ * Only transport and 5xx failures are retried. A 4xx is the server's decision
+ * -- a bad signature, an amount mismatch, an entry already paid -- and repeating
+ * the call cannot change it.
+ *
+ * When every attempt fails, the caller gets PaymentUnconfirmedError rather than
+ * the raw network error, because at this point the money HAS moved and the
+ * difference matters more than the cause. The webhook is the backstop: Razorpay
+ * redelivers, and the server settles the entry without the browser.
+ */
+async function verifyWithRetry(
+  response: CheckoutSuccess,
+): Promise<{ payment: PaymentRecord; registration: Registration }> {
+  let lastFailure: unknown = null;
+
+  for (let attempt = 0; attempt < VERIFY_ATTEMPTS; attempt++) {
+    try {
+      return await paymentService.verify(response);
+    } catch (e: any) {
+      lastFailure = e;
+      const status = e instanceof ApiError ? e.status : 0;
+      // A decision, not a blip: stop and surface it.
+      if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
+        throw e;
+      }
+      if (attempt < VERIFY_ATTEMPTS - 1) {
+        await pause(VERIFY_BACKOFF_MS[attempt] ?? 1800);
+      }
+    }
+  }
+
+  console.error('Payment verification failed after retries:', lastFailure);
+  throw new PaymentUnconfirmedError(response.razorpay_payment_id);
+}
+
 let scriptPromise: Promise<void> | null = null;
 
 /**
@@ -89,20 +156,44 @@ function loadCheckoutScript(): Promise<void> {
   if (scriptPromise) return scriptPromise;
 
   scriptPromise = new Promise<void>((resolve, reject) => {
-    const existing = document.querySelector<HTMLScriptElement>(`script[src="${CHECKOUT_SRC}"]`);
-    const script = existing || document.createElement('script');
+    // A tag already in the document is NOT reusable.
+    //
+    // If it had loaded, window.Razorpay would exist and we would have returned
+    // above -- so reaching here with a tag present means that tag is dead: its
+    // load/error events have already fired and will never fire again. Binding
+    // listeners to it produced a promise that could not settle, and the payment
+    // panel spun forever. A flaky connection or a blocked CDN on the first
+    // attempt made every later attempt hang, not just that one.
+    //
+    // So the corpse is removed and a fresh tag injected.
+    const dead = document.querySelectorAll<HTMLScriptElement>(`script[src="${CHECKOUT_SRC}"]`);
+    dead.forEach(node => node.remove());
 
-    script.addEventListener('load', () => resolve());
+    const script = document.createElement('script');
+
+    script.addEventListener('load', () => {
+      // Guard against a script that loads but does not define the global --
+      // a captive-portal or proxy interstitial served with a 200.
+      if ((window as any).Razorpay) {
+        resolve();
+      } else {
+        scriptPromise = null;
+        script.remove();
+        reject(new Error('The payment window did not load correctly. Please try again.'));
+      }
+    });
+
     script.addEventListener('error', () => {
+      // Clear the cache AND remove the element, so the next attempt starts
+      // clean rather than finding this one and waiting on it.
       scriptPromise = null;
+      script.remove();
       reject(new Error('Could not load the payment window. Check your connection and try again.'));
     });
 
-    if (!existing) {
-      script.src = CHECKOUT_SRC;
-      script.async = true;
-      document.body.appendChild(script);
-    }
+    script.src = CHECKOUT_SRC;
+    script.async = true;
+    document.body.appendChild(script);
   });
 
   return scriptPromise;
@@ -154,11 +245,26 @@ export const paymentService = {
     }
 
     return new Promise((resolve, reject) => {
-      // Guards the pair of handlers below. Razorpay fires `ondismiss` when the
-      // modal closes -- including the close that follows a SUCCESSFUL payment
-      // -- so without this a completed payment can be reported as abandoned by
+      // Guards the handlers below. Razorpay fires `ondismiss` when the modal
+      // closes -- including the close that follows a SUCCESSFUL payment -- so
+      // without this a completed payment can be reported as abandoned by
       // whichever callback happens to run second.
       let done = false;
+
+      // The reason the LAST attempt failed, if any.
+      //
+      // Checkout lets the customer retry inside the same modal: a declined card
+      // does not close it, it shows Razorpay's own "try again" screen. So
+      // `payment.failed` is NOT the end of the session and must not settle this
+      // promise -- it used to, which meant a player whose card was declined and
+      // who then paid successfully by UPI in the same modal had that success
+      // silently discarded: `handler` hit the latch and returned, the server was
+      // never told, and the app showed "your card was declined" over a payment
+      // that had gone through. The natural next step is to pay again.
+      //
+      // The failure is remembered instead, and only reported if the player
+      // gives up and dismisses the modal.
+      let lastError: string | null = null;
 
       const checkout = new Razorpay({
         key: order.keyId,
@@ -173,7 +279,7 @@ export const paymentService = {
           if (done) return;
           done = true;
           try {
-            resolve(await paymentService.verify(response));
+            resolve(await verifyWithRetry(response));
           } catch (e) {
             reject(e);
           }
@@ -182,18 +288,20 @@ export const paymentService = {
           ondismiss: () => {
             if (done) return;
             done = true;
-            reject(new PaymentDismissedError());
+            // Dismissed after a failed attempt is a failure to report;
+            // dismissed with nothing attempted is simply a change of mind.
+            reject(lastError ? new Error(lastError) : new PaymentDismissedError());
           },
         },
       });
 
-      // A payment Razorpay itself reports as failed: surface its reason rather
-      // than the generic dismissal that follows when the modal then closes.
+      // An attempt Razorpay reports as failed. Remembered, NOT settled: the
+      // modal stays open on its retry screen, and the next attempt may well
+      // succeed. See the note on `lastError` above.
       checkout.on?.('payment.failed', (event: any) => {
         if (done) return;
-        done = true;
-        const description = event?.error?.description;
-        reject(new Error(description || 'The payment did not go through. Please try again.'));
+        lastError = event?.error?.description
+          || 'The payment did not go through. Please try again.';
       });
 
       checkout.open();

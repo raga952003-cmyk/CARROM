@@ -13,7 +13,7 @@ import {
 import confetti from 'canvas-confetti';
 import { Tournament, Player, Team, Registration } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
-import { paymentService, PaymentDismissedError } from '../../services/paymentService';
+import { paymentService, PaymentDismissedError, PaymentUnconfirmedError } from '../../services/paymentService';
 
 interface RegistrationFormModalProps {
   tournament: Tournament;
@@ -68,6 +68,10 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   const [registration, setRegistration] = useState<Registration | null>(null);
   const [isPaying, setIsPaying] = useState(false);
   const [paymentError, setPaymentError] = useState('');
+  // Money left the account but the server never confirmed it. Tracked apart
+  // from paymentError because the correct advice inverts: offering "Pay"
+  // here invites a second charge for the same entry.
+  const [unconfirmed, setUnconfirmed] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
   // Whether this server can take money at all. Null while unknown, so the
@@ -121,6 +125,12 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
         // They closed the window. Not an error -- the entry is saved and
         // waiting, and the panel already says so.
         setPaymentError('');
+      } else if (e instanceof PaymentUnconfirmedError || e?.paid) {
+        // The charge went through; only our confirmation of it did not. The
+        // webhook will settle it, so the one thing this screen must not do is
+        // invite them to pay again.
+        setUnconfirmed(true);
+        setPaymentError(e?.message || '');
       } else {
         setPaymentError(e?.message || 'The payment could not be completed. Please try again.');
       }
@@ -235,18 +245,25 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                   Payment Pending
                 </span>
                 <h3 className="font-serif font-bold text-2xl text-gray-900 mt-2">
-                  {isPaying ? 'Waiting for payment…' : 'Your entry is saved'}
+                  {isPaying
+                    ? 'Waiting for payment…'
+                    : unconfirmed ? 'Payment received — confirming' : 'Your entry is saved'}
                 </h3>
                 <p className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">
                   {isPaying
                     ? 'Complete the payment in the Razorpay window. Do not close this page.'
-                    : <>Your place in <strong>{tournament.name}</strong> is held but not
-                       confirmed. It is confirmed the moment the entry fee is paid.</>}
+                    : unconfirmed
+                      ? <>Your payment for <strong>{tournament.name}</strong> went through. We
+                         could not record the confirmation just now, but it completes on its
+                         own — <strong>do not pay again</strong>. Contact the organisers if
+                         your entry still shows as unpaid in a few minutes.</>
+                      : <>Your place in <strong>{tournament.name}</strong> is held but not
+                         confirmed. It is confirmed the moment the entry fee is paid.</>}
                 </p>
               </div>
             </div>
 
-            {paymentError && (
+            {paymentError && !unconfirmed && (
               <div className="p-3 bg-red-50 text-red-800 text-xs font-semibold rounded-xl border border-red-200 flex items-start gap-2">
                 <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-px" />
                 <span>{paymentError}</span>
@@ -271,8 +288,9 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                 disabled={isPaying}
                 className="px-4 py-2.5 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded-xl disabled:opacity-50"
               >
-                Pay Later
+                {unconfirmed ? 'Close' : 'Pay Later'}
               </button>
+              {!unconfirmed && (
               <button
                 type="button"
                 onClick={() => registration?.id && startPayment(registration.id)}
@@ -284,6 +302,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                   : <CreditCard className="w-4 h-4 text-[#D4A72C]" />}
                 <span>{isPaying ? 'Processing…' : `Pay ₹${fee.toLocaleString('en-IN')}`}</span>
               </button>
+              )}
             </div>
 
             <p className="text-[10px] text-center text-gray-400">

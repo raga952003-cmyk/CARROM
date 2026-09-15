@@ -824,6 +824,372 @@ def test_entry_without_the_migration_falls_back_to_the_current_fee():
         teardown(h)
 
 
+
+# ---------------------------------------------------------------------------
+# The double-charge guard
+#
+# Settling used to be idempotent per payment ROW, which is not the same thing
+# as per ENTRY. One registration can have several live orders at Razorpay -- a
+# superseded one after a fee correction, a replacement after a failed attempt,
+# two from a race -- and each stays payable until it expires. Completing an
+# abandoned checkout in an old tab therefore took a second full payment, and
+# every check passed, because that payment really did match its own order.
+# ---------------------------------------------------------------------------
+
+def test_a_second_order_cannot_take_a_second_payment():
+    h, fake, org, player, tid = setup(entry_fee=500.0)
+    try:
+        reg = body(register(h, tid, player))
+        first = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+
+        # A failed attempt leaves order A payable at Razorpay and opens order B
+        # on the next try -- the documented behaviour of _record_failure.
+        fake.pay(first["orderId"], "pay_declined", status="failed")
+        h.post("/api/payments/verify", {
+            "razorpay_order_id": first["orderId"],
+            "razorpay_payment_id": "pay_declined",
+            "razorpay_signature": sign_callback(first["orderId"], "pay_declined"),
+        }, user_id=player)
+
+        second = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+        check("a fresh order is opened after a failed attempt",
+              second["orderId"] != first["orderId"], (first, second))
+
+        # Pay the replacement: the entry is now settled.
+        fake.pay(second["orderId"], "pay_good")
+        ok = h.post("/api/payments/verify", {
+            "razorpay_order_id": second["orderId"],
+            "razorpay_payment_id": "pay_good",
+            "razorpay_signature": sign_callback(second["orderId"], "pay_good"),
+        }, user_id=player)
+        check("the replacement payment settles", ok.status_code == 200, detail(ok))
+
+        # Now finish the abandoned first checkout. Real money, real order, real
+        # signature -- and it must still be refused.
+        fake.pay(first["orderId"], "pay_second_charge")
+        dup = h.post("/api/payments/verify", {
+            "razorpay_order_id": first["orderId"],
+            "razorpay_payment_id": "pay_second_charge",
+            "razorpay_signature": sign_callback(first["orderId"], "pay_second_charge"),
+        }, user_id=player)
+
+        check("a second payment for an already-paid entry is refused",
+              dup.status_code == 409, detail(dup))
+        check("the refusal tells the player not to pay again",
+              "do not pay again" in detail(dup).lower(), detail(dup))
+
+        paid = [p for p in h.db.rows("payments") if p.get("status") == "paid"]
+        check("only one payment row is ever marked paid", len(paid) == 1, h.db.rows("payments"))
+        check("the duplicate is recorded for the organiser to refund",
+              any(a.get("action") == "payment.duplicate_refused" for a in h.db.rows("audit_logs")),
+              [a.get("action") for a in h.db.rows("audit_logs")])
+    finally:
+        teardown(h)
+
+
+def test_a_paid_entry_cannot_open_another_order():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+        fake.pay(o["orderId"], "pay_done")
+        h.post("/api/payments/verify", {
+            "razorpay_order_id": o["orderId"],
+            "razorpay_payment_id": "pay_done",
+            "razorpay_signature": sign_callback(o["orderId"], "pay_done"),
+        }, user_id=player)
+
+        again = h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player)
+        check("a paid entry is refused a new order before checkout can open",
+              again.status_code == 409, detail(again))
+    finally:
+        teardown(h)
+
+
+# ---------------------------------------------------------------------------
+# A late failure must not erase a success
+#
+# Checkout lets a customer retry inside one order, so one order can produce a
+# declined attempt AND a captured one -- and the failure webhook for the
+# declined attempt routinely arrives after the success. This used to flip the
+# settled row back to 'failed', so the ledger said the money never came while
+# the entry stayed approved.
+# ---------------------------------------------------------------------------
+
+def test_a_late_failure_webhook_does_not_erase_a_settled_payment():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+
+        fake.pay(o["orderId"], "pay_captured")
+        h.post("/api/payments/verify", {
+            "razorpay_order_id": o["orderId"],
+            "razorpay_payment_id": "pay_captured",
+            "razorpay_signature": sign_callback(o["orderId"], "pay_captured"),
+        }, user_id=player)
+        check("the payment settles first",
+              h.db.rows("payments")[0].get("status") == "paid", h.db.rows("payments"))
+
+        # The declined sibling attempt's failure arrives afterwards.
+        raw = webhook_event("payment.failed", o["orderId"], "pay_declined_earlier",
+                            error="Card declined.")
+        w = h.client.post("/api/payments/webhook", content=raw,
+                          headers={"x-razorpay-signature": sign_webhook(raw),
+                                   "content-type": "application/json"})
+
+        check("the late failure is accepted rather than retried", w.status_code == 200, detail(w))
+        row = h.db.rows("payments")[0]
+        check("a settled payment stays paid", row.get("status") == "paid", row)
+        check("the settled payment id is not overwritten",
+              row.get("razorpay_payment_id") == "pay_captured", row)
+        check("the entry stays approved after a late failure",
+              h.db.rows("registrations")[0].get("status") == "approved",
+              h.db.rows("registrations"))
+    finally:
+        teardown(h)
+
+
+def test_a_failure_for_a_different_attempt_is_ignored():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+
+        # Record one attempt against the row without settling it.
+        for row in h.db.tables["payments"]:
+            row["razorpay_payment_id"] = "pay_attempt_one"
+
+        raw = webhook_event("payment.failed", o["orderId"], "pay_attempt_two",
+                            error="A different attempt failed.")
+        h.client.post("/api/payments/webhook", content=raw,
+                      headers={"x-razorpay-signature": sign_webhook(raw),
+                               "content-type": "application/json"})
+
+        row = h.db.rows("payments")[0]
+        check("a failure naming another attempt does not touch this row",
+              row.get("status") != "failed", row)
+    finally:
+        teardown(h)
+
+
+# ---------------------------------------------------------------------------
+# A payment must not overturn the organiser's decision
+# ---------------------------------------------------------------------------
+
+def test_paying_does_not_reinstate_a_rejected_entry():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+
+        # The organiser rejects the still-unpaid entry while checkout is open.
+        rj = h.post("/api/registrations/%s/reject" % reg["id"], {}, user_id=org)
+        check("the organiser can reject the entry", rj.status_code == 200, detail(rj))
+
+        # The player finishes paying anyway.
+        fake.pay(o["orderId"], "pay_after_reject")
+        v = h.post("/api/payments/verify", {
+            "razorpay_order_id": o["orderId"],
+            "razorpay_payment_id": "pay_after_reject",
+            "razorpay_signature": sign_callback(o["orderId"], "pay_after_reject"),
+        }, user_id=player)
+        check("the payment itself is accepted", v.status_code == 200, detail(v))
+
+        r = h.db.rows("registrations")[0]
+        check("a rejected entry is NOT put back in the draw by paying",
+              r.get("status") == "rejected", r)
+        check("the money is still recorded against the entry",
+              r.get("payment_status") == "paid", r)
+        check("the organiser is asked to make a refund decision",
+              any(a.get("action") == "payment.needs_refund_decision"
+                  for a in h.db.rows("audit_logs")),
+              [a.get("action") for a in h.db.rows("audit_logs")])
+        check("the organiser is notified, not the player",
+              any("refund" in (n.get("title") or "").lower() for n in h.db.rows("notifications")),
+              [n.get("title") for n in h.db.rows("notifications")])
+    finally:
+        teardown(h)
+
+
+def test_a_cancelled_tournament_collects_nothing():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+
+        for row in h.db.tables["tournaments"]:
+            if row["id"] == tid:
+                row["status"] = "cancelled"
+
+        # No new order for a cancelled event.
+        blocked = h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player)
+        check("a cancelled tournament refuses a new order",
+              blocked.status_code == 409, detail(blocked))
+        check("the refusal says why", "cancelled" in detail(blocked).lower(), detail(blocked))
+
+        # And a payment already in flight does not confirm an entry.
+        fake.pay(o["orderId"], "pay_cancelled")
+        h.post("/api/payments/verify", {
+            "razorpay_order_id": o["orderId"],
+            "razorpay_payment_id": "pay_cancelled",
+            "razorpay_signature": sign_callback(o["orderId"], "pay_cancelled"),
+        }, user_id=player)
+
+        r = h.db.rows("registrations")[0]
+        check("a payment for a cancelled event does not approve the entry",
+              r.get("status") != "approved", r)
+        check("the money is still on the record", r.get("payment_status") == "paid", r)
+    finally:
+        teardown(h)
+
+
+# ---------------------------------------------------------------------------
+# Authorized is not captured
+# ---------------------------------------------------------------------------
+
+def test_an_authorized_payment_does_not_confirm_the_entry():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+
+        fake.pay(o["orderId"], "pay_held", status="authorized")
+        v = h.post("/api/payments/verify", {
+            "razorpay_order_id": o["orderId"],
+            "razorpay_payment_id": "pay_held",
+            "razorpay_signature": sign_callback(o["orderId"], "pay_held"),
+        }, user_id=player)
+
+        check("an authorized-but-uncaptured payment is not treated as paid",
+              v.status_code == 402, detail(v))
+        check("the player is told not to pay again",
+              "do not pay again" in detail(v).lower(), detail(v))
+        row = h.db.rows("payments")[0]
+        check("an authorization is not written as paid", row.get("status") != "paid", row)
+        check("an authorization records no paid_at", not row.get("paid_at"), row)
+        check("an authorization does not approve the entry",
+              h.db.rows("registrations")[0].get("status") == "pending",
+              h.db.rows("registrations"))
+
+        # Capture arrives later, by webhook, and settles it.
+        fake.payments["pay_held"]["status"] = "captured"
+        raw = webhook_event("payment.captured", o["orderId"], "pay_held", 50000)
+        w = h.client.post("/api/payments/webhook", content=raw,
+                          headers={"x-razorpay-signature": sign_webhook(raw),
+                                   "content-type": "application/json"})
+        check("capture settles what authorization did not", w.status_code == 200, detail(w))
+        check("the entry is approved once the money is actually captured",
+              h.db.rows("registrations")[0].get("status") == "approved",
+              h.db.rows("registrations"))
+    finally:
+        teardown(h)
+
+
+# ---------------------------------------------------------------------------
+# A transient failure must be retried, not acknowledged
+#
+# The webhook is the only path that settles a payment when the browser never
+# comes back. Answering 200 to a delivery we could not process told Razorpay
+# the delivery had succeeded and threw away the last chance to record it.
+# ---------------------------------------------------------------------------
+
+def test_a_transient_failure_asks_razorpay_to_retry():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+        fake.pay(o["orderId"], "pay_flaky")
+
+        async def unavailable(payment_id):
+            raise rzp.RazorpayError("upstream timed out", status=504)
+        rzp.fetch_payment = unavailable
+
+        raw = webhook_event("payment.captured", o["orderId"], "pay_flaky", 50000)
+        w = h.client.post("/api/payments/webhook", content=raw,
+                          headers={"x-razorpay-signature": sign_webhook(raw),
+                                   "content-type": "application/json"})
+        check("an unreachable Razorpay makes the webhook fail so it is redelivered",
+              w.status_code >= 500, "%s %s" % (w.status_code, detail(w)))
+        check("nothing is confirmed on a transient failure",
+              h.db.rows("registrations")[0].get("status") == "pending",
+              h.db.rows("registrations"))
+
+        # The redelivery, once Razorpay is reachable again, settles it.
+        rzp.fetch_payment = fake.fetch_payment
+        w2 = h.client.post("/api/payments/webhook", content=raw,
+                           headers={"x-razorpay-signature": sign_webhook(raw),
+                                    "content-type": "application/json"})
+        check("the redelivery settles the payment", w2.status_code == 200, detail(w2))
+        check("the entry is confirmed by the retry",
+              h.db.rows("registrations")[0].get("status") == "approved",
+              h.db.rows("registrations"))
+    finally:
+        teardown(h)
+
+
+def test_a_terminal_rejection_is_not_retried():
+    """An amount mismatch will not change on redelivery; acknowledge it."""
+    h, fake, org, player, tid = setup(entry_fee=500.0)
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+        fake.pay(o["orderId"], "pay_wrong_amount", amount=100)
+
+        raw = webhook_event("payment.captured", o["orderId"], "pay_wrong_amount", 100)
+        w = h.client.post("/api/payments/webhook", content=raw,
+                          headers={"x-razorpay-signature": sign_webhook(raw),
+                                   "content-type": "application/json"})
+        check("a wrong amount is acknowledged rather than retried forever",
+              w.status_code == 200, detail(w))
+        check("a wrong amount confirms nothing",
+              h.db.rows("registrations")[0].get("status") == "pending",
+              h.db.rows("registrations"))
+    finally:
+        teardown(h)
+
+
+# ---------------------------------------------------------------------------
+# Repairing a half-settled payment
+# ---------------------------------------------------------------------------
+
+def test_a_redelivery_repairs_an_unconfirmed_entry():
+    """
+    The payment row settled but the registration write did not.
+
+    Settling is two writes and the second can fail alone. The early return for
+    an already-paid row used to skip the repair, so every later redelivery came
+    back before reaching it and the entry stayed unpaid for good.
+    """
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        o = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+        fake.pay(o["orderId"], "pay_halfway")
+        h.post("/api/payments/verify", {
+            "razorpay_order_id": o["orderId"],
+            "razorpay_payment_id": "pay_halfway",
+            "razorpay_signature": sign_callback(o["orderId"], "pay_halfway"),
+        }, user_id=player)
+
+        # Simulate the registration write having been lost.
+        for row in h.db.tables["registrations"]:
+            row["status"] = "pending"
+            row["payment_status"] = "pending"
+
+        raw = webhook_event("payment.captured", o["orderId"], "pay_halfway", 50000)
+        w = h.client.post("/api/payments/webhook", content=raw,
+                          headers={"x-razorpay-signature": sign_webhook(raw),
+                                   "content-type": "application/json"})
+
+        check("the redelivery is accepted", w.status_code == 200, detail(w))
+        r = h.db.rows("registrations")[0]
+        check("a redelivery repairs an entry whose confirmation was lost",
+              r.get("status") == "approved" and r.get("payment_status") == "paid", r)
+    finally:
+        teardown(h)
+
+
 SUITES = [
     ("pay then confirmed", test_pay_then_confirmed),
     ("free tournament", test_free_tournament_needs_no_payment),
@@ -852,6 +1218,16 @@ SUITES = [
     ("rupees to paise", test_rupees_to_paise),
     ("fee change", test_fee_change_does_not_move_an_existing_entry),
     ("without migration 015", test_entry_without_the_migration_falls_back_to_the_current_fee),
+    ("second order cannot double charge", test_a_second_order_cannot_take_a_second_payment),
+    ("paid entry cannot reorder (pre-checkout)", test_a_paid_entry_cannot_open_another_order),
+    ("late failure does not erase success", test_a_late_failure_webhook_does_not_erase_a_settled_payment),
+    ("failure for another attempt ignored", test_a_failure_for_a_different_attempt_is_ignored),
+    ("paying does not reinstate a rejection", test_paying_does_not_reinstate_a_rejected_entry),
+    ("cancelled tournament collects nothing", test_a_cancelled_tournament_collects_nothing),
+    ("authorized is not captured", test_an_authorized_payment_does_not_confirm_the_entry),
+    ("transient failure is retried", test_a_transient_failure_asks_razorpay_to_retry),
+    ("terminal rejection is not retried", test_a_terminal_rejection_is_not_retried),
+    ("redelivery repairs a half-settle", test_a_redelivery_repairs_an_unconfirmed_entry),
 ]
 
 

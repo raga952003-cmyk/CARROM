@@ -128,6 +128,104 @@ def _tournament_name(admin_db, tournament_id: str) -> str:
     return rows[0]["name"] if rows else "the tournament"
 
 
+def _payments_for(admin_db, registration_id: str) -> List[Dict[str, Any]]:
+    """Every payment attempt against one entry. [] if the table is unreadable."""
+    try:
+        return admin_db.table("payments").select("*").eq(
+            "registration_id", registration_id).execute().data or []
+    except Exception as e:
+        logger.error(f"Could not read payments for {registration_id}: {str(e)}")
+        return []
+
+
+# Tournament states in which no fee should be collected. Cancelled and
+# completed are terminal: the event is not going to happen, or already has.
+_UNPAYABLE_TOURNAMENT_STATES = ("cancelled", "completed")
+
+
+def _why_not_approvable(admin_db, registration: Dict[str, Any]) -> Optional[str]:
+    """
+    Why this entry must not be approved by a payment, or None if it may be.
+
+    Read at settle time rather than only at order time, because the gap
+    between the two is a whole checkout -- easily long enough for an organiser
+    to reject the entry or call the event off.
+    """
+    if registration.get("status") == "rejected":
+        return "the entry had already been rejected by the organiser"
+
+    rows = admin_db.table("tournaments").select("status, name").eq(
+        "id", registration["tournament_id"]).execute().data
+    if not rows:
+        return "the tournament no longer exists"
+
+    status = str(rows[0].get("status") or "")
+    if status in _UNPAYABLE_TOURNAMENT_STATES:
+        return f"the tournament is {status}"
+    return None
+
+
+def _flag_unexpected_payment(admin_db, payment: Dict[str, Any],
+                             registration: Dict[str, Any], reason: str,
+                             actor: Optional[Dict[str, Any]], via: str) -> None:
+    """
+    Money arrived that should not have. Record it, and tell the organiser.
+
+    Deliberately NOT silent and deliberately not an approval: somebody is out
+    of pocket and only the organiser can decide whether to refund or reinstate.
+    The payment row already says 'paid', so the amount and the Razorpay id are
+    on the ledger either way.
+    """
+    amount = int(payment.get("amount_paise") or 0) / 100
+    logger.error(
+        "Payment %s settled against registration %s but %s; entry NOT approved.",
+        payment.get("razorpay_payment_id"), registration.get("id"), reason,
+    )
+
+    admin_db.table("registrations").update(
+        {"payment_status": "paid"}
+    ).eq("id", registration["id"]).execute()
+
+    record_audit(
+        admin_db, actor=actor, action="payment.needs_refund_decision",
+        entity_type="registration", entity_id=str(registration["id"]),
+        previous_state=registration,
+        new_state={"payment_status": "paid", "status": registration.get("status")},
+        request_context={"reason": reason, "confirmed_via": via,
+                         "razorpay_payment_id": payment.get("razorpay_payment_id"),
+                         "amount": amount},
+    )
+
+    try:
+        owner_ids = _organiser_ids(admin_db, registration["tournament_id"])
+        if owner_ids:
+            fan_out_notification(
+                admin_db,
+                title="Payment needs a refund decision",
+                message=(f"Rs {amount:,.2f} was received for an entry in "
+                         f"'{_tournament_name(admin_db, registration['tournament_id'])}' "
+                         f"but {reason}. The entry has NOT been approved. "
+                         f"Refund it from the Razorpay dashboard, or reinstate the entry."),
+                type="registration_confirmed",
+                tournament_id=registration["tournament_id"],
+                recipient_ids=owner_ids,
+            )
+    except Exception as e:
+        logger.error(f"Could not notify the organiser about payment {payment.get('id')}: {str(e)}")
+
+
+def _organiser_ids(admin_db, tournament_id: str) -> List[str]:
+    """Whoever runs this tournament, for a message only they can act on."""
+    try:
+        rows = admin_db.table("tournaments").select("owner_id").eq(
+            "id", tournament_id).execute().data
+        return [rows[0]["owner_id"]] if rows and rows[0].get("owner_id") else []
+    except Exception:
+        # owner_id arrives with migration 003; without it there is nobody
+        # specific to tell, and the audit record is still written.
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -187,6 +285,23 @@ async def create_payment_order(registration_id: str, profile=Depends(get_user_pr
             status_code=409,
             detail="This entry was not accepted, so there is nothing to pay.",
         )
+
+    # Nothing is collected for an event that is over or called off. Registration
+    # creation checks this; taking the fee never did, so a player could pay in
+    # full for a tournament the organiser had already cancelled -- and end up
+    # with a confirmed, paid entry in an event that was not happening.
+    blocked = _why_not_approvable(admin_db, registration)
+    if blocked:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This entry cannot be paid for because {blocked}.",
+        )
+
+    # An attempt that already succeeded, found before another order is minted.
+    # _settle_payment refuses a second settlement anyway, but refusing here is
+    # what stops the player reaching a checkout screen at all.
+    if any(row.get("status") == "paid" for row in _payments_for(admin_db, registration_id)):
+        raise HTTPException(status_code=409, detail="This entry is already paid.")
 
     amount_paise = _fee_paise_for(admin_db, registration)
     if amount_paise <= 0:
@@ -296,8 +411,53 @@ async def _settle_payment(admin_db, payment: Dict[str, Any], razorpay_payment_id
     """
     # Already settled: return what we have. This is the idempotency guarantee
     # the webhook retries and the double-tapped browser both rely on.
+    #
+    # _confirm_registration still runs, rather than returning straight out.
+    # Settling is two writes -- the payment row, then the registration -- and
+    # the second one can fail on its own (a PostgREST 5xx, a dropped pooler
+    # connection, the serverless instance being killed between them). That used
+    # to leave an entry provably paid and permanently unconfirmed, because
+    # every later redelivery returned here before reaching the repair. It is
+    # idempotent, so calling it on an already-confirmed entry is a no-op.
     if payment.get("status") == "paid":
+        _confirm_registration(admin_db, payment, actor=actor, via=via)
         return payment
+
+    # Another payment has already settled this entry.
+    #
+    # The gate above is per payment ROW; this one is per REGISTRATION, which is
+    # what actually protects the payer. One entry can have several live orders
+    # at Razorpay -- a superseded order after a fee correction, a replacement
+    # after a failed attempt, or two opened by a race -- and every one of them
+    # stays payable until it expires. Without this, a player who completes an
+    # abandoned checkout in an old tab pays a second time, in full, and every
+    # check here passes because that payment genuinely does match its own order.
+    #
+    # Refused rather than quietly accepted, and recorded, so the organiser has
+    # something to refund from.
+    already = [
+        row for row in _payments_for(admin_db, payment["registration_id"])
+        if row.get("status") == "paid" and str(row.get("id")) != str(payment.get("id"))
+    ]
+    if already:
+        logger.error(
+            "Registration %s is already paid by payment %s; refusing to settle %s as well.",
+            payment["registration_id"], already[0].get("razorpay_payment_id"),
+            razorpay_payment_id,
+        )
+        record_audit(
+            admin_db, actor=actor, action="payment.duplicate_refused",
+            entity_type="payment", entity_id=str(payment.get("id")),
+            new_state={"registration_id": payment["registration_id"],
+                       "already_paid_by": already[0].get("razorpay_payment_id"),
+                       "refused_payment_id": razorpay_payment_id},
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="This entry has already been paid for. If you have been "
+                   "charged twice, contact the organisers for a refund -- "
+                   "do not pay again.",
+        )
 
     # What Razorpay says this payment actually is. The signature proved who
     # sent the message; this proves what the message is about.
@@ -335,7 +495,41 @@ async def _settle_payment(admin_db, payment: Dict[str, Any], razorpay_payment_id
                    "Please contact the organisers.",
         )
 
-    if remote_status not in ("captured", "authorized"):
+    # Only 'captured' is money taken.
+    #
+    # 'authorized' means the funds are held and not yet collected. It used to
+    # be accepted here as success, which is wrong in a way that only surfaces
+    # days later: an account whose capture setting is manual leaves every
+    # payment authorized, so a whole field would be approved and drawn into
+    # fixtures, and then Razorpay voids every uncaptured authorization after a
+    # few days and the money never arrives. `payment_capture: 1` on the order
+    # asks for auto-capture but does not guarantee the account honours it.
+    #
+    # So an authorization is recorded and left non-terminal: no paid_at, no
+    # approval, and the entry stays unpaid until the payment.captured webhook
+    # arrives -- which is exactly what that webhook is for.
+    if remote_status == "authorized":
+        logger.warning(
+            "Payment %s is authorized but not captured; leaving the entry unpaid "
+            "until capture. Check the account's capture setting if this persists.",
+            razorpay_payment_id,
+        )
+        try:
+            admin_db.table("payments").update({
+                "razorpay_payment_id": razorpay_payment_id,
+                "signature_verified": True,
+                "method": remote.get("method"),
+                "error_description": "Authorized but not yet captured.",
+            }).eq("id", payment["id"]).execute()
+        except Exception as e:
+            logger.warning(f"Could not record the authorization for {payment.get('id')}: {str(e)}")
+        raise HTTPException(
+            status_code=402,
+            detail="Your payment is authorised but not yet collected. Your entry "
+                   "is confirmed as soon as it clears -- do not pay again.",
+        )
+
+    if remote_status != "captured":
         _record_failure(admin_db, payment, remote.get("error_description")
                         or f"Razorpay reports this payment as '{remote_status}'.")
         raise HTTPException(
@@ -359,7 +553,8 @@ async def _settle_payment(admin_db, payment: Dict[str, Any], razorpay_payment_id
     return payment
 
 
-def _record_failure(admin_db, payment: Dict[str, Any], description: str) -> None:
+def _record_failure(admin_db, payment: Dict[str, Any], description: str,
+                    failed_payment_id: Optional[str] = None) -> None:
     """
     Note a failed attempt without closing the order.
 
@@ -367,7 +562,35 @@ def _record_failure(admin_db, payment: Dict[str, Any], description: str) -> None
     was tried, and so an organiser fielding "I paid and it says unpaid" has the
     provider's own words in front of them. A fresh order is opened on the next
     attempt.
+
+    REFUSES to touch a row that has already settled. Razorpay Checkout lets a
+    customer retry inside one order, so a single order can produce both a
+    declined attempt and a captured one, and the failure webhook for the
+    declined attempt routinely arrives AFTER the success -- delivery lags the
+    browser callback, and a redelivery can trail it by hours. This used to
+    overwrite the settled row: status flipped back to 'failed' on a payment
+    that had genuinely been captured, so the ledger said the money never
+    arrived while the entry stayed approved.
+
+    `failed_payment_id` is the attempt the failure is about. When the row
+    already records a DIFFERENT payment id, the failure belongs to a sibling
+    attempt and is not this row's business either.
     """
+    if payment.get("status") == "paid":
+        logger.info(
+            "Ignoring a failure for payment row %s: it has already settled as paid.",
+            payment.get("id"),
+        )
+        return
+
+    recorded = payment.get("razorpay_payment_id")
+    if failed_payment_id and recorded and str(recorded) != str(failed_payment_id):
+        logger.info(
+            "Ignoring a failure for %s: row %s records attempt %s instead.",
+            failed_payment_id, payment.get("id"), recorded,
+        )
+        return
+
     try:
         admin_db.table("payments").update({
             "status": "failed",
@@ -387,6 +610,21 @@ def _confirm_registration(admin_db, payment: Dict[str, Any],
     should not stand, and a rejected entry that has been paid needs a refund
     from the Razorpay dashboard; nothing here refunds automatically.
 
+    Two cases do NOT get approved, because in both of them the organiser has
+    already decided the entry should not stand and a payment arriving late must
+    not overturn that silently:
+
+      * The entry was rejected. A player sitting in an open checkout window
+        while the organiser rejects them used to be put straight back into the
+        draw by finishing the payment -- reversing the organiser's decision,
+        telling nobody, and being picked up by the next draw.
+      * The tournament was cancelled or completed. Money can still arrive
+        against an entry for an event that is no longer happening.
+
+    Both are recorded as paid, so the money is on the ledger and refundable,
+    and both notify the organiser rather than the player: the decision about
+    what happens to that money is theirs.
+
     Never raises. The money has already moved and the payment row already says
     so; a failure to update the registration or send a notification must not
     turn into an error response that invites the player to pay a second time.
@@ -401,6 +639,11 @@ def _confirm_registration(admin_db, payment: Dict[str, Any],
         before = rows[0]
 
         if before.get("payment_status") == "paid" and before.get("status") == "approved":
+            return
+
+        blocked = _why_not_approvable(admin_db, before)
+        if blocked:
+            _flag_unexpected_payment(admin_db, payment, before, blocked, actor=actor, via=via)
             return
 
         updated = admin_db.table("registrations").update({
@@ -536,17 +779,42 @@ async def razorpay_webhook(request: Request):
     payment = rows[0]
 
     if event_type == "payment.failed":
+        # `payment_id` is passed so a failure for one attempt cannot overwrite
+        # a sibling attempt that succeeded within the same order.
         _record_failure(admin_db, payment,
-                        entity.get("error_description") or "Payment failed.")
+                        entity.get("error_description") or "Payment failed.",
+                        failed_payment_id=payment_id)
         return {"status": "recorded", "event": event_type}
 
     try:
         await _settle_payment(admin_db, payment, payment_id, via="webhook", actor=None)
     except HTTPException as e:
-        # Do not make Razorpay retry a decision that will not change: a
-        # mismatched amount or a foreign order is settled business.
+        # A retry is worth having only when the answer might differ next time.
+        #
+        # 5xx means we could not reach Razorpay or our own database -- transient,
+        # and Razorpay's redelivery is the ONLY thing that will settle this
+        # payment when the browser callback never arrives. Answering 200 to that
+        # told Razorpay the delivery succeeded and threw away the last chance to
+        # record a payment that had genuinely been taken.
+        #
+        # 4xx is a decision: wrong amount, foreign order, an entry already paid.
+        # Those will not change, so they are acknowledged rather than retried.
+        if e.status_code >= 500:
+            logger.error(
+                "Webhook for order %s could not be settled (%s: %s); asking Razorpay to retry.",
+                order_id, e.status_code, e.detail,
+            )
+            raise
         logger.warning(f"Webhook for order {order_id} not settled: {e.detail}")
         return {"status": "rejected", "reason": str(e.detail)}
+    except Exception as e:
+        # An unexpected failure is transient until proven otherwise. Same
+        # reasoning: better a redelivery than a lost payment.
+        logger.error(f"Webhook for order {order_id} raised {type(e).__name__}: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not record that payment just now. Please retry.",
+        )
 
     return {"status": "ok"}
 
