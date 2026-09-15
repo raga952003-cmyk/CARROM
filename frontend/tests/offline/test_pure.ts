@@ -559,6 +559,54 @@ function suiteMatchGroups() {
         outcomeFor(byName, { name: 'Srinivas' }) === null, '');
 }
 
+// ---------------------------------------------------------------------------
+// The coin picker must not offer what the engine will refuse
+// ---------------------------------------------------------------------------
+
+/**
+ * BoardResultForm draws its picker as 0..coinsPerSide. It used to draw
+ * 0..`maxCoinsOnBoard`, a second setting that defaulted to 15 and existed
+ * nowhere else, while board_result() clamped anything above coinsPerSide (9)
+ * back down -- so an umpire could tap 10 on a live match and get a 9-point
+ * board plus a warning saying 10 was impossible.
+ *
+ * This asserts the property that made the two safe to reconcile: every value
+ * the picker can now offer scores verbatim, and the first value past the end
+ * is the first one clamped. The picker's range is `maxCoins = coinsPerSide`,
+ * so proving it for coinsPerSide proves it for the buttons.
+ */
+function suiteCoinRange() {
+  for (const coinsPerSide of [6, 9, 11, 13, 15, 19]) {
+    const rules = { scoringMode: 'remaining_coins', coinsPerSide, queenPoints: 3 } as any;
+
+    for (let n = 0; n <= coinsPerSide; n++) {
+      const got = previewBoard({
+        winner: 'player1', queenPocketedBy: 'none', queenCoveredBy: 'none',
+        coinsRemainingWith: 'player2', coinsRemaining: n, p1Penalty: 0, p2Penalty: 0,
+      } as any, rules);
+
+      check('every value the picker offers scores exactly as entered',
+            got.p1 === n, `coinsPerSide=${coinsPerSide} entered=${n} scored=${got.p1}`);
+      check('a value the picker offers never warns that it is impossible',
+            !got.warnings.some(w => w.includes('more than the')),
+            `coinsPerSide=${coinsPerSide} entered=${n} -> ${got.warnings.join('; ')}`);
+    }
+
+    // One past the end is where clamping starts, and it says so.
+    const over = previewBoard({
+      winner: 'player1', queenPocketedBy: 'none', queenCoveredBy: 'none',
+      coinsRemainingWith: 'player2', coinsRemaining: coinsPerSide + 1,
+      p1Penalty: 0, p2Penalty: 0,
+    } as any, rules);
+    check('one coin past the limit is clamped to the limit',
+          over.p1 === coinsPerSide,
+          `coinsPerSide=${coinsPerSide} entered=${coinsPerSide + 1} scored=${over.p1}`);
+    check('a clamped entry tells the umpire why',
+          over.warnings.some(w => w.includes('more than the')),
+          `coinsPerSide=${coinsPerSide} -> ${over.warnings.join('; ')}`);
+  }
+}
+
 const SUITES: Array<[string, () => void]> = [
   ['refresh scope', suiteRefreshScope],
   ['preview/server parity', suiteParity],
@@ -566,6 +614,7 @@ const SUITES: Array<[string, () => void]> = [
   ['match ordering', suiteOrdering],
   ['my matches', suiteMyMatches],
   ['match groups', suiteMatchGroups],
+  ['coin range', suiteCoinRange],
 ];
 
 function main() {

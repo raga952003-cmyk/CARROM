@@ -72,7 +72,19 @@ interface BoardResultFormProps {
  */
 const SimpleBoardForm: React.FC<BoardResultFormProps> = ({ match, rules, value, onChange }) => {
   const coinsPerSide = rules.coinsPerSide ?? 9;
-  const maxCoins = (rules as any).maxCoinsOnBoard ?? 15;
+  // The picker offers exactly what the engine will accept, and nothing more.
+  //
+  // It used to read a second setting, `maxCoinsOnBoard`, which defaulted to 15
+  // and existed nowhere else -- not in the rules type, not in the scoring
+  // settings screen, not in the backend. So the buttons went to 15 while
+  // board_result() clamped anything above `coinsPerSide` (9 by default) back
+  // down. An umpire tapping 10 got a 9-point board and a warning explaining
+  // that 10 was impossible, which is a confusing thing to be told about a
+  // button the app had just offered them.
+  //
+  // Deriving it means the two can never disagree again: raise coinsPerSide in
+  // the tournament's scoring rules and the picker grows with it.
+  const maxCoins = coinsPerSide;
   const p1 = match.player1Name;
   const p2 = match.player2Name;
 
@@ -164,7 +176,19 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
   const p1 = match.player1Name.split(' ')[0];
   const p2 = match.player2Name.split(' ')[0];
   const coinsPerSide = rules.coinsPerSide ?? 9;
-  const maxCoins = (rules as any).maxCoinsOnBoard ?? 15;
+  // The picker offers exactly what the engine will accept, and nothing more.
+  //
+  // It used to read a second setting, `maxCoinsOnBoard`, which defaulted to 15
+  // and existed nowhere else -- not in the rules type, not in the scoring
+  // settings screen, not in the backend. So the buttons went to 15 while
+  // board_result() clamped anything above `coinsPerSide` (9 by default) back
+  // down. An umpire tapping 10 got a 9-point board and a warning explaining
+  // that 10 was impossible, which is a confusing thing to be told about a
+  // button the app had just offered them.
+  //
+  // Deriving it means the two can never disagree again: raise coinsPerSide in
+  // the tournament's scoring rules and the picker grows with it.
+  const maxCoins = coinsPerSide;
   const set = (patch: Partial<BoardObservation>) => onChange({ ...value, ...patch });
   const result = previewBoard(value, rules,
     { player1: match.player1Name, player2: match.player2Name });
