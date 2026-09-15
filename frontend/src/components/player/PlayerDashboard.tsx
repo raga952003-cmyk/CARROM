@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { findMyMatches, opponentOf } from '../../utils/myMatches';
+import { groupMatches, resultSummary, outcomeFor, finishedIsProvisional, MatchGroupKey } from '../../utils/matchGroups';
 import { 
   Trophy, 
   Calendar, 
@@ -16,7 +17,8 @@ import {
   QrCode, 
   Palette, 
   Award,
-  ChevronRight
+  ChevronRight,
+  Radio
 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
@@ -67,8 +69,35 @@ export const PlayerDashboard: React.FC = () => {
     [currentTournament, currentUser]
   );
 
-  // Next upcoming match
-  const nextMatch = myMatches.find(m => m.status === 'live' || m.status === 'scheduled');
+  // My matches, split three ways.
+  //
+  // Shared with the public board (utils/matchGroups) so the two screens cannot
+  // disagree about what counts as live -- a paused match is being played, and
+  // a match finished but not yet confirmed is over, not upcoming.
+  const mine = React.useMemo(() => groupMatches(myMatches), [myMatches]);
+
+  const [mineGroup, setMineGroup] = useState<MatchGroupKey>('live');
+  // Land on a group that has something in it, but stop moving once the player
+  // has picked one themselves -- otherwise the tab jumps out from under them
+  // the moment their live match ends.
+  const touchedMineGroup = React.useRef(false);
+  React.useEffect(() => {
+    if (touchedMineGroup.current) return;
+    if (mine.live.length) setMineGroup('live');
+    else if (mine.upcoming.length) setMineGroup('upcoming');
+    else if (mine.finished.length) setMineGroup('finished');
+  }, [mine.live.length, mine.upcoming.length, mine.finished.length]);
+
+  const MINE_GROUPS: { key: MatchGroupKey; label: string; rows: Match[] }[] = [
+    { key: 'live', label: 'Live', rows: mine.live },
+    { key: 'upcoming', label: 'Upcoming', rows: mine.upcoming },
+    { key: 'finished', label: 'Finished', rows: mine.finished },
+  ];
+  const shownMine = MINE_GROUPS.find(g => g.key === mineGroup) || MINE_GROUPS[0];
+
+  // Next upcoming match. Live first -- a match in play is more urgent than the
+  // one after it -- then the earliest still to come.
+  const nextMatch = mine.live[0] || mine.upcoming[0];
 
   // Filter tournaments for discovery
   const filteredTournaments = tournaments.filter(t => {
@@ -458,8 +487,48 @@ export const PlayerDashboard: React.FC = () => {
                         )}
                       </div>
                     ) : (
+                      <>
+                      {/* Counts on the tabs: a player can see at a glance that
+                          they have one on now and three still to play, without
+                          opening each group. */}
+                      <div className="flex gap-2">
+                        {MINE_GROUPS.map(g => (
+                          <button
+                            key={g.key}
+                            onClick={() => { touchedMineGroup.current = true; setMineGroup(g.key); }}
+                            className={`flex-1 py-2 px-2 rounded-xl text-xs font-bold border transition-colors ${
+                              mineGroup === g.key
+                                ? g.key === 'live'
+                                  ? 'bg-red-700 text-white border-red-700'
+                                  : 'bg-[#0B5D3B] text-white border-[#0B5D3B]'
+                                : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
+                            }`}
+                          >
+                            <span className="inline-flex items-center gap-1.5">
+                              {g.key === 'live' && g.rows.length > 0 && (
+                                <Radio className={`w-3 h-3 animate-pulse ${
+                                  mineGroup === g.key ? 'text-white' : 'text-red-600'}`} />
+                              )}
+                              {g.label}
+                              <span className={mineGroup === g.key ? 'opacity-80' : 'text-gray-400'}>
+                                {g.rows.length}
+                              </span>
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+
+                      {shownMine.rows.length === 0 ? (
+                        <div className="bg-white rounded-2xl p-8 text-center border border-gray-200 shadow-2xs text-xs text-gray-500">
+                          {shownMine.key === 'live'
+                            ? 'None of your matches are being played right now.'
+                            : shownMine.key === 'upcoming'
+                              ? 'You have played all your matches in this tournament.'
+                              : 'No results yet — your finished matches appear here.'}
+                        </div>
+                      ) : (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {myMatches.map(m => (
+                        {shownMine.rows.map(m => (
                           <div
                             key={m.id}
                             onClick={() => setActiveMatch(m)}
@@ -483,16 +552,56 @@ export const PlayerDashboard: React.FC = () => {
                               </div>
                             </div>
 
+                            {/* How it ended, and whether this player won it.
+                                The points line above says what was scored; it
+                                does not say who took the match. */}
+                            {(() => {
+                              const summary = resultSummary(m);
+                              if (!summary) return null;
+                              const outcome = outcomeFor(m, currentUser);
+                              return (
+                                <div className="flex items-center gap-1.5 text-[11px] pt-2 border-t border-gray-100">
+                                  {outcome && (
+                                    <span className={`shrink-0 text-[9px] font-black uppercase tracking-wide rounded px-1.5 py-0.5 ${
+                                      outcome === 'won'
+                                        ? 'bg-emerald-100 text-emerald-900'
+                                        : 'bg-gray-100 text-gray-600'
+                                    }`}>
+                                      {outcome}
+                                    </span>
+                                  )}
+                                  <span className="font-semibold text-gray-700 truncate">{summary}</span>
+                                  {finishedIsProvisional(m) && (
+                                    <span className="ml-auto shrink-0 text-[9px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">
+                                      Unconfirmed
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })()}
+
                             <div className="flex items-center justify-between text-[11px] text-gray-500 pt-2 border-t border-gray-100">
-                              <span>{m.scheduledTime}</span>
-                              <span className="text-[#0B5D3B] font-bold flex items-center gap-0.5">
-                                <span>Follow Board Live</span>
+                              <span>{m.scheduledTime || 'Time TBC'}</span>
+                              {/* Said accurately per state. Every card used to
+                                  offer "Follow Board Live", including matches
+                                  that finished on Saturday. */}
+                              <span className={`font-bold flex items-center gap-0.5 ${
+                                shownMine.key === 'live' ? 'text-red-700' : 'text-[#0B5D3B]'}`}>
+                                <span>
+                                  {shownMine.key === 'live'
+                                    ? 'Follow Board Live'
+                                    : shownMine.key === 'finished'
+                                      ? 'View Scorecard'
+                                      : 'View Match Details'}
+                                </span>
                                 <ArrowRight className="w-3 h-3" />
                               </span>
                             </div>
                           </div>
                         ))}
                       </div>
+                      )}
+                      </>
                     )}
                   </div>
                 )}

@@ -15,6 +15,8 @@ import { readFileSync } from 'node:fs';
 import { previewBoard } from '../../src/utils/boardScoring';
 import { minutesOfDay, compareMatches } from '../../src/utils/matchOrder';
 import { findMyMatches, opponentOf } from '../../src/utils/myMatches';
+import { groupMatches, isLive, isFinished, finishedIsProvisional, resultSummary, outcomeFor }
+  from '../../src/utils/matchGroups';
 import { resourcesToRefresh, Resource } from '../../src/utils/refreshScope';
 
 type Slot = { failed: number; ran: number; examples: string[] };
@@ -391,12 +393,179 @@ function suiteRefreshScope() {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// Live / upcoming / finished
+// ---------------------------------------------------------------------------
+
+const STATUSES = ['scheduled', 'live', 'paused', 'completed'] as const;
+
+function suiteMatchGroups() {
+  // Every combination of the facts that decide a group. The two cases that
+  // used to be got wrong are in here by construction: status 'paused' (in
+  // play, was filed as upcoming) and status 'completed' with resultConfirmed
+  // false (over, was also filed as upcoming).
+  const pool: any[] = [];
+  let n = 1;
+  for (const status of STATUSES)
+    for (const resultConfirmed of [true, false])
+      for (const walkover of [true, false])
+        pool.push(match({ matchNumber: n, id: 'm' + n++, status, resultConfirmed, walkover }));
+
+  const g = groupMatches(pool as any);
+
+  // Exhaustive and disjoint: nothing invented, nothing dropped, nothing twice.
+  const total = g.live.length + g.upcoming.length + g.finished.length;
+  check('every match lands in exactly one group', total === pool.length,
+        `${total} grouped from ${pool.length}`);
+  const ids = new Set([...g.live, ...g.upcoming, ...g.finished].map(m => m.id));
+  check('no match appears in two groups', ids.size === pool.length,
+        `${ids.size} unique of ${pool.length}`);
+
+  for (const m of g.live) {
+    check('a paused match counts as live, not upcoming',
+          m.status === 'live' || m.status === 'paused', JSON.stringify(m));
+  }
+  for (const m of g.upcoming) {
+    check('an upcoming match is neither in play nor over',
+          m.status === 'scheduled' && !m.resultConfirmed && !m.walkover, JSON.stringify(m));
+  }
+  for (const m of g.finished) {
+    check('a finished match is completed, confirmed or a walkover',
+          m.status === 'completed' || m.resultConfirmed || m.walkover, JSON.stringify(m));
+  }
+
+  // The specific regressions, named.
+  check('a paused match is live',
+        isLive(match({ status: 'paused' }) as any), 'paused');
+  check('a completed match with no confirmation is finished, not upcoming',
+        isFinished(match({ status: 'completed', resultConfirmed: false }) as any),
+        'completed/unconfirmed');
+  check('a walkover is finished even though it was never played',
+        isFinished(match({ status: 'scheduled', walkover: true }) as any), 'walkover');
+  check('an unconfirmed finished match is flagged provisional',
+        finishedIsProvisional(match({ status: 'completed', resultConfirmed: false }) as any), '');
+  check('a confirmed finished match is not flagged provisional',
+        !finishedIsProvisional(match({ status: 'completed', resultConfirmed: true }) as any), '');
+  check('a scheduled match is neither live nor finished',
+        !isLive(match({ status: 'scheduled' }) as any) &&
+        !isFinished(match({ status: 'scheduled' }) as any), 'scheduled');
+
+  // Ordering: upcoming earliest-first, finished newest-first.
+  const upcoming = groupMatches([
+    match({ matchNumber: 3, status: 'scheduled', scheduledTime: '2:50 PM' }),
+    match({ matchNumber: 1, status: 'scheduled', scheduledTime: '9:35 AM' }),
+    match({ matchNumber: 2, status: 'scheduled', scheduledTime: '12:00 PM' }),
+  ] as any).upcoming;
+  check('upcoming is earliest first, not alphabetical by time string',
+        upcoming.map(m => m.matchNumber).join(',') === '1,2,3',
+        upcoming.map(m => m.scheduledTime).join(' | '));
+
+  const finished = groupMatches([
+    match({ matchNumber: 1, status: 'completed', matchCompletedAt: '2026-03-01T09:00:00Z' }),
+    match({ matchNumber: 3, status: 'completed', matchCompletedAt: '2026-03-01T17:00:00Z' }),
+    match({ matchNumber: 2, status: 'completed', matchCompletedAt: '2026-03-01T13:00:00Z' }),
+  ] as any).finished;
+  check('finished is most recent first',
+        finished.map(m => m.matchNumber).join(',') === '3,2,1',
+        finished.map(m => m.matchCompletedAt).join(' | '));
+
+  const mixed = groupMatches([
+    match({ matchNumber: 1, status: 'completed' }),
+    match({ matchNumber: 2, status: 'completed', matchCompletedAt: '2026-03-01T09:00:00Z' }),
+  ] as any).finished;
+  check('a finished match with no recorded end time sorts last, not first',
+        mixed[0].matchNumber === 2, mixed.map(m => m.matchNumber).join(','));
+
+  check('grouping an empty list yields three empty groups',
+        groupMatches([]).live.length === 0 &&
+        groupMatches([]).upcoming.length === 0 &&
+        groupMatches([]).finished.length === 0, '');
+  check('grouping undefined does not throw',
+        groupMatches(undefined).upcoming.length === 0, '');
+
+  // -- result summary ------------------------------------------------------
+  const won = match({
+    status: 'completed', resultConfirmed: true,
+    player1Id: 'u1', player1Name: 'Ragavendra S', player2Name: 'Other',
+    winnerId: 'u1', winnerName: 'Ragavendra S',
+    player1BoardWins: 2, player2BoardWins: 1,
+  }) as any;
+  check('the summary names the winner and the score',
+        resultSummary(won) === 'Ragavendra S won 2–1 on boards', String(resultSummary(won)));
+
+  const lostByP2 = match({
+    status: 'completed', resultConfirmed: true,
+    player1Id: 'u1', player1Name: 'A', player2Id: 'u2', player2Name: 'B',
+    winnerId: 'u2', winnerName: 'B',
+    player1BoardWins: 1, player2BoardWins: 2,
+  }) as any;
+  // The winner's figure leads regardless of which side they played.
+  check('the winning score is quoted first whichever side won',
+        resultSummary(lostByP2) === 'B won 2–1 on boards', String(resultSummary(lostByP2)));
+
+  const sets = match({
+    status: 'completed', resultConfirmed: true,
+    player1Id: 'u1', player1Name: 'A', player2Name: 'B',
+    winnerId: 'u1', winnerName: 'A',
+    numberOfSets: 3, player1SetsWon: 2, player2SetsWon: 1,
+    player1BoardWins: 5, player2BoardWins: 4,
+  }) as any;
+  check('a set-format match is summarised in sets, not boards',
+        resultSummary(sets) === 'A won 2–1 in sets', String(resultSummary(sets)));
+
+  const wo = match({ status: 'scheduled', walkover: true, winnerName: 'A' }) as any;
+  check('a walkover says so instead of quoting a score',
+        resultSummary(wo) === 'A won by walkover', String(resultSummary(wo)));
+
+  // withScore: false, for a caller that already shows a scoreboard. Quoting
+  // the score winner-first under a player1-player2 scoreboard read as a
+  // contradiction (1-5 above, "won 5-1" below).
+  check('the score can be omitted when the caller already shows one',
+        resultSummary(lostByP2, { withScore: false }) === 'B won',
+        String(resultSummary(lostByP2, { withScore: false })));
+  check('omitting the score still names a walkover as one',
+        resultSummary(wo, { withScore: false }) === 'A won by walkover',
+        String(resultSummary(wo, { withScore: false })));
+  check('omitting the score does not resurrect an unfinished match',
+        resultSummary(match({ status: 'live', winnerName: 'A' }) as any,
+                      { withScore: false }) === null, '');
+
+  check('an unfinished match has no summary',
+        resultSummary(match({ status: 'live', winnerName: 'A' }) as any) === null, '');
+  check('a finished match with no winner recorded has no summary',
+        resultSummary(match({ status: 'completed' }) as any) === null, '');
+
+  // -- outcome for the viewer ---------------------------------------------
+  check('the winner is told they won',
+        outcomeFor(won, { id: 'u1', name: 'Ragavendra S' }) === 'won', '');
+  check('the loser is told they lost',
+        outcomeFor(lostByP2, { id: 'u1', name: 'A' }) === 'lost', '');
+  check('a bystander gets no outcome',
+        outcomeFor(won, { id: 'zz', name: 'Nobody' }) === null, '');
+  check('an unfinished match has no outcome',
+        outcomeFor(match({ status: 'live', player1Id: 'u1' }) as any, { id: 'u1' }) === null, '');
+  check('no signed-in user means no outcome', outcomeFor(won, null) === null, '');
+
+  // Name fallback, matching findMyMatches: exact, never a substring.
+  const byName = match({
+    status: 'completed', resultConfirmed: true,
+    player1Name: 'Srinivasan S', player2Name: 'Other', winnerName: 'Srinivasan S',
+    player1BoardWins: 2, player2BoardWins: 0,
+  }) as any;
+  check('a player with no id is matched by exact name',
+        outcomeFor(byName, { name: 'Srinivasan S' }) === 'won', '');
+  check('a shorter name is not matched against a longer one',
+        outcomeFor(byName, { name: 'Srinivas' }) === null, '');
+}
+
 const SUITES: Array<[string, () => void]> = [
   ['refresh scope', suiteRefreshScope],
   ['preview/server parity', suiteParity],
   ['time parsing', suiteTimes],
   ['match ordering', suiteOrdering],
   ['my matches', suiteMyMatches],
+  ['match groups', suiteMatchGroups],
 ];
 
 function main() {

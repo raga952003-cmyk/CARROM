@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { compareMatches } from '../../utils/matchOrder';
-import { Trophy, Clock, MapPin, Search, RefreshCw, Radio } from 'lucide-react';
+import { groupMatches, resultSummary, finishedIsProvisional, isFinished, MatchGroupKey } from '../../utils/matchGroups';
+import { Trophy, Clock, MapPin, Search, RefreshCw, Radio, CheckCircle2, CalendarClock } from 'lucide-react';
 import { Tournament, Match, StandingsBreakdown } from '../../types/tournament';
 import { tournamentService } from '../../services/tournamentService';
 import { subscribeToTournamentData } from '../../services/realtimeService';
@@ -22,6 +23,7 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
   const [standings, setStandings] = useState<StandingsBreakdown | null>(null);
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<'schedule' | 'standings'>('schedule');
+  const [group, setGroup] = useState<MatchGroupKey>('live');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -126,9 +128,36 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
       compareMatches(a, b));
   }, [tournament, query]);
 
-  const live = matches.filter(m => m.status === 'live');
-  const upcoming = matches.filter(m => !m.resultConfirmed && m.status !== 'live').slice(0, 40);
-  const done = matches.filter(m => m.resultConfirmed).slice(-20).reverse();
+  // One helper, shared with the player dashboard, so the two screens cannot
+  // disagree about what "live" means. It also fixes what this page used to do:
+  // a PAUSED match was filed under Upcoming while it was being played, and a
+  // match the umpire had finished but not yet had confirmed was filed there
+  // too. See utils/matchGroups.ts.
+  //
+  // The .slice(0, 40) and .slice(-20) that used to be here are gone. They were
+  // invisible truncation -- a spectator looking for match 41 was told
+  // "Nothing scheduled" -- and the groups are now behind tabs, so the length of
+  // one list no longer makes the page unreadable.
+  const { live, upcoming, finished } = useMemo(() => groupMatches(matches), [matches]);
+
+  // Open on whichever group has something in it, so arriving mid-session shows
+  // the boards in play rather than an empty tab the visitor has to tap past.
+  // Only until they choose for themselves -- `touchedGroup` stops the tab
+  // moving under them when the last live match ends.
+  const touchedGroup = useRef(false);
+  useEffect(() => {
+    if (touchedGroup.current) return;
+    if (live.length) setGroup('live');
+    else if (upcoming.length) setGroup('upcoming');
+    else if (finished.length) setGroup('finished');
+  }, [live.length, upcoming.length, finished.length]);
+
+  const GROUPS: { key: MatchGroupKey; label: string; rows: Match[] }[] = [
+    { key: 'live', label: 'Live', rows: live },
+    { key: 'upcoming', label: 'Upcoming', rows: upcoming },
+    { key: 'finished', label: 'Finished', rows: finished },
+  ];
+  const shown = GROUPS.find(g => g.key === group) || GROUPS[0];
 
   if (loading) {
     return <Centered>Loading tournament…</Centered>;
@@ -199,21 +228,46 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
 
         {tab === 'schedule' ? (
           <>
-            {live.length > 0 && (
-              <Section title="Playing now" accent>
-                {live.map(m => <MatchRow key={m.id} match={m} live />)}
-              </Section>
-            )}
-            <Section title={query ? `Upcoming for “${query}”` : 'Upcoming'}>
-              {upcoming.length === 0
-                ? <Empty>Nothing scheduled{query ? ' for that name' : ''}.</Empty>
-                : upcoming.map(m => <MatchRow key={m.id} match={m} />)}
+            {/* Counts on the tabs, so the shape of the day is readable without
+                opening each one -- and so an empty list is visibly empty
+                rather than looking like a page that failed to load. */}
+            <div className="flex gap-1.5">
+              {GROUPS.map(g => (
+                <button
+                  key={g.key}
+                  onClick={() => { touchedGroup.current = true; setGroup(g.key); }}
+                  className={`flex-1 py-2 px-1 rounded-xl text-xs font-bold border transition-colors ${
+                    group === g.key
+                      ? g.key === 'live'
+                        ? 'bg-red-700 text-white border-red-700'
+                        : 'bg-[#0B5D3B] text-white border-[#0B5D3B]'
+                      : 'bg-white text-gray-600 border-gray-200'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    {g.key === 'live' && g.rows.length > 0 && (
+                      <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                        group === g.key ? 'bg-white' : 'bg-red-600'}`} />
+                    )}
+                    {g.label}
+                    <span className={group === g.key ? 'opacity-80' : 'text-gray-400'}>
+                      {g.rows.length}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <Section
+              title={query ? `${shown.label} for “${query}”` : shown.label}
+              accent={shown.key === 'live' && shown.rows.length > 0}
+            >
+              {shown.rows.length === 0
+                ? <Empty>{emptyLine(shown.key, !!query.trim())}</Empty>
+                : shown.rows.map(m => (
+                    <MatchRow key={m.id} match={m} live={shown.key === 'live'} />
+                  ))}
             </Section>
-            {done.length > 0 && (
-              <Section title="Recent results">
-                {done.map(m => <MatchRow key={m.id} match={m} />)}
-              </Section>
-            )}
           </>
         ) : (
           <>
@@ -282,6 +336,19 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
   );
 };
 
+/**
+ * What an empty group should say.
+ *
+ * Each group is empty for a different reason and a generic "nothing here"
+ * makes a tournament that has not started look like one that is broken.
+ */
+function emptyLine(group: MatchGroupKey, searching: boolean): string {
+  const suffix = searching ? ' matching that name' : '';
+  if (group === 'live') return `No matches are being played right now${suffix}.`;
+  if (group === 'upcoming') return `Nothing left to play${suffix} — every match has been played.`;
+  return `No results yet${suffix}. They appear here as matches finish.`;
+}
+
 const Section: React.FC<{ title: string; accent?: boolean; children: React.ReactNode }> =
   ({ title, accent, children }) => (
     <section className="space-y-1.5">
@@ -314,7 +381,7 @@ const MatchRow: React.FC<{ match: Match; live?: boolean }> = ({ match, live }) =
             scheduled time -- which is empty for every match in this tournament,
             so the one thing a spectator came to see rendered as a dash while
             the umpire was recording boards a metre away. */}
-        {match.resultConfirmed ? (
+        {isFinished(match) ? (
           <div className="text-sm font-black">{match.player1BoardWins}–{match.player2BoardWins}</div>
         ) : match.status === 'live' || match.status === 'paused' ? (
           <>
@@ -337,6 +404,28 @@ const MatchRow: React.FC<{ match: Match; live?: boolean }> = ({ match, live }) =
         <div className="text-[10px] text-gray-400">{match.scheduledDate}</div>
       </div>
     </div>
+
+    {/* How it ended, in words. The bare "2–1" above says who scored what but
+        not who won it -- which is the thing a spectator scanning results is
+        actually reading for. */}
+    {(() => {
+      // No digits: the scoreboard immediately above already carries them, in
+      // player1-player2 order, and repeating them winner-first here read as a
+      // contradiction (1-5 above, "won 5-1" below).
+      const summary = resultSummary(match, { withScore: false });
+      if (!summary) return null;
+      return (
+        <div className="mt-1.5 pt-1.5 border-t border-gray-100 flex items-center gap-1.5 text-[11px]">
+          <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+          <span className="font-semibold text-emerald-900 truncate">{summary}</span>
+          {finishedIsProvisional(match) && (
+            <span className="ml-auto shrink-0 text-[9px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5">
+              Awaiting confirmation
+            </span>
+          )}
+        </div>
+      );
+    })()}
   </div>
 );
 
