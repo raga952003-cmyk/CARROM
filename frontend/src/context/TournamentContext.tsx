@@ -119,14 +119,7 @@ interface TournamentContextType {
   deletePlayerAccount: (id: string) => Promise<void>;
   
   // Registration
-  /**
-   * Enter a tournament. Resolves with the registration that was created.
-   *
-   * Returns the row rather than a boolean because the caller needs its id: an
-   * entry with a fee is not finished at this point, and paying for it is a
-   * second call keyed on that id.
-   */
-  registerForTournament: (tournamentId: string, type: 'singles' | 'doubles', playerOrTeam: Player | Team | any) => Promise<Registration>;
+  registerForTournament: (tournamentId: string, type: 'singles' | 'doubles', playerOrTeam: Player | Team | any) => Promise<boolean>;
   approveRegistration: (tournamentId: string, regId: string) => Promise<void>;
   rejectRegistration: (tournamentId: string, regId: string) => Promise<void>;
   
@@ -624,7 +617,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     tournamentId: string,
     type: 'singles' | 'doubles',
     playerOrTeam: any
-  ): Promise<Registration> => {
+  ): Promise<boolean> => {
     try {
       const isTeam = type === 'doubles' && playerOrTeam && 'player1' in playerOrTeam;
       const partner = isTeam ? playerOrTeam.player2 : null;
@@ -647,11 +640,9 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         partner_email: partner?.email || null,
       };
 
-      const registration = await tournamentService.registerForTournament(
-        tournamentId, payload
-      ) as Registration;
+      await tournamentService.registerForTournament(tournamentId, payload);
       await refresh(['tournaments', 'teams', 'players']);
-      return registration;
+      return true;
     } catch (e: any) {
       console.error('Registration failed:', e);
       throw e instanceof Error ? e : new Error('Registration failed.');

@@ -35,7 +35,6 @@ from app.services.state_machine import (
     LIFECYCLE_MIGRATION,
 )
 from app.routers.standings import compute_standings
-from app.services.razorpay_client import rupees_to_paise
 from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime, timezone
 import time
@@ -44,20 +43,6 @@ import logging
 import secrets
 
 logger = logging.getLogger("uvicorn.error")
-
-
-def _missing_column(error: Exception, column: str) -> bool:
-    """
-    Whether this failure is Postgres refusing a column that is not there yet.
-
-    Same shape as access_control._looks_missing, kept local because the column
-    name is part of the question: a write that fails for any OTHER reason must
-    be re-raised, not quietly retried with a field dropped.
-    """
-    text = str(error).lower()
-    return column.lower() in text and any(
-        marker in text for marker in ("does not exist", "42703", "pgrst204", "schema cache")
-    )
 
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 
@@ -868,56 +853,17 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
             # Reset player_id to NULL since it's a team registration
             player_id = None
 
-        # What this entry costs, fixed at the moment of entry.
-        #
-        # Snapshotted rather than read from the tournament when the player
-        # pays: an organiser may raise the fee, or correct a typo in it, while
-        # registration is open, and whoever entered under the old figure owes
-        # the old figure. It is also what a receipt has to quote, and
-        # `tournaments.entry_fee` stops being able to answer that the moment it
-        # is edited.
-        fee_paise = rupees_to_paise(tournament[0].get("entry_fee"))
-
-        # A free tournament has nothing to collect, so its entries are marked
-        # waived rather than left pending forever waiting on a payment that
-        # will never come. An admin entering somebody at the desk is taking the
-        # money in person, so those are waived here too -- the alternative is
-        # an organiser-created entry that the app insists is unpaid.
-        is_admin_entry = profile.get("role") == "admin"
-        if fee_paise <= 0 or is_admin_entry:
-            payment_status = "waived"
-        else:
-            payment_status = "pending"
-
         # Create registration record
         reg_payload = {
             "tournament_id": id,
             "type": data.type,
             "player_id": player_id,
             "team_id": team_id,
-            "status": "approved" if is_admin_entry else "pending", # auto-approve if admin registering them
-            "payment_status": payment_status,
+            "status": "approved" if profile.get("role") == "admin" else "pending", # auto-approve if admin registering them
+            "payment_status": "pending",
             "notes": data.notes
         }
-
-        # fee_paise arrives with migration 015. Retried without it rather than
-        # failing the entry: an organiser mid-event should not lose
-        # registrations because a migration has not been pasted in yet, and the
-        # payment router falls back to the tournament's current fee when the
-        # snapshot is absent.
-        try:
-            res = admin_db.table("registrations").insert(
-                dict(reg_payload, fee_paise=fee_paise)
-            ).execute()
-        except Exception as e:
-            if not _missing_column(e, "fee_paise"):
-                raise
-            logger.warning(
-                "registrations.fee_paise is missing; apply "
-                "db/migrations/015_payments.sql. Entry recorded without a fee snapshot."
-            )
-            res = admin_db.table("registrations").insert(reg_payload).execute()
-
+        res = admin_db.table("registrations").insert(reg_payload).execute()
         return serialize_registration(res.data[0])
     except HTTPException:
         raise

@@ -64,13 +64,6 @@ export interface Registration {
   status: 'pending' | 'approved' | 'rejected';
   registeredAt: string;
   paymentStatus: 'paid' | 'waived' | 'pending';
-  /**
-   * What this entry owes, in paise, fixed when it was made.
-   *
-   * Snapshotted so a fee changed mid-window does not change what an
-   * already-entered player owes. Absent on entries made before migration 015.
-   */
-  feePaise?: number | null;
   notes?: string;
 }
 

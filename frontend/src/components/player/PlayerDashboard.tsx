@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { findMyMatches, opponentOf } from '../../utils/myMatches';
 import { groupMatches, resultSummary, outcomeFor, finishedIsProvisional, MatchGroupKey } from '../../utils/matchGroups';
-import { paymentService, PaymentDismissedError } from '../../services/paymentService';
 import { 
   Trophy, 
   Calendar, 
@@ -19,9 +18,7 @@ import {
   Palette, 
   Award,
   ChevronRight,
-  Radio,
-  CreditCard,
-  Loader2
+  Radio
 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
@@ -39,8 +36,7 @@ export const PlayerDashboard: React.FC = () => {
     setActiveTournamentId,
     activeMatch,
     setActiveMatch,
-    currentUser,
-    refreshTournaments
+    currentUser
   } = useTournament();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -81,34 +77,6 @@ export const PlayerDashboard: React.FC = () => {
   const mine = React.useMemo(() => groupMatches(myMatches), [myMatches]);
 
   const [mineGroup, setMineGroup] = useState<MatchGroupKey>('live');
-
-  // Settling an entry fee that was left unpaid.
-  //
-  // The registration form tells the player "you can pay later from your
-  // dashboard", and until now that was not true: closing the modal unmounted
-  // the only component that knew the registration id, so an abandoned payment
-  // had no route back and the entry sat pending until an organiser noticed.
-  // Saving the entry before opening checkout is only worth doing if there IS a
-  // way back to it.
-  const [payingFee, setPayingFee] = useState(false);
-  const [feeError, setFeeError] = useState('');
-
-  const settleEntryFee = async (registrationId: string) => {
-    setPayingFee(true);
-    setFeeError('');
-    try {
-      await paymentService.payForRegistration(registrationId);
-      await refreshTournaments();
-    } catch (e: any) {
-      // A dismissed window is not a failure worth reporting -- they changed
-      // their mind and the entry is exactly as it was.
-      if (!(e instanceof PaymentDismissedError || e?.dismissed)) {
-        setFeeError(e?.message || 'The payment could not be completed. Please try again.');
-      }
-    } finally {
-      setPayingFee(false);
-    }
-  };
   // Land on a group that has something in it, but stop moving once the player
   // has picked one themselves -- otherwise the tab jumps out from under them
   // the moment their live match ends.
@@ -415,38 +383,6 @@ export const PlayerDashboard: React.FC = () => {
                     // the player believed they were in before anyone had decided.
                     (() => {
                       const status = (userRegistration as any).status;
-
-                      // An outstanding fee is the actionable case, so it gets a
-                      // button rather than a badge. "Awaiting approval" would be
-                      // misleading here: nobody is waiting on the organiser, the
-                      // entry is waiting on the money.
-                      if (userRegistration.paymentStatus === 'pending' && status !== 'rejected') {
-                        return (
-                          <div className="flex flex-col items-end gap-1 shrink-0">
-                            <button
-                              onClick={() => settleEntryFee(userRegistration.id)}
-                              disabled={payingFee}
-                              className="px-4 py-2 bg-[#D4A72C] hover:bg-[#c29623] text-[#202522] text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5 disabled:opacity-60"
-                            >
-                              {payingFee
-                                ? <Loader2 className="w-4 h-4 animate-spin" />
-                                : <CreditCard className="w-4 h-4" />}
-                              <span>
-                                {payingFee
-                                  ? 'Processing…'
-                                  : `Pay Entry Fee (₹${Number(currentTournament.entryFee || 0).toLocaleString('en-IN')})`}
-                              </span>
-                            </button>
-                            <span className="text-[10px] text-amber-300/90">
-                              Your entry is confirmed once the fee is paid
-                            </span>
-                            {feeError && (
-                              <span className="text-[10px] text-red-300 max-w-[16rem] text-right">{feeError}</span>
-                            )}
-                          </div>
-                        );
-                      }
-
                       const look =
                         status === 'approved'
                           ? { cls: 'bg-emerald-950/40 text-emerald-300 border-emerald-600/30',

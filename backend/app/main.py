@@ -10,7 +10,6 @@ from app.routers import (
     matches,
     notifications,
     imports,
-    payments,
     registrations,
     teams,
     access,
@@ -62,7 +61,6 @@ app.include_router(standings.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
-app.include_router(payments.router, prefix="/api")
 
 @app.get("/")
 async def root():
@@ -87,7 +85,6 @@ _COLUMN_PROBES = (
     ("010_walkover", "matches", "walkover_by"),
     ("011_profile_privacy", "public_profiles", "id"),
     ("012_lifecycle", "tournaments", "champion_id"),
-    ("015_payments", "payments", "razorpay_order_id"),
 )
 
 # Migrations that leave nothing PostgREST can see. Reporting one of these as
@@ -149,32 +146,6 @@ def _health_payload(pending, rpc_state, idem_state, owner_state,
         # Constant, so the cached paths carry it too: it describes what the
         # probe can see, not what the database holds.
         "unprobeable_migrations": [dict(m) for m in UNPROBEABLE_MIGRATIONS],
-        # Which Razorpay mode this deployment is in, said out loud.
-        #
-        # Razorpay has no mode flag -- test and live differ only by the key
-        # prefix -- so without this the only way to find out which one a
-        # deployment is using is to make a payment and see whether real money
-        # moves. "test" on a production host, or "live" on a staging one, is
-        # then something a person can notice before a player does.
-        "payments": _payments_state(),
-    }
-
-
-def _payments_state():
-    from app.services import razorpay_client
-
-    if not razorpay_client.razorpay_configured():
-        return {"provider": "razorpay", "configured": False, "mode": "off",
-                "detail": "RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set; "
-                          "entry fees cannot be collected online."}
-
-    return {
-        "provider": "razorpay",
-        "configured": True,
-        "mode": "live" if razorpay_client.is_live_mode() else "test",
-        "webhook": ("configured" if razorpay_client.webhook_configured()
-                    else "DEGRADED - RAZORPAY_WEBHOOK_SECRET not set; a payment "
-                         "whose browser callback is lost will not be recorded"),
     }
 
 
