@@ -7,15 +7,25 @@ interface GroupStageSettingsProps {
   qualifiersPerGroup: number;
   /**
    * How many league finishers reach the knockout when there is ONE league.
-   * Chosen on the Knockout Size panel beside this one; without it this
-   * component assumed four and contradicted the panel it sits under.
+   * The "Who advances" control below sets it; with groups, qualifiersPerGroup
+   * does instead. One decision, one place.
    */
   knockoutQualifiers: number;
+  onKnockoutQualifiersChange: (n: number) => void;
   expectedEntrants: number;
   onGroupCountChange: (n: number) => void;
   onQualifiersChange: (n: number) => void;
   onExpectedEntrantsChange: (n: number) => void;
 }
+
+/** What a bracket of this size opens with, so the number means something. */
+const ROUND_NAME: Record<number, string> = {
+  2: 'Final only',
+  4: 'Semi Finals',
+  8: 'Quarter Finals',
+  16: 'Round of 16',
+  32: 'Round of 32',
+};
 
 /** Combinations: n entrants in a single pool play n(n-1)/2 matches. */
 const roundRobin = (n: number) => (n < 2 ? 0 : (n * (n - 1)) / 2);
@@ -40,7 +50,8 @@ function groupSizes(entrants: number, groups: number): number[] {
  */
 export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
   format, groupCount, qualifiersPerGroup, knockoutQualifiers, expectedEntrants,
-  onGroupCountChange, onQualifiersChange, onExpectedEntrantsChange,
+  onGroupCountChange, onQualifiersChange, onKnockoutQualifiersChange,
+  onExpectedEntrantsChange,
 }) => {
   // A pure knockout has no league phase to divide.
   if (format === 'knockout') return null;
@@ -51,9 +62,8 @@ export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
   const sizes = useGroups ? groupSizes(expectedEntrants, groupCount) : [expectedEntrants];
   const leagueMatches = sizes.reduce((sum, n) => sum + roundRobin(n), 0);
 
-  // Single league: the Knockout Size panel decides, and the bracket is a power
-  // of two, so the preview has to round the same way the engine does or the
-  // match count it shows is wrong.
+  // The bracket is a power of two, so the preview must round the same way the
+  // engine does or the match count it shows is not the one that gets drawn.
   const bracketSlots = (n: number) => {
     let slots = 2;
     while (slots * 2 <= n) slots *= 2;
@@ -97,26 +107,50 @@ export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
           </select>
         </div>
 
+        {/* ONE control for who advances, whichever shape the draw is.
+            It used to be two: this dropdown, which was DISABLED for a single
+            league and so did nothing whatever number you picked, and a
+            separate Knockout Size panel above it. Two controls for one
+            decision, one of them inert, and a summary line that ignored both
+            and said "4 advance" regardless. */}
         {hasKnockout && (
           <div>
             <label className="block text-[11px] font-bold text-gray-700 mb-1">
               Who advances
             </label>
-            <select
-              value={qualifiersPerGroup}
-              onChange={e => onQualifiersChange(parseInt(e.target.value) || 2)}
-              disabled={!useGroups}
-              className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white disabled:opacity-50"
-            >
-              {[1, 2, 3, 4].map(n => (
-                <option key={n} value={n}>Top {n} per group</option>
-              ))}
-            </select>
-            {!useGroups && (
-              <p className="text-[10px] text-gray-500 mt-1">
-                Set above, on Knockout Size: top {qualifiers || '—'} of the league advance.
-              </p>
+            {useGroups ? (
+              <select
+                value={qualifiersPerGroup}
+                onChange={e => onQualifiersChange(parseInt(e.target.value) || 2)}
+                className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
+              >
+                {[1, 2, 3, 4].map(n => (
+                  <option key={n} value={n}>Top {n} per group</option>
+                ))}
+              </select>
+            ) : (
+              <select
+                value={knockoutQualifiers}
+                onChange={e => onKnockoutQualifiersChange(parseInt(e.target.value) || 4)}
+                className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
+              >
+                {/* Powers of two only: any other size gives the top seeds byes
+                    into round two, so the engine rounds down and the number
+                    picked here would not be the number that plays. */}
+                {[2, 4, 8, 16, 32].map(n => (
+                  <option key={n} value={n} disabled={expectedEntrants > 0 && n > expectedEntrants}>
+                    Top {n} of the league{ROUND_NAME[n] ? ` — ${ROUND_NAME[n]}` : ''}
+                  </option>
+                ))}
+              </select>
             )}
+            <p className="text-[10px] text-gray-500 mt-1">
+              {useGroups
+                ? `${groupCount} groups × top ${qualifiersPerGroup} = ${qualifiers} in the bracket.`
+                : qualifiers >= 2
+                  ? `${qualifiers} enter the bracket; ${qualifiers - 1} knockout matches.`
+                  : 'Too few entrants for a knockout.'}
+            </p>
           </div>
         )}
 

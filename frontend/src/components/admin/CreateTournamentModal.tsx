@@ -498,65 +498,12 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
 
               <ScoringRulesSettings value={scoring} onChange={setScoring} />
 
-              {/* How big the knockout is.
-                  The engine used to hard-cap this at four, so a twenty-player
-                  league could only ever produce a semi-final however the
-                  tournament was described. */}
-              {format === 'league_knockout' && groupCount <= 1 && (
-                <div className="p-4 bg-indigo-50/60 rounded-xl border border-indigo-200">
-                  <h4 className="text-xs font-bold text-gray-800 mb-1.5 flex items-center gap-1">
-                    <Settings2 className="w-3.5 h-3.5 text-indigo-700" />
-                    Knockout Size — how many league finishers go through
-                  </h4>
-                  <p className="text-[11px] text-gray-600 mb-2">
-                    The league is played by everyone; these are the places that
-                    carry into the bracket.
-                  </p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                    {[
-                      { n: 2, label: 'Top 2', round: 'Final only' },
-                      { n: 4, label: 'Top 4', round: 'Semi Finals' },
-                      { n: 8, label: 'Top 8', round: 'Quarter Finals' },
-                      { n: 16, label: 'Top 16', round: 'Round of 16' },
-                    ].map(opt => (
-                      <button
-                        key={opt.n}
-                        type="button"
-                        onClick={() => setKnockoutQualifiers(opt.n)}
-                        disabled={expectedEntrants > 0 && opt.n > expectedEntrants}
-                        className={`py-2 px-1 rounded-lg text-[11px] font-bold border transition-all disabled:opacity-35 disabled:cursor-not-allowed ${
-                          knockoutQualifiers === opt.n
-                            ? 'bg-indigo-600 text-white border-indigo-600'
-                            : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'
-                        }`}
-                      >
-                        <div>{opt.label}</div>
-                        <div className={`text-[9px] font-medium ${
-                          knockoutQualifiers === opt.n ? 'text-indigo-100' : 'text-gray-500'
-                        }`}>
-                          {opt.round}
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-2 text-[11px] text-gray-600">
-                    Only powers of two are offered: any other size gives the top
-                    seeds byes into the second round.
-                    {expectedEntrants > 0 && knockoutQualifiers > expectedEntrants && (
-                      <span className="block mt-1 font-bold text-amber-800">
-                        {expectedEntrants} entrants cannot fill {knockoutQualifiers} slots —
-                        the draw will shrink the bracket to fit.
-                      </span>
-                    )}
-                  </p>
-                </div>
-              )}
-
               <GroupStageSettings
                 format={format}
                 groupCount={groupCount}
                 qualifiersPerGroup={qualifiersPerGroup}
                 knockoutQualifiers={knockoutQualifiers}
+                onKnockoutQualifiersChange={setKnockoutQualifiers}
                 expectedEntrants={expectedEntrants}
                 onGroupCountChange={setGroupCount}
                 onQualifiersChange={setQualifiersPerGroup}
