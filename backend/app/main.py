@@ -1,3 +1,4 @@
+import logging
 import time
 
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from app.routers import (
     matches,
     notifications,
     imports,
+    payments,
     registrations,
     teams,
     access,
@@ -38,6 +40,42 @@ if settings.API_ENV == "development":
 else:
     allowed_origins = settings.cors_origin_list()
 
+# Logging, configured here rather than left to whoever imports us.
+#
+# The loggers throughout this app are named "uvicorn.error", which has handlers
+# only when uvicorn configured logging -- true locally (run.py), false on
+# Vercel, where api/index.py hands the ASGI app to the platform runtime. With
+# no handler and no level, everything below WARNING was silently dropped in
+# production, including the reconciliation lines that say a payment was
+# deliberately not settled. Those are exactly the messages you go looking for
+# when money is missing.
+if not logging.getLogger("uvicorn.error").handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+
+# Two configurations that are never intentional, said out loud at startup.
+#
+# Neither is an error the app can resolve for itself, and neither should stop
+# it serving -- a refusal to boot over CORS would take a whole deployment down
+# for a variable that a redeploy can fix. So they are logged, and reported by
+# /api/health, where a person can see them without reading logs at all.
+_startup_logger = logging.getLogger("uvicorn.error")
+if settings.API_ENV == "development":
+    _startup_logger.warning(
+        "CORS is wide open: ENV is '%s', so any origin may call this API with "
+        "credentials. Correct for local development; set ENV=production on a "
+        "deployed host.", settings.API_ENV,
+    )
+elif not allowed_origins:
+    _startup_logger.error(
+        "ENV is '%s' but CORS_ORIGINS is empty, so NO browser origin is "
+        "permitted and every request from the site will fail. Set CORS_ORIGINS "
+        "to the deployed origin.", settings.API_ENV,
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -61,13 +99,15 @@ app.include_router(standings.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
+app.include_router(payments.router, prefix="/api")
 
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Carrom Arena Tournament Engine API."}
 
-# Cached migration state. None until probed; [] means everything is applied,
-# which cannot regress without a deployment, so it is kept for good.
+# Cached migration state. None until probed; [] means everything is applied.
+# Every answer expires after _PENDING_RECHECK_SECONDS, the green one included
+# -- see health() for why "all applied" is not safe to keep for good.
 _pending_cache = None
 _pending_checked_at = 0.0
 _PENDING_RECHECK_SECONDS = 30
@@ -85,6 +125,7 @@ _COLUMN_PROBES = (
     ("010_walkover", "matches", "walkover_by"),
     ("011_profile_privacy", "public_profiles", "id"),
     ("012_lifecycle", "tournaments", "champion_id"),
+    ("015_payments", "payments", "razorpay_order_id"),
 )
 
 # Migrations that leave nothing PostgREST can see. Reporting one of these as
@@ -111,6 +152,14 @@ UNPROBEABLE_MIGRATIONS = (
                "one query that would show the revoke is an update to somebody "
                "else's role -- which is the thing it exists to prevent. Verify "
                "it by reading its RAISE NOTICE in the SQL editor."},
+    {"migration": "016_payment_ledger_integrity",
+     "reason": "a partial UNIQUE INDEX, two BEFORE DELETE triggers and a "
+               "GRANT, and no column. PostgREST exposes tables and columns, "
+               "never indexes, triggers or grants, and the queries that would "
+               "prove them are a second paid insert and a tournament delete "
+               "-- the double charge and the lost ledger it exists to "
+               "prevent. Verify it by reading its RAISE NOTICEs in the SQL "
+               "editor."},
 )
 
 
@@ -146,6 +195,48 @@ def _health_payload(pending, rpc_state, idem_state, owner_state,
         # Constant, so the cached paths carry it too: it describes what the
         # probe can see, not what the database holds.
         "unprobeable_migrations": [dict(m) for m in UNPROBEABLE_MIGRATIONS],
+        # Which Razorpay mode this deployment is in, said out loud.
+        #
+        # Razorpay has no mode flag -- test and live differ only by the key
+        # prefix -- so without this the only way to find out which one a
+        # deployment is using is to make a payment and see whether real money
+        # moves. "test" on a production host, or "live" on a staging one, is
+        # then something a person can notice before a player does.
+        "payments": _payments_state(),
+        # The resolved CORS posture, so a misconfiguration is visible without
+        # reading startup logs. "open" on a deployed host, or "blocking-all"
+        # anywhere, is a deployment that needs a variable changed.
+        "cors": _cors_state(),
+    }
+
+
+def _cors_state():
+    if settings.API_ENV == "development":
+        return {"mode": "open", "origins": ["*"],
+                "detail": "ENV=development, so any origin may call this API. "
+                          "Set ENV=production on a deployed host."}
+    if not allowed_origins:
+        return {"mode": "blocking-all", "origins": [],
+                "detail": "DEGRADED - ENV is not development and CORS_ORIGINS is "
+                          "empty, so no browser origin is permitted."}
+    return {"mode": "restricted", "origins": list(allowed_origins)}
+
+
+def _payments_state():
+    from app.services import razorpay_client
+
+    if not razorpay_client.razorpay_configured():
+        return {"provider": "razorpay", "configured": False, "mode": "off",
+                "detail": "RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set; "
+                          "entry fees cannot be collected online."}
+
+    return {
+        "provider": "razorpay",
+        "configured": True,
+        "mode": "live" if razorpay_client.is_live_mode() else "test",
+        "webhook": ("configured" if razorpay_client.webhook_configured()
+                    else "DEGRADED - RAZORPAY_WEBHOOK_SECRET not set; a payment "
+                         "whose browser callback is lost will not be recorded"),
     }
 
 
@@ -173,7 +264,7 @@ async def health():
     # green while quietly not recording tosses or board detail.
     # Cached, because a schema does not change without a deployment.
     #
-    # These probes are nine sequential Supabase round trips, and from a
+    # These probes are ten sequential Supabase round trips, and from a
     # serverless function each costs a couple of hundred milliseconds: /health
     # was measured at 2.2 seconds to return about nothing. Anything polling it
     # paid that every time. A positive result is kept for the life of the
@@ -181,7 +272,18 @@ async def health():
     # effect without a redeploy.
     global _pending_cache, _pending_checked_at
     now = time.monotonic()
-    if _pending_cache == [] and _pending_checked_at:
+    # "All applied" was cached for the life of the instance, on the reasoning
+    # that a schema cannot regress without a deployment. True of the schema,
+    # false of the ANSWER: the probe can only see the columns it selects, and
+    # a migration added to _COLUMN_PROBES after this instance warmed up was
+    # never asked about. During a cutover -- paste 015 and 016, then check
+    # health -- a warm instance kept answering "all applied" from before the
+    # probes existed, which is the one moment the answer is load-bearing.
+    #
+    # Given the same expiry as any other cached answer. Re-probing every
+    # thirty seconds costs ten selects on a route nobody calls in a loop.
+    if (_pending_cache == [] and _pending_checked_at
+            and now - _pending_checked_at < _PENDING_RECHECK_SECONDS):
         return _health_payload([], rpc_state, idem_state, owner_state,
                                supabase_client is not None, supabase_admin is not None)
     if _pending_cache is not None and now - _pending_checked_at < _PENDING_RECHECK_SECONDS:

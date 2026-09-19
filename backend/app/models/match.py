@@ -152,3 +152,40 @@ class MatchSidesSchema(BaseCamelModel):
     sides_swapped: Optional[bool] = None
     table_number: Optional[int] = None
     referee_id: Optional[str] = None
+
+class MatchFixtureUpdateSchema(BaseCamelModel):
+    """
+    Editing a fixture: who plays it, what it is called, and when and where.
+
+    Deliberately NOT the result. `MatchUpdateSchema` above carries winner_id,
+    result_confirmed and the board-win totals, which would let a caller write
+    a result without playing it and bypass the scoring engine entirely; it is
+    unused, and this is the schema the edit route takes instead. A result is
+    changed by correcting its boards and reconfirming.
+
+    Every field is optional and only what is sent is written, so rescheduling a
+    match does not have to restate who is playing it.
+    """
+    player1_id: Optional[str] = None
+    player2_id: Optional[str] = None
+    round_name: Optional[str] = None
+    stage: Optional[str] = None           # 'league' | 'knockout'
+    board_number: Optional[int] = None
+    scheduled_date: Optional[str] = None
+    scheduled_time: Optional[str] = None
+    # Why, for the audit trail.
+    reason: Optional[str] = None
+
+    @field_validator("stage")
+    @classmethod
+    def _known_stage(cls, v):
+        if v is not None and v not in ("league", "knockout"):
+            raise ValueError("Stage must be 'league' or 'knockout'.")
+        return v
+
+    @field_validator("board_number")
+    @classmethod
+    def _positive_board(cls, v):
+        if v is not None and v < 1:
+            raise ValueError("Board number starts at 1.")
+        return v

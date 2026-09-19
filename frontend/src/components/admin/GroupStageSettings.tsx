@@ -5,6 +5,12 @@ interface GroupStageSettingsProps {
   format: string;
   groupCount: number;
   qualifiersPerGroup: number;
+  /**
+   * How many league finishers reach the knockout when there is ONE league.
+   * Chosen on the Knockout Size panel beside this one; without it this
+   * component assumed four and contradicted the panel it sits under.
+   */
+  knockoutQualifiers: number;
   expectedEntrants: number;
   onGroupCountChange: (n: number) => void;
   onQualifiersChange: (n: number) => void;
@@ -33,7 +39,7 @@ function groupSizes(entrants: number, groups: number): number[] {
  * until fixtures are generated, by which point the draw is already made.
  */
 export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
-  format, groupCount, qualifiersPerGroup, expectedEntrants,
+  format, groupCount, qualifiersPerGroup, knockoutQualifiers, expectedEntrants,
   onGroupCountChange, onQualifiersChange, onExpectedEntrantsChange,
 }) => {
   // A pure knockout has no league phase to divide.
@@ -45,9 +51,17 @@ export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
   const sizes = useGroups ? groupSizes(expectedEntrants, groupCount) : [expectedEntrants];
   const leagueMatches = sizes.reduce((sum, n) => sum + roundRobin(n), 0);
 
+  // Single league: the Knockout Size panel decides, and the bracket is a power
+  // of two, so the preview has to round the same way the engine does or the
+  // match count it shows is wrong.
+  const bracketSlots = (n: number) => {
+    let slots = 2;
+    while (slots * 2 <= n) slots *= 2;
+    return n < 2 ? 0 : slots;
+  };
   const qualifiers = useGroups
     ? Math.min(groupCount * qualifiersPerGroup, expectedEntrants)
-    : Math.min(4, expectedEntrants);
+    : bracketSlots(Math.min(knockoutQualifiers, expectedEntrants));
   const knockoutMatches = hasKnockout && qualifiers >= 2 ? qualifiers - 1 : 0;
   const total = leagueMatches + knockoutMatches;
 
@@ -99,7 +113,9 @@ export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
               ))}
             </select>
             {!useGroups && (
-              <p className="text-[10px] text-gray-500 mt-1">Top 4 of the league advance.</p>
+              <p className="text-[10px] text-gray-500 mt-1">
+                Set above, on Knockout Size: top {qualifiers || '—'} of the league advance.
+              </p>
             )}
           </div>
         )}

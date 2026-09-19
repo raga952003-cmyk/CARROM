@@ -446,10 +446,700 @@ def test_access_boundaries():
               r.status_code == 403, "%s %s" % (r.status_code, detail(r)))
 
 
+
+
+# ---------------------------------------------------------------------------
+# DELETE /matches/{id}: removing one fixture from a draw
+#
+# A draw could be added to and never subtracted from, so the only way to be rid
+# of a fixture that should not be played was to regenerate -- which deletes
+# every result in the tournament. These cases pin what one deletion may and may
+# not take with it.
+# ---------------------------------------------------------------------------
+
+def score_one_board(h, admin, match_id):
+    """Put play on a match the way an umpire does, through the API."""
+    h.post("/api/matches/%s/start" % match_id, {}, user_id=admin)
+    return h.post("/api/matches/%s/boards/1/submit" % match_id, dict(SCORE), user_id=admin)
+
+
+def test_unplayed_fixture_deletes_cleanly():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    check("the draw is generated", h.post("/api/tournaments/%s/fixtures" % tid, {},
+                                          user_id=admin).status_code == 200)
+
+    before = matches_of(h, tid)
+    victim = before[0]
+    boards_before = len([b for b in h.db.rows("boards") if b["match_id"] == victim["id"]])
+    check("the fixture has boards to lose", boards_before > 0, boards_before)
+
+    r = h.delete("/api/matches/%s" % victim["id"], user_id=admin)
+    if not check("an unplayed fixture can be removed", r.status_code == 200,
+                 "%s %s" % (r.status_code, detail(r))):
+        return
+    payload = body(r)
+
+    check("the removal names the match it removed",
+          payload.get("matchId") == victim["id"], payload)
+    check("the removal reports the boards that went with it",
+          payload.get("boardsDeleted") == boards_before, payload)
+    check("an unplayed removal does not report discarded play",
+          payload.get("discardedPlay") is False, payload)
+    check("the fixture is gone from the draw",
+          len(matches_of(h, tid)) == len(before) - 1, len(matches_of(h, tid)))
+    check("no other fixture is removed with it",
+          {m["id"] for m in matches_of(h, tid)} == {m["id"] for m in before} - {victim["id"]})
+    check("the boards go with the fixture",
+          not [b for b in h.db.rows("boards") if b["match_id"] == victim["id"]],
+          [b for b in h.db.rows("boards") if b["match_id"] == victim["id"]])
+
+    # The pair now has no fixture, so the table must show them a match lighter.
+    standings = body(h.get("/api/standings/%s" % tid, admin))
+    rows = (standings.get("categories") or [{}])[0].get("standings") or []
+    check("the standings still compute after a fixture is removed", bool(rows), standings)
+
+
+def test_played_fixture_is_protected():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+
+    victim = matches_of(h, tid)[0]
+    if not check("a board can be scored on the fixture",
+                 score_one_board(h, admin, victim["id"]).status_code == 200):
+        return
+
+    r = h.delete("/api/matches/%s" % victim["id"], user_id=admin)
+    check("a fixture with play on it is not deleted by accident", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+    check("the refusal says what would be lost",
+          "board" in detail(r).lower() and "correction history" in detail(r).lower(),
+          detail(r))
+    check("the refused fixture is still there",
+          any(m["id"] == victim["id"] for m in matches_of(h, tid)))
+    check("the refused fixture keeps its boards",
+          bool([b for b in h.db.rows("boards") if b["match_id"] == victim["id"]]))
+
+    # force is the organiser saying they accept the loss.
+    r = h.delete("/api/matches/%s?force=true" % victim["id"], user_id=admin)
+    if not check("force deletes a played fixture", r.status_code == 200,
+                 "%s %s" % (r.status_code, detail(r))):
+        return
+    check("a forced removal reports that play was discarded",
+          body(r).get("discardedPlay") is True, body(r))
+    check("the forced removal is gone",
+          not any(m["id"] == victim["id"] for m in matches_of(h, tid)))
+    check("its boards go with it",
+          not [b for b in h.db.rows("boards") if b["match_id"] == victim["id"]])
+
+
+def test_confirmed_result_leaves_the_points_table():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+
+    victim = matches_of(h, tid)[0]
+    # A walkover is the cheapest confirmed result to produce.
+    h.post("/api/matches/%s/walkover" % victim["id"],
+           {"winnerId": victim["player1_id"], "reason": "no show"}, user_id=admin)
+    h.post("/api/matches/%s/confirm" % victim["id"], {}, user_id=admin)
+
+    def played_of(pid):
+        standings = body(h.get("/api/standings/%s" % tid, admin))
+        rows = (standings.get("categories") or [{}])[0].get("standings") or []
+        row = next((x for x in rows if x.get("participantId") == pid), {})
+        return row.get("played"), row.get("points")
+
+    before = played_of(victim["player1_id"])
+    check("the confirmed result is in the table", before[0] == 1, before)
+
+    r = h.delete("/api/matches/%s" % victim["id"], user_id=admin)
+    check("a confirmed result is not deleted without force", r.status_code == 409, detail(r))
+    check("the confirmed result is still counted", played_of(victim["player1_id"]) == before)
+
+    r = h.delete("/api/matches/%s?force=true" % victim["id"], user_id=admin)
+    if not check("a confirmed result can be deleted with force", r.status_code == 200,
+                 detail(r)):
+        return
+    after = played_of(victim["player1_id"])
+    check("the deleted result leaves the points table", after == (0, 0), after)
+
+
+def test_deleting_a_bracket_match_keeps_the_bracket_honest():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "knockout", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 8):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+
+    ko = [m for m in matches_of(h, tid) if m.get("stage") == "knockout"]
+    fed = {m.get("next_match_id") for m in ko if m.get("next_match_id")}
+    first = [m for m in ko if m["id"] not in fed]
+    later = [m for m in ko if m["id"] in fed]
+    if not check("the knockout has a round that others feed", bool(later), len(ko)):
+        return
+
+    # A later-round match is where its feeders send their winners. Deleting it
+    # would leave them pointing at nothing -- silently, because the constraint
+    # is ON DELETE SET NULL.
+    target = later[0]
+    feeders = [m for m in ko if m.get("next_match_id") == target["id"]]
+    r = h.delete("/api/matches/%s" % target["id"], user_id=admin)
+    check("a match other matches advance into is not deleted by accident",
+          r.status_code == 409, "%s %s" % (r.status_code, detail(r)))
+    check("the refusal says how many would be orphaned",
+          str(len(feeders)) in detail(r), detail(r))
+    check("the refused bracket match survives",
+          any(m["id"] == target["id"] for m in matches_of(h, tid)))
+    check("its feeders keep their links",
+          all(m.get("next_match_id") == target["id"]
+              for m in matches_of(h, tid) if m["id"] in {f["id"] for f in feeders}),
+          [m.get("next_match_id") for m in matches_of(h, tid)
+           if m["id"] in {f["id"] for f in feeders}])
+
+    # Forced, it goes -- and the feeders are reported, not quietly broken.
+    r = h.delete("/api/matches/%s?force=true" % target["id"], user_id=admin)
+    if not check("force deletes a match others feed", r.status_code == 200, detail(r)):
+        return
+    check("the orphaned feeders are named back to the caller",
+          sorted(f["matchNumber"] for f in body(r).get("orphanedFeeders") or [])
+          == sorted(f["match_number"] for f in feeders), body(r).get("orphanedFeeders"))
+    check("the feeders survive the deletion of the round above them",
+          all(any(m["id"] == f["id"] for m in matches_of(h, tid)) for f in feeders))
+    check("the feeders' links are cleared rather than left dangling",
+          all(m.get("next_match_id") is None for m in matches_of(h, tid)
+              if m["id"] in {f["id"] for f in feeders}),
+          [m.get("next_match_id") for m in matches_of(h, tid)
+           if m["id"] in {f["id"] for f in feeders}])
+
+    # A first-round match that has already sent its winner up: deleting it must
+    # put that slot back to waiting, not leave a finalist with no semi-final.
+    h2 = Harness()
+    admin2 = h2.make_user("Owner", "admin")
+    tid2 = create_tournament(h2, admin2, "knockout", boards=2)
+    if not tid2 or not approve_pool(h2, admin2, tid2, 8):
+        return
+    h2.post("/api/tournaments/%s/fixtures" % tid2, {}, user_id=admin2)
+    ko2 = [m for m in matches_of(h2, tid2) if m.get("stage") == "knockout"]
+    fed2 = {m.get("next_match_id") for m in ko2 if m.get("next_match_id")}
+    qf = next(m for m in ko2 if m["id"] not in fed2 and m.get("next_match_id"))
+
+    h2.post("/api/matches/%s/walkover" % qf["id"],
+            {"winnerId": qf["player1_id"], "reason": "no show"}, user_id=admin2)
+    h2.post("/api/matches/%s/confirm" % qf["id"], {}, user_id=admin2)
+    parent = next(m for m in matches_of(h2, tid2) if m["id"] == qf["next_match_id"])
+    slot = qf["next_match_slot"]
+    if not check("the winner was promoted into the next round",
+                 parent.get("%s_id" % slot) == qf["player1_id"],
+                 "%s -> %s" % (slot, parent.get("%s_name" % slot))):
+        return
+
+    r = h2.delete("/api/matches/%s?force=true" % qf["id"], user_id=admin2)
+    if not check("a promoted fixture can be removed with force", r.status_code == 200,
+                 detail(r)):
+        return
+    parent = next(m for m in matches_of(h2, tid2) if m["id"] == qf["next_match_id"])
+    check("the slot it had filled goes back to waiting",
+          parent.get("%s_id" % slot) is None
+          and parent.get("%s_name" % slot) == "Winner TBD",
+          "%s = %s / %s" % (slot, parent.get("%s_id" % slot), parent.get("%s_name" % slot)))
+    check("the caller is told which slot was cleared",
+          (body(r).get("clearedSlot") or {}).get("slot") == slot, body(r).get("clearedSlot"))
+
+
+def test_removal_is_owner_only():
+    h = Harness()
+    owner = h.make_user("Owner", "admin")
+    other = h.make_user("Other Admin", "admin")
+    player = h.make_user("Player One")
+    tid = create_tournament(h, owner, "round_robin", boards=2)
+    if not tid or not approve_pool(h, owner, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=owner)
+    victim = matches_of(h, tid)[0]
+
+    r = h.delete("/api/matches/%s" % victim["id"], user_id=player)
+    check("a player cannot remove a fixture", r.status_code in (401, 403),
+          "%s %s" % (r.status_code, detail(r)))
+    r = h.delete("/api/matches/%s" % victim["id"], user_id=other)
+    check("an admin who does not run the tournament cannot remove a fixture",
+          r.status_code == 403, "%s %s" % (r.status_code, detail(r)))
+    r = h.delete("/api/matches/%s" % victim["id"])
+    check("an anonymous caller cannot remove a fixture", r.status_code in (401, 403),
+          "%s %s" % (r.status_code, detail(r)))
+    check("the fixture survives every refused attempt",
+          any(m["id"] == victim["id"] for m in matches_of(h, tid)))
+
+    r = h.delete("/api/matches/%s" % str(uuid.uuid4()), user_id=owner)
+    check("removing a match that does not exist is a 404", r.status_code == 404,
+          "%s %s" % (r.status_code, detail(r)))
+
+
+
+
+def test_an_untouched_draw_redraws_without_force():
+    """
+    A draw nobody has played is not a draw with results on it.
+
+    Every match is generated with its first board 'in_progress' -- that is how
+    the board is queued for the umpire -- and the guard counted anything not
+    pending as play. So a draw made thirty seconds ago, with nothing scored on
+    it, was refused with "6 board(s) with play recorded on them" and could only
+    be redrawn by confirming the discard of results that did not exist. The
+    warning has to mean something the first time an organiser sees it.
+    """
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    if not check("the first draw succeeds",
+                 h.post("/api/tournaments/%s/fixtures" % tid, {},
+                        user_id=admin).status_code == 200):
+        return
+
+    boards = [b for b in h.db.rows("boards")]
+    queued = [b for b in boards if b.get("status") == "in_progress"]
+    check("a fresh draw really does queue a board per match",
+          len(queued) == len(matches_of(h, tid)), "%d queued" % len(queued))
+    check("but none of them is scored",
+          not [b for b in boards if b.get("status") == "completed"
+               or (b.get("player1_score") or 0) or (b.get("player2_score") or 0)])
+
+    before = match_ids(h, tid)
+    r = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    if not check("an untouched draw can be redrawn without force",
+                 r.status_code == 200, "%s %s" % (r.status_code, detail(r))):
+        return
+    check("redrawing replaces the draw", match_ids(h, tid) != before,
+          "same ids after redraw")
+    check("the redraw produces a full draw again",
+          len(matches_of(h, tid)) == len(before), len(matches_of(h, tid)))
+
+    # And the guard still fires the moment there is something to lose.
+    victim = matches_of(h, tid)[0]
+    h.post("/api/matches/%s/start" % victim["id"], {}, user_id=admin)
+    h.post("/api/matches/%s/boards/1/submit" % victim["id"], dict(SCORE), user_id=admin)
+    r = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    check("a draw with one board scored still refuses to be redrawn",
+          r.status_code == 409, "%s %s" % (r.status_code, detail(r)))
+    check("and the refusal counts only the board that was played",
+          "1 board(s) with play recorded" in detail(r), detail(r))
+
+
+
+
+# ---------------------------------------------------------------------------
+# PUT /matches/{id}: editing a fixture and its schedule
+#
+# The draw could be added to and removed from but never corrected, so a
+# mis-entered pairing had to be deleted and made again -- losing its match
+# number and any boards scored on it. These cases pin what an edit may change
+# and what it must refuse to touch.
+# ---------------------------------------------------------------------------
+
+def entrant_ids(h, tid):
+    """The approved participants, in a stable order."""
+    return sorted(r["player_id"] for r in h.db.rows("registrations")
+                  if r["tournament_id"] == tid and r.get("status") == "approved")
+
+
+def test_rescheduling_a_fixture():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=3)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    m = matches_of(h, tid)[0]
+
+    r = h.put("/api/matches/%s" % m["id"],
+              {"boardNumber": 3, "scheduledDate": "2026-04-02",
+               "scheduledTime": "4:30 PM", "roundName": "Rescheduled Round"},
+              user_id=admin)
+    if not check("a fixture can be rescheduled", r.status_code == 200,
+                 "%s %s" % (r.status_code, detail(r))):
+        return
+
+    payload = body(r)
+    check("the edit reports exactly what it changed",
+          payload.get("changed") == sorted(
+              ["board_number", "round_name", "scheduled_date", "scheduled_time"]),
+          payload.get("changed"))
+
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("the board is moved", after["board_number"] == 3, after["board_number"])
+    check("the date is moved", after["scheduled_date"] == "2026-04-02", after["scheduled_date"])
+    check("the time is moved", after["scheduled_time"] == "4:30 PM", after["scheduled_time"])
+    check("the round is renamed", after["round_name"] == "Rescheduled Round", after["round_name"])
+    check("rescheduling does not touch the pairing",
+          (after["player1_id"], after["player2_id"]) == (m["player1_id"], m["player2_id"]))
+    check("rescheduling does not touch the match number",
+          after["match_number"] == m["match_number"])
+
+    # Only what is sent is written.
+    r = h.put("/api/matches/%s" % m["id"], {"boardNumber": 1}, user_id=admin)
+    check("a partial edit writes only that field",
+          r.status_code == 200 and body(r).get("changed") == ["board_number"], body(r))
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("the fields not sent are left alone",
+          after["scheduled_time"] == "4:30 PM" and after["round_name"] == "Rescheduled Round",
+          (after["scheduled_time"], after["round_name"]))
+
+    r = h.put("/api/matches/%s" % m["id"], {}, user_id=admin)
+    check("an empty edit is refused rather than silently doing nothing",
+          r.status_code == 422, "%s %s" % (r.status_code, detail(r)))
+
+
+def test_repairing_a_fixture():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    m = matches_of(h, tid)[0]
+    ids = entrant_ids(h, tid)
+    spare = next(p for p in ids if p not in (m["player1_id"], m["player2_id"]))
+
+    r = h.put("/api/matches/%s" % m["id"], {"player2Id": spare}, user_id=admin)
+    if not check("an unplayed fixture can be re-paired", r.status_code == 200,
+                 "%s %s" % (r.status_code, detail(r))):
+        return
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("the new player is written", after["player2_id"] == spare, after["player2_id"])
+    check("the name follows the id",
+          after["player2_name"] and after["player2_name"] != m["player2_name"],
+          after["player2_name"])
+    check("the other side is untouched", after["player1_id"] == m["player1_id"])
+
+    # The guards on who may be fixtured.
+    r = h.put("/api/matches/%s" % m["id"], {"player2Id": after["player1_id"]}, user_id=admin)
+    check("a player cannot be fixtured against themselves", r.status_code == 422,
+          "%s %s" % (r.status_code, detail(r)))
+
+    outsider = h.make_user("Not Entered")
+    r = h.put("/api/matches/%s" % m["id"], {"player1Id": outsider}, user_id=admin)
+    check("somebody who never entered cannot be fixtured", r.status_code == 422,
+          "%s %s" % (r.status_code, detail(r)))
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("a refused edit changes nothing", after["player1_id"] == m["player1_id"])
+
+    r = h.put("/api/matches/%s" % m["id"], {"stage": "semi final"}, user_id=admin)
+    check("an unknown stage is refused", r.status_code == 422,
+          "%s %s" % (r.status_code, detail(r)))
+
+
+def test_a_played_fixture_cannot_be_quietly_repaired():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    m = matches_of(h, tid)[0]
+    ids = entrant_ids(h, tid)
+    spare = next(p for p in ids if p not in (m["player1_id"], m["player2_id"]))
+
+    h.post("/api/matches/%s/start" % m["id"], {}, user_id=admin)
+    if not check("a board can be scored on it",
+                 h.post("/api/matches/%s/boards/1/submit" % m["id"], dict(SCORE),
+                        user_id=admin).status_code == 200):
+        return
+
+    r = h.put("/api/matches/%s" % m["id"], {"player2Id": spare}, user_id=admin)
+    check("re-pairing a played fixture is refused", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+    check("the refusal explains the scores would move with it",
+          "points table" in detail(r).lower(), detail(r))
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("the played fixture keeps its pairing", after["player2_id"] == m["player2_id"])
+
+    # Rescheduling it is still fine -- moving a board is not re-pairing.
+    r = h.put("/api/matches/%s" % m["id"], {"boardNumber": 2}, user_id=admin)
+    check("a played fixture can still be moved to another board",
+          r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
+
+    r = h.put("/api/matches/%s?force=true" % m["id"],
+              {"player2Id": spare, "reason": "wrong pair entered"}, user_id=admin)
+    if not check("force re-pairs a played fixture", r.status_code == 200, detail(r)):
+        return
+    check("the caller is warned the boards stay with it",
+          any("board" in w for w in body(r).get("warnings") or []), body(r).get("warnings"))
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("the forced re-pairing is written", after["player2_id"] == spare)
+
+
+def test_the_result_cannot_be_edited_through_the_fixture_route():
+    """
+    The edit route takes the fixture and the schedule, never the outcome.
+
+    models/match.py also defines MatchUpdateSchema, which carries winner_id,
+    result_confirmed and the board-win totals. It is unused, and wiring it to
+    this route would let a caller write a result without playing it. Pydantic
+    ignores unknown keys, so these are silently dropped rather than refused --
+    what matters is that they never reach the row.
+    """
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    m = matches_of(h, tid)[0]
+
+    r = h.put("/api/matches/%s" % m["id"], {
+        "boardNumber": 2,
+        "winnerId": m["player1_id"], "winnerName": "Cheat",
+        "resultConfirmed": True, "status": "completed",
+        "player1BoardWins": 9, "player1TotalPoints": 99,
+    }, user_id=admin)
+    if not check("an edit carrying result fields is still accepted for its real fields",
+                 r.status_code == 200, "%s %s" % (r.status_code, detail(r))):
+        return
+    check("only the fixture field is reported as changed",
+          body(r).get("changed") == ["board_number"], body(r).get("changed"))
+
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("no winner is written", not after.get("winner_id"), after.get("winner_id"))
+    check("the result is not confirmed", not after.get("result_confirmed"))
+    check("the status is not forced to completed",
+          after.get("status") != "completed", after.get("status"))
+    # Compared against what the row held before, not against 0: the real
+    # column defaults to 0 NOT NULL, the in-memory database applies no
+    # defaults, and either way "unchanged" is the property being tested.
+    check("the board wins are untouched",
+          (after.get("player1_board_wins"), after.get("player1_total_points"))
+          == (m.get("player1_board_wins"), m.get("player1_total_points")),
+          (after.get("player1_board_wins"), after.get("player1_total_points")))
+    check("the injected totals never reach the row",
+          after.get("player1_board_wins") != 9 and after.get("player1_total_points") != 99,
+          (after.get("player1_board_wins"), after.get("player1_total_points")))
+
+
+def test_a_clash_is_reported_not_refused():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=3)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    a, b = matches_of(h, tid)[0], matches_of(h, tid)[1]
+
+    h.put("/api/matches/%s" % a["id"],
+          {"boardNumber": 2, "scheduledDate": "2026-04-03", "scheduledTime": "10:00 AM"},
+          user_id=admin)
+    r = h.put("/api/matches/%s" % b["id"],
+              {"boardNumber": 2, "scheduledDate": "2026-04-03", "scheduledTime": "10:00 AM"},
+              user_id=admin)
+    if not check("a clashing move is allowed", r.status_code == 200,
+                 "%s %s" % (r.status_code, detail(r))):
+        return
+    warnings = body(r).get("warnings") or []
+    check("but the double-booked board is reported",
+          any("board 2" in w for w in warnings), warnings)
+
+    after = next(x for x in matches_of(h, tid) if x["id"] == b["id"])
+    check("the move still went through", after["board_number"] == 2, after["board_number"])
+
+    # A clear slot draws no warning at all.
+    r = h.put("/api/matches/%s" % b["id"],
+              {"boardNumber": 3, "scheduledTime": "2:00 PM"}, user_id=admin)
+    check("an uncontested slot warns about nothing",
+          r.status_code == 200 and not (body(r).get("warnings") or []),
+          body(r).get("warnings"))
+
+
+def test_editing_is_owner_only():
+    h = Harness()
+    owner = h.make_user("Owner", "admin")
+    other = h.make_user("Other Admin", "admin")
+    player = h.make_user("Player One")
+    tid = create_tournament(h, owner, "round_robin", boards=2)
+    if not tid or not approve_pool(h, owner, tid, 4):
+        return
+    h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=owner)
+    m = matches_of(h, tid)[0]
+
+    for who, label, expected in ((player, "a player", (401, 403)),
+                                 (other, "an admin who does not run it", (403,)),
+                                 (None, "an anonymous caller", (401, 403))):
+        r = h.put("/api/matches/%s" % m["id"], {"boardNumber": 2}, user_id=who)
+        check("%s cannot edit a fixture" % label, r.status_code in expected,
+              "%s %s" % (r.status_code, detail(r)))
+
+    after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
+    check("the fixture is unchanged by every refused edit",
+          after["board_number"] == m["board_number"], after["board_number"])
+
+    r = h.put("/api/matches/%s" % str(uuid.uuid4()), {"boardNumber": 2}, user_id=owner)
+    check("editing a match that does not exist is a 404", r.status_code == 404,
+          "%s %s" % (r.status_code, detail(r)))
+
+
+
+
+# ---------------------------------------------------------------------------
+# Entries close when registration closes
+#
+# The single-entry route checked the tournament's state for players and waved
+# organisers through at any stage; the bulk import checked nothing at all. So a
+# participant could be entered into a tournament whose draw was already made
+# and half played -- they appear in the entry list and nowhere else, with no
+# fixtures and no place in the table.
+# ---------------------------------------------------------------------------
+
+CLOSED_STATES = ("registration_closed", "fixture_generation", "fixture_published",
+                 "in_progress", "completed")
+
+
+def set_state(h, tid, status):
+    h.db.table("tournaments").update({"status": status}).eq("id", tid).execute()
+
+
+def enter_one(h, who, tid, name, force=False):
+    """Create a player and try to enter them, as the organiser's desk does."""
+    rp = h.post("/api/players", {"name": name,
+                                 "email": "%s@carrom.example.com" % name.replace(" ", "").lower(),
+                                 "rating": 1500}, user_id=who)
+    if rp.status_code != 200:
+        return rp
+    path = "/api/tournaments/%s/registrations" % tid
+    if force:
+        path += "?force=true"
+    return h.post(path, {"type": "singles", "playerId": body(rp).get("id")}, user_id=who)
+
+
+def registration_count(h, tid):
+    return len([r for r in h.db.rows("registrations") if r["tournament_id"] == tid])
+
+
+def test_entries_close_with_registration():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+
+    # While the desk is open, an organiser enters people freely.
+    set_state(h, tid, "registration_open")
+    before = registration_count(h, tid)
+    r = enter_one(h, admin, tid, "Late Alice")
+    check("an organiser can enter a participant while registration is open",
+          r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
+    check("the entry is written", registration_count(h, tid) == before + 1,
+          registration_count(h, tid))
+
+    # A draft tournament has not opened yet; its list is still being built.
+    set_state(h, tid, "draft")
+    r = enter_one(h, admin, tid, "Draft Bob")
+    check("a draft tournament still accepts entries", r.status_code == 200,
+          "%s %s" % (r.status_code, detail(r)))
+
+    # Every state after the desk closes refuses.
+    for status in CLOSED_STATES:
+        set_state(h, tid, status)
+        held = registration_count(h, tid)
+        r = enter_one(h, admin, tid, "Toolate %s" % status)
+        check("an organiser cannot enter a participant once registration is closed",
+              r.status_code == 409, "%s -> %s %s" % (status, r.status_code, detail(r)))
+        check("the refusal names the state it is in",
+              status.replace("_", " ") in detail(r) or status in detail(r),
+              "%s: %s" % (status, detail(r)))
+        check("nobody is entered by a refused attempt",
+              registration_count(h, tid) == held,
+              "%s: %d -> %d" % (status, held, registration_count(h, tid)))
+
+    # A player's own entry was already refused, and still is.
+    set_state(h, tid, "registration_closed")
+    player = h.make_user("Hopeful Player")
+    r = h.post("/api/tournaments/%s/registrations" % tid,
+               {"type": "singles", "playerId": player}, user_id=player)
+    check("a player cannot enter a closed tournament either", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+
+
+def test_the_organiser_keeps_a_deliberate_way_in():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid or not approve_pool(h, admin, tid, 4):
+        return
+    set_state(h, tid, "registration_closed")
+
+    before = registration_count(h, tid)
+    r = enter_one(h, admin, tid, "Forced Carol", force=True)
+    check("force enters a participant after the desk has closed",
+          r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
+    check("the forced entry is written", registration_count(h, tid) == before + 1,
+          registration_count(h, tid))
+
+    # Reopening is the other way, and needs no override at all.
+    set_state(h, tid, "registration_open")
+    r = enter_one(h, admin, tid, "Reopened Dave")
+    check("reopening registration restores ordinary entry", r.status_code == 200,
+          "%s %s" % (r.status_code, detail(r)))
+
+
+def test_bulk_import_closes_with_it():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = create_tournament(h, admin, "round_robin", boards=2)
+    if not tid:
+        return
+
+    sheet = [{"name": "Sheet One", "email": "sheet1@carrom.example.com"},
+             {"name": "Sheet Two", "email": "sheet2@carrom.example.com"}]
+
+    set_state(h, tid, "registration_open")
+    r = confirm_import(h, admin, tid, sheet)
+    check("a sheet imports while registration is open", r.status_code == 200,
+          "%s %s" % (r.status_code, detail(r)))
+    opened = registration_count(h, tid)
+    check("the sheet's entries are written", opened >= 2, opened)
+
+    # The door the single-entry guard left standing open.
+    set_state(h, tid, "in_progress")
+    held = registration_count(h, tid)
+    r = confirm_import(h, admin, tid, [
+        {"name": "Sheet Three", "email": "sheet3@carrom.example.com"}])
+    check("a sheet cannot be imported into a tournament being played",
+          r.status_code == 409, "%s %s" % (r.status_code, detail(r)))
+    check("no row of a refused import is written",
+          registration_count(h, tid) == held,
+          "%d -> %d" % (held, registration_count(h, tid)))
+
+
 SUITES = [
     ("draw, replay and redraw through /fixtures", test_generate_draws_replays_and_redraws),
     ("import with autoGenerate", test_import_confirm_autogenerate),
     ("access boundaries", test_access_boundaries),
+    ("remove an unplayed fixture", test_unplayed_fixture_deletes_cleanly),
+    ("removal guards played fixtures", test_played_fixture_is_protected),
+    ("removal leaves the points table", test_confirmed_result_leaves_the_points_table),
+    ("removal keeps the bracket honest", test_deleting_a_bracket_match_keeps_the_bracket_honest),
+    ("removal is owner only", test_removal_is_owner_only),
+    ("untouched draw redraws freely", test_an_untouched_draw_redraws_without_force),
+    ("reschedule a fixture", test_rescheduling_a_fixture),
+    ("re-pair a fixture", test_repairing_a_fixture),
+    ("played fixtures resist re-pairing", test_a_played_fixture_cannot_be_quietly_repaired),
+    ("the result is not editable here", test_the_result_cannot_be_edited_through_the_fixture_route),
+    ("clashes are reported", test_a_clash_is_reported_not_refused),
+    ("editing is owner only", test_editing_is_owner_only),
+    ("entries close with registration", test_entries_close_with_registration),
+    ("the organiser keeps a way in", test_the_organiser_keeps_a_deliberate_way_in),
+    ("bulk import closes too", test_bulk_import_closes_with_it),
 ]
 
 

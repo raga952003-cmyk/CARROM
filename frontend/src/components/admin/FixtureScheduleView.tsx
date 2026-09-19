@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useDeferredValue, useEffect } from 'react';
 import { compareMatches } from '../../utils/matchOrder';
-import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle, Search, X, Loader2 } from 'lucide-react';
+import { Sparkles, Calendar, Clock, Layers, Play, Check, RefreshCw, AlertCircle, Flame, CheckCircle2, Grid, List, ShieldCheck, ArrowRight, Send, Eye, Plus, AlertTriangle, Search, X, Loader2, Trophy, Trash2, Pencil } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { TournamentAccess } from '../../services/accessService';
 import { useTournament } from '../../context/TournamentContext';
@@ -9,6 +9,7 @@ import { apiClient } from '../../utils/apiClient';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MatchTimer } from './MatchTimer';
 import { AddMatchModal } from './AddMatchModal';
+import { EditMatchModal } from './EditMatchModal';
 
 interface FixtureScheduleViewProps {
   tournament: Tournament;
@@ -59,7 +60,7 @@ export function forgetFixtureFilters(): void {
 }
 
 /** The writes this screen makes, named so the button that started one can show it. */
-type ActionKey = 'generate' | 'schedule' | 'publish' | 'reschedule';
+type ActionKey = 'generate' | 'knockout' | 'schedule' | 'publish' | 'reschedule' | 'remove';
 
 export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   tournament,
@@ -68,6 +69,8 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
 }) => {
   const {
     generateFixturesForTournament,
+    addKnockoutStage,
+    removeMatch,
     generateScheduleForTournament,
     publishScheduleForTournament,
     refreshTournaments,
@@ -79,10 +82,17 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   // A one-minute turnaround is a real option: on a small draw the boards
   // are free again as soon as the previous pair stand up.
   const [restMinutes, setRestMinutes] = useState(1);
+  // How many league finishers the knockout takes. Powers of two only: any
+  // other size gives the top seeds byes, which the server refuses.
+  const [knockoutSlots, setKnockoutSlots] = useState(8);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [isRegenerateModalOpen, setIsRegenerateModalOpen] = useState(false);
   const [isRescheduleModalOpen, setIsRescheduleModalOpen] = useState(false);
   const [isAddMatchOpen, setIsAddMatchOpen] = useState(false);
+  // The fixture the organiser has asked to remove, held while they confirm.
+  const [pendingRemoval, setPendingRemoval] = useState<Match | null>(null);
+  // The fixture open in the edit modal.
+  const [editing, setEditing] = useState<Match | null>(null);
   // One write at a time. Generating deletes the existing draw before writing
   // the new one, so a second click while the first is running erases what it
   // has just written; scheduling and publishing are cheaper to repeat but no
@@ -116,6 +126,25 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
     await apiClient.post(`/tournaments/${tournament.id}/fixtures?force=true`, {});
     await refreshTournaments();
   }, 'Could not regenerate the fixtures.');
+
+  // Adding the knockout beside the league, not redrawing the tournament.
+  // Safe to offer without a confirmation: it deletes nothing, and the server
+  // refuses a second draw rather than stacking one on the first.
+  const runDrawKnockout = () => runAction('knockout',
+    () => addKnockoutStage(tournament.id, knockoutSlots),
+    'Could not draw the knockout stage.');
+
+  // Removing one fixture. `force` is only sent when the fixture actually has
+  // something on it, so a mis-click on a played match is still refused by the
+  // server rather than waved through by a flag the UI always sets.
+  const runRemoveMatch = async () => {
+    const victim = pendingRemoval;
+    if (!victim) return;
+    const ok = await runAction('remove',
+      () => removeMatch(tournament.id, victim.id, matchHasPlay(victim)),
+      'Could not remove the fixture.');
+    if (ok) setPendingRemoval(null);
+  };
 
   const runSchedule = () => runAction('schedule',
     () => generateScheduleForTournament(tournament.id, restMinutes), 'Could not build the schedule.');
@@ -152,13 +181,24 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   // rebuilt the board timeline, and counted every round against every match.
   // That is the lag an organiser feels while typing a name.
 
-  // What a redraw would throw away, counted the way the server counts it: any
-  // board that is not pending, or carries a score, is play.
+  // What a redraw would throw away, counted the way the server counts it: a
+  // board that is FINISHED, or carries a score, is play. Not "anything not
+  // pending" — every match is drawn with its first board already in_progress,
+  // because that is how a board is queued for the umpire, so that wider test
+  // reported a board of play per match on a draw nobody had touched.
   const { playedBoards, confirmedMatches } = useMemo(() => ({
     playedBoards: allMatches.reduce((n, m) =>
-      n + (m.boards || []).filter(b => b.status !== 'pending' || b.player1Score || b.player2Score).length, 0),
+      n + (m.boards || []).filter(b =>
+        b.status === 'completed' || b.player1Score || b.player2Score).length, 0),
     confirmedMatches: allMatches.filter(m => m.resultConfirmed).length,
   }), [allMatches]);
+
+  /** Whether one fixture has anything on it that deleting would discard. */
+  const matchHasPlay = (m: Match) =>
+    !!m.resultConfirmed
+    || m.status === 'live' || m.status === 'paused' || m.status === 'completed'
+    || (m.boards || []).some(b =>
+      b.status === 'completed' || !!b.player1Score || !!b.player2Score);
 
   // Singles and doubles are separate competitions inside one tournament, so
   // the fixture list is filtered by category before anything else.
@@ -183,6 +223,15 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
     ? allMatches
     : allMatches.filter(m => m.type === categoryFilter), [allMatches, categoryFilter]);
   const hasMatches = allMatches.length > 0;
+
+  // A league with no bracket has nowhere to send its qualifiers, and the only
+  // other way to get one -- Regenerate -- would delete every result the league
+  // has recorded. That is the case the Draw Knockout button exists for, so it
+  // appears only in it.
+  const leagueMatches = allMatches.filter(m => m.stage === 'league');
+  const hasKnockout = allMatches.some(m => m.stage === 'knockout');
+  const leagueConfirmed = leagueMatches.filter(m => m.resultConfirmed).length;
+  const canDrawKnockout = leagueMatches.length > 0 && !hasKnockout;
   const isScheduled = tournament.status === 'scheduled' || tournament.status === 'ongoing' || tournament.status === 'completed';
 
   // Group matches by round, within the selected category, and count each one
@@ -313,6 +362,38 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                       : <RefreshCw className="w-3.5 h-3.5" />}
                     <span>{busy === 'generate' ? 'Generating…' : 'Regenerate Fixtures'}</span>
                   </button>
+
+                  {canDrawKnockout && (
+                    <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded-xl pl-2.5 pr-1.5 py-1">
+                      <select
+                        value={knockoutSlots}
+                        onChange={e => setKnockoutSlots(parseInt(e.target.value))}
+                        disabled={!!busy}
+                        className="bg-transparent text-xs font-bold text-indigo-900 focus:outline-hidden disabled:opacity-50"
+                        title="How many league finishers go through"
+                      >
+                        <option value={4}>Top 4</option>
+                        <option value={8}>Top 8</option>
+                        <option value={16}>Top 16</option>
+                      </select>
+                      <button
+                        id="draw-knockout-btn"
+                        onClick={runDrawKnockout}
+                        disabled={!!busy}
+                        className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                        title={
+                          leagueConfirmed < leagueMatches.length
+                            ? `The league is at ${leagueConfirmed}/${leagueMatches.length}. The bracket is drawn now and seeds itself when the last result is confirmed.`
+                            : 'Draw the bracket and seed it from the final standings.'
+                        }
+                      >
+                        {busy === 'knockout'
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Trophy className="w-3.5 h-3.5 text-[#D4A72C]" />}
+                        <span>{busy === 'knockout' ? 'Drawing…' : 'Draw Knockout'}</span>
+                      </button>
+                    </div>
+                  )}
 
                   {!tournament.scheduledPublished && (
                     <button
@@ -637,6 +718,34 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                       }`}>
                         {isLive ? 'LIVE' : match.status}
                       </span>
+
+                      {/* Removing a fixture. The whole card opens the scoring
+                          screen, so this must not let the click through to it. */}
+                      {canManage && (
+                        <button
+                          onClick={e => { e.stopPropagation(); setEditing(match); }}
+                          disabled={!!busy}
+                          aria-label={`Edit match ${match.matchNumber}`}
+                          title="Edit this fixture — players, round, board, date and time"
+                          className="p-1 rounded-md text-gray-300 hover:text-[#0B5D3B] hover:bg-emerald-50 transition-colors disabled:opacity-40"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      {canManage && (
+                        <button
+                          onClick={e => { e.stopPropagation(); setPendingRemoval(match); }}
+                          disabled={!!busy}
+                          aria-label={`Remove match ${match.matchNumber}`}
+                          title={matchHasPlay(match)
+                            ? 'Remove this fixture — it has play recorded on it'
+                            : 'Remove this fixture'}
+                          className="p-1 rounded-md text-gray-300 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -789,6 +898,15 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
         </div>
       )}
 
+      {editing && (
+        <EditMatchModal
+          tournament={tournament}
+          match={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => refreshTournaments()}
+        />
+      )}
+
       {isAddMatchOpen && (
         <AddMatchModal
           tournament={tournament}
@@ -821,6 +939,26 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           + 'If someone joined late, use Add Match instead.'
         }
         confirmLabel={playedBoards > 0 || confirmedMatches > 0 ? 'Discard results and redraw' : 'Redraw fixtures'}
+        variant="danger"
+      />
+
+      <ConfirmationModal
+        isOpen={!!pendingRemoval}
+        onClose={() => setPendingRemoval(null)}
+        onConfirm={runRemoveMatch}
+        title={pendingRemoval ? `Remove match #${pendingRemoval.matchNumber}?` : 'Remove this fixture?'}
+        description={pendingRemoval
+          ? `${pendingRemoval.player1Name} v ${pendingRemoval.player2Name}, ${pendingRemoval.roundName}. `
+            + (matchHasPlay(pendingRemoval)
+                ? 'This fixture has play recorded on it. Removing it discards those board scores and their correction history, and takes the result out of the points table. There is no undo. '
+                : 'Nothing has been scored on it, so no result is lost. ')
+            + (pendingRemoval.stage === 'knockout'
+                ? 'It is a knockout match, so the bracket will have a gap where it was.'
+                : 'The pair will simply have no fixture against each other.')
+          : ''}
+        confirmLabel={pendingRemoval && matchHasPlay(pendingRemoval)
+          ? 'Discard scores and remove'
+          : 'Remove fixture'}
         variant="danger"
       />
 

@@ -93,6 +93,9 @@ def verb(h, tid, name, payload, user_id):
     return h.post("/api/tournaments/%s/%s" % (tid, name), payload, user_id=user_id)
 
 
+from app.services.state_machine import canonical_tournament_status as canonical  # noqa: E402
+
+
 def status_of(h, tid):
     rows = [t for t in h.db.rows("tournaments") if t["id"] == tid]
     return rows[0].get("status") if rows else None
@@ -737,6 +740,220 @@ def test_check_constraint_refuses_cancelled():
         restore_probe()
 
 
+
+
+# ---------------------------------------------------------------------------
+# A finished tournament stops being editable
+#
+# The lifecycle VERBS guarded themselves -- /start, /complete and /cancel all
+# go through validate_tournament_transition -- but the routes that change a
+# tournament's CONTENTS never asked what state it was in. Probed and confirmed:
+# on a cancelled tournament an organiser could force a redraw, rewrite the
+# schedule, publish it (fanning "Match Schedule Published! Check your boards
+# and timings!" out to every participant of an event that was not happening),
+# start a match and add a fixture. The same on a completed one, where a redraw
+# deletes the matches its recorded champion was read from.
+# ---------------------------------------------------------------------------
+
+def _terminal_setup(h, admin, status):
+    """A drawn tournament with entrants, forced into a terminal state."""
+    tid, players = create(h, admin, fmt="round_robin", entrants=4, draw=True)
+    if not tid:
+        return None, [], 0
+    drawn = len([m for m in h.db.rows("matches") if m["tournament_id"] == tid])
+    h.db.table("tournaments").update({"status": status}).eq("id", tid).execute()
+    return tid, players, drawn
+
+
+def test_a_terminal_tournament_cannot_be_rewritten():
+    for status in ("cancelled", "completed"):
+        h = Harness()
+        admin = h.make_user("Owner", "admin")
+        tid, players, drawn = _terminal_setup(h, admin, status)
+        if not tid:
+            continue
+
+        notes_before = len(h.db.rows("notifications"))
+
+        r = h.post("/api/tournaments/%s/fixtures?force=true" % tid, {}, user_id=admin)
+        check("a %s tournament cannot be redrawn" % status, r.status_code == 409,
+              "%s -> %s %s" % (status, r.status_code, detail(r)))
+        check("the %s tournament keeps every match it had" % status,
+              len([m for m in h.db.rows("matches") if m["tournament_id"] == tid]) == drawn,
+              "%s: %d of %d" % (status,
+                                len([m for m in h.db.rows("matches") if m["tournament_id"] == tid]),
+                                drawn))
+
+        r = h.post("/api/tournaments/%s/schedule" % tid, {}, user_id=admin)
+        check("a %s tournament cannot be rescheduled" % status, r.status_code == 409,
+              "%s -> %s" % (status, r.status_code))
+
+        r = h.post("/api/tournaments/%s/publish-schedule" % tid, {}, user_id=admin)
+        check("a %s tournament cannot publish a schedule" % status, r.status_code == 409,
+              "%s -> %s" % (status, r.status_code))
+        # The one that reaches real people. Checked before the fan-out, so a
+        # refusal must leave no notification behind at all.
+        check("a refused publish notifies nobody",
+              len(h.db.rows("notifications")) == notes_before,
+              "%s: %d -> %d" % (status, notes_before, len(h.db.rows("notifications"))))
+
+        ms = [m for m in h.db.rows("matches") if m["tournament_id"] == tid]
+        if ms:
+            r = h.post("/api/matches/%s/start" % ms[0]["id"], {}, user_id=admin)
+            check("a match in a %s tournament cannot be started" % status,
+                  r.status_code == 409, "%s -> %s %s" % (status, r.status_code, detail(r)))
+
+        r = h.post("/api/tournaments/%s/matches" % tid,
+                   {"stage": "league", "roundName": "Extra",
+                    "player1Id": players[0], "player2Id": players[1]}, user_id=admin)
+        check("a %s tournament cannot take a new fixture" % status, r.status_code == 409,
+              "%s -> %s" % (status, r.status_code))
+
+        check("the refusal names the state the tournament is in",
+              status in detail(r), "%s: %s" % (status, detail(r)))
+
+
+def test_a_live_tournament_is_still_fully_editable():
+    """
+    The guard must not catch the ordinary case.
+
+    A tournament being played is exactly when an organiser reschedules, adds a
+    late fixture and starts matches, so the same calls that are refused above
+    have to keep working here.
+    """
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid, players = create(h, admin, fmt="round_robin", entrants=4, draw=True)
+    if not tid:
+        return
+    h.db.table("tournaments").update({"status": "in_progress"}).eq("id", tid).execute()
+
+    r = h.post("/api/tournaments/%s/schedule" % tid, {}, user_id=admin)
+    check("a running tournament can still be scheduled", r.status_code == 200,
+          "%s %s" % (r.status_code, detail(r)))
+
+    r = h.post("/api/tournaments/%s/publish-schedule" % tid, {}, user_id=admin)
+    check("a running tournament can still publish its schedule", r.status_code == 200,
+          "%s %s" % (r.status_code, detail(r)))
+
+    r = h.post("/api/tournaments/%s/matches" % tid,
+               {"stage": "league", "roundName": "Extra",
+                "player1Id": players[0], "player2Id": players[1]}, user_id=admin)
+    check("a running tournament can still take a late fixture", r.status_code == 200,
+          "%s %s" % (r.status_code, detail(r)))
+
+    ms = [m for m in h.db.rows("matches")
+          if m["tournament_id"] == tid and m.get("status") == "scheduled"]
+    if ms:
+        r = h.post("/api/matches/%s/start" % ms[0]["id"], {}, user_id=admin)
+        check("a match in a running tournament can still be started",
+              r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
+
+
+def test_the_closed_registration_message_offers_only_what_works():
+    """
+    Advice an organiser follows has to be advice the server accepts.
+
+    The refusal used to say "Reopen registration to add someone, or add a match
+    for them if the draw is already made" in every closed state. From
+    fixture_published there is no edge back to registration_open, so half of
+    that sent the organiser to a button that answers 409.
+    """
+    from app.services.state_machine import assert_participants_can_be_added
+
+    cases = (
+        ("registration_closed", "Reopen registration"),
+        ("fixture_published", "cannot be reopened"),
+        ("in_progress", "cannot be reopened"),
+        ("completed", "tournament is over"),
+        ("cancelled", "tournament is over"),
+    )
+    for status, expected in cases:
+        try:
+            assert_participants_can_be_added({"status": status})
+            check("entries are refused once the tournament is %s" % status, False,
+                  "%s was allowed" % status)
+        except Exception as e:
+            said = str(getattr(e, "detail", e))
+            check("entries are refused once the tournament is %s" % status,
+                  getattr(e, "status_code", None) == 409, said[:120])
+            check("the refusal from %s offers advice that works" % status,
+                  expected in said, "%s: %s" % (status, said[-110:]))
+
+    # And the states that still accept entries are untouched.
+    for status in ("registration_open", "draft"):
+        try:
+            assert_participants_can_be_added({"status": status})
+            check("a %s tournament still accepts entries" % status, True)
+        except Exception as e:
+            check("a %s tournament still accepts entries" % status, False,
+                  str(getattr(e, "detail", e))[:120])
+
+
+def test_reopening_the_decider_reopens_the_tournament():
+    """
+    The one way back from completed, and it is not a verb.
+
+    Reopening the match that decided a completed tournament used to succeed
+    while leaving the tournament 'completed' with its champion intact -- a
+    champion displayed beside a final that no longer had a winner, with
+    /complete refusing to re-run and no way to put either right.
+
+    The correction now returns the tournament to in_progress and clears the
+    champion. Crucially this must NOT be reachable as a transition: adding
+    completed -> in_progress to TOURNAMENT_TRANSITIONS let POST /start
+    un-complete a finished tournament outright, which this suite caught.
+    """
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    p1 = h.make_user("Ann")
+    p2 = h.make_user("Ben")
+    tid = h.seed_tournament(owner_id=admin, status="in_progress",
+                            rules=dict(RULES, boardsPerSet=1))
+    mid = h.seed_match(tid, p1, p2, boards=1, stage="knockout")
+    h.db.table("matches").update(
+        {"player1_name": "Ann", "player2_name": "Ben"}).eq("id", mid).execute()
+
+    h.post("/api/matches/%s/start" % mid, {}, user_id=admin)
+    # RULES is remaining-coins, so the board is scored from the observations
+    # the umpire records rather than from two typed totals.
+    h.post("/api/matches/%s/boards/1/submit" % mid, dict(SCORE), user_id=admin)
+    rc = h.post("/api/matches/%s/confirm" % mid, {}, user_id=admin)
+    if not check("the decider can be confirmed", rc.status_code == 200,
+                 "%s %s" % (rc.status_code, detail(rc))):
+        return
+
+    h.db.table("tournaments").update({
+        "status": "completed", "champion_id": p1, "champion_name": "Ann",
+        "completed_at": "2026-09-19T00:00:00Z"}).eq("id", tid).execute()
+
+    # The verbs stay shut.
+    r = h.post("/api/tournaments/%s/start" % tid, {}, user_id=admin)
+    check("a completed tournament still refuses /start", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+
+    # The correction path is the exception.
+    r = h.post("/api/matches/%s/reopen" % mid,
+               {"reason": "scores were transposed"}, user_id=admin)
+    if not check("the decider can be reopened", r.status_code == 200, detail(r)):
+        return
+
+    t = row_of(h, tid)
+    check("reopening the decider returns the tournament to in_progress",
+          canonical(t.get("status")) == "in_progress", t.get("status"))
+    check("the recorded champion is cleared",
+          not t.get("champion_name") and not t.get("champion_id"),
+          "%s / %s" % (t.get("champion_name"), t.get("champion_id")))
+    check("completed_at is cleared with it", not t.get("completed_at"),
+          t.get("completed_at"))
+
+    m = [x for x in h.db.rows("matches") if x["id"] == mid][0]
+    check("the match itself is unconfirmed and has no winner",
+          not m.get("result_confirmed") and not m.get("winner_id"),
+          "%s / %s" % (m.get("result_confirmed"), m.get("winner_id")))
+
+
+
 SUITES = [
     ("full lifecycle", test_full_lifecycle),
     ("start from closed registration with a draw", test_start_from_closed_registration_with_a_draw),
@@ -748,6 +965,10 @@ SUITES = [
     ("PUT status compatibility", test_put_status_compatibility),
     ("without migration 012", test_without_migration_012_still_moves_status),
     ("CHECK refuses cancelled", test_check_constraint_refuses_cancelled),
+    ("terminal is not editable", test_a_terminal_tournament_cannot_be_rewritten),
+    ("live is still editable", test_a_live_tournament_is_still_fully_editable),
+    ("closed message is honest", test_the_closed_registration_message_offers_only_what_works),
+    ("reopening the decider", test_reopening_the_decider_reopens_the_tournament),
 ]
 
 

@@ -88,6 +88,22 @@ def serialize_registration(row: Dict[str, Any],
     return reg
 
 
+def serialize_payment(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    One payment attempt, as the browser sees it.
+
+    `amountPaise` is passed through as the integer it is, and `amount` is added
+    alongside it in rupees for display. Both, rather than one: paise is the
+    only figure that should ever be sent back to Razorpay or compared against
+    it, and rupees is the only figure a player should ever be shown. Naming
+    them apart is what stops the two being mixed up at a call site.
+    """
+    payment = camelize(row)
+    paise = int(row.get("amount_paise") or 0)
+    payment["amount"] = paise / 100
+    return payment
+
+
 def serialize_audit_log(row: Dict[str, Any]) -> Dict[str, Any]:
     return camelize(row)
 

@@ -462,12 +462,483 @@ def test_flat_standings_still_promote():
     check_bracket(h, tid, "singles", [p["id"] for p in pool], "flat")
 
 
+
+
+# ---------------------------------------------------------------------------
+# Appending a knockout stage to a league that has already been played
+#
+# A round robin drawn as `round_robin` has no bracket at all, and the only
+# other route to one -- regenerating fixtures -- deletes every match, board and
+# score in the tournament. These cases pin the property that matters: the
+# league survives untouched, and the bracket it gets is the one the standings
+# can be promoted into.
+# ---------------------------------------------------------------------------
+
+def test_knockout_stage_appends_without_touching_the_league():
+    h = Harness()
+    admin = h.make_user("Admin", "admin")
+    tid = h.seed_tournament(owner_id=admin, format="round_robin", rules=RULES)
+    pool = singles_entrants(h, tid, 20)
+    league = generate_round_robin_fixtures(tid, pool, 3)
+    seed_draw(h, tid, league)
+    decide_league(h, tid, [p["id"] for p in pool])
+
+    before = [m for m in h.db.rows("matches") if m["tournament_id"] == tid]
+    before_ids = {m["id"] for m in before}
+    before_confirmed = sum(1 for m in before if m.get("result_confirmed"))
+
+    r = h.post("/api/fixtures/%s/knockout?slots=8" % tid, user_id=admin)
+    if not check("a knockout stage can be appended to a played league",
+                 r.status_code == 200, "%s %s" % (r.status_code, detail(r))):
+        return
+    payload = body(r)
+
+    # The whole point: nothing that was already played is disturbed.
+    after = [m for m in h.db.rows("matches") if m["tournament_id"] == tid]
+    survivors = [m for m in after if m["id"] in before_ids]
+    check("appending a bracket deletes no existing match",
+          len(survivors) == len(before), "%d of %d survived" % (len(survivors), len(before)))
+    check("appending a bracket un-confirms no existing result",
+          sum(1 for m in survivors if m.get("result_confirmed")) == before_confirmed,
+          "confirmed %d want %d" % (sum(1 for m in survivors if m.get("result_confirmed")),
+                                    before_confirmed))
+    check("the league keeps every one of its matches",
+          len([m for m in after if m.get("stage") == "league"]) == len(league),
+          "league=%d want=%d" % (len([m for m in after if m.get("stage") == "league"]), len(league)))
+
+    rows = knockout_rows(h, tid, "singles")
+    check("eight slots draw seven knockout matches", len(rows) == 7, len(rows))
+    check("the endpoint reports what it drew", payload.get("matchesCreated") == 7, payload)
+    check("the rounds drawn are the quarter-final onward",
+          sorted({m["round_name"] for m in rows}) == ["Final", "Quarter Final", "Semi Final"],
+          sorted({m["round_name"] for m in rows}))
+    check("four matches make up the first knockout round",
+          len(first_round(rows)) == 4, len(first_round(rows)))
+
+    # Numbering and rounds continue past the league rather than colliding with it.
+    league_rows = [m for m in after if m.get("stage") == "league"]
+    check("knockout match numbers continue past the league",
+          min(m["match_number"] for m in rows) > max(m["match_number"] for m in league_rows),
+          "ko from %d, league to %d" % (min(m["match_number"] for m in rows),
+                                        max(m["match_number"] for m in league_rows)))
+    check("the knockout rounds sit after the last league round",
+          min(m["round_index"] for m in rows) > max(m["round_index"] for m in league_rows),
+          "ko r%d, league r%d" % (min(m["round_index"] for m in rows),
+                                  max(m["round_index"] for m in league_rows)))
+
+    # Every knockout match is the same length as the matches that fed it.
+    check("a knockout match is drawn to the same board count as the league",
+          {m["max_boards"] for m in rows} == {league[0]["maxBoards"]},
+          {m["max_boards"] for m in rows})
+
+    # The cut is read back off the bracket, so the table now flags eight.
+    block = block_for(standings_of(h, tid), "singles")
+    check("the bracket teaches the table to flag eight qualifiers",
+          block.get("qualifyingCount") == 8, block.get("qualifyingCount"))
+    top = qualified_in(block.get("standings") or [])
+    check("exactly the top eight are flagged as qualified",
+          [row.get("rank") for row in top] == list(range(1, 9)),
+          [row.get("rank") for row in top])
+
+
+def test_appended_bracket_seeds_itself_from_the_standings():
+    h = Harness()
+    admin = h.make_user("Admin", "admin")
+    tid = h.seed_tournament(owner_id=admin, format="round_robin", rules=RULES)
+    pool = singles_entrants(h, tid, 20)
+    seed_draw(h, tid, generate_round_robin_fixtures(tid, pool, 3))
+    strength = [p["id"] for p in pool]
+    decide_league(h, tid, strength)
+
+    r = h.post("/api/fixtures/%s/knockout?slots=8" % tid, user_id=admin)
+    if not check("a decided league seeds the bracket as it is drawn",
+                 r.status_code == 200 and body(r).get("leagueComplete") is True,
+                 "%s %s" % (r.status_code, detail(r))):
+        return
+
+    rows = knockout_rows(h, tid, "singles")
+    names = {p["id"]: p["name"] for p in pool}
+    seeded = {}
+    for m in first_round(rows):
+        for slot in ("player1", "player2"):
+            check("no quarter-final slot is left holding a rank label",
+                  not slot_is_waiting(m, slot), "%s %s" % (m["round_name"], m[slot + "_name"]))
+            if m[slot + "_id"]:
+                seeded[m[slot + "_id"]] = m["id"]
+
+    check("the eight quarter-finalists are the league's top eight",
+          set(seeded) == set(strength[:8]),
+          [names.get(pid) for pid in seeded])
+    check("nobody outside the top eight reaches the bracket",
+          not (set(seeded) & set(strength[8:])), [names.get(pid) for pid in seeded])
+
+    # Seeding, not registration order: rank 1 must not meet rank 2 before the final.
+    pairs = {frozenset((m["player1_id"], m["player2_id"])) for m in first_round(rows)}
+    expected = {frozenset((strength[a - 1], strength[b - 1]))
+                for a, b in ((1, 8), (4, 5), (2, 7), (3, 6))}
+    check("the quarter-finals are drawn 1v8, 2v7, 3v6, 4v5", pairs == expected,
+          [[names.get(p) for p in pair] for pair in pairs])
+
+    # Later rounds wait for winners, and the final is fed by both semis.
+    later = [m for m in rows if m["id"] not in {x["id"] for x in first_round(rows)}]
+    check("the rounds after the first wait on winners",
+          all(m["player1_id"] is None and m["player2_id"] is None for m in later),
+          [(m["round_name"], m["player1_name"]) for m in later])
+    final = [m for m in rows if m["round_name"] == "Final"]
+    check("exactly one match is fed by nothing else", len(final) == 1, len(final))
+    check("both semi-finals feed the final",
+          sorted(m["next_match_slot"] for m in rows if m.get("next_match_id") == final[0]["id"])
+          == ["player1", "player2"],
+          [m["next_match_slot"] for m in rows if m.get("next_match_id") == final[0]["id"]])
+
+
+def test_appending_a_bracket_is_guarded():
+    h = Harness()
+    admin = h.make_user("Admin", "admin")
+    tid = h.seed_tournament(owner_id=admin, format="round_robin", rules=RULES)
+    pool = singles_entrants(h, tid, 20)
+    seed_draw(h, tid, generate_round_robin_fixtures(tid, pool, 3))
+    decide_league(h, tid, [p["id"] for p in pool])
+
+    # A bracket that is not a power of two would hand the top seeds byes.
+    r = h.post("/api/fixtures/%s/knockout?slots=6" % tid, user_id=admin)
+    check("a bracket size that would need byes is refused", r.status_code == 422,
+          "%s %s" % (r.status_code, detail(r)))
+
+    r = h.post("/api/fixtures/%s/knockout?slots=8" % tid, user_id=admin)
+    check("the first draw succeeds", r.status_code == 200, detail(r))
+    drawn = len(knockout_rows(h, tid, "singles"))
+
+    # Asking twice must not silently stack a second bracket on the first.
+    r = h.post("/api/fixtures/%s/knockout?slots=8" % tid, user_id=admin)
+    check("a second draw is refused rather than stacked", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+    check("the refused draw added nothing",
+          len(knockout_rows(h, tid, "singles")) == drawn,
+          len(knockout_rows(h, tid, "singles")))
+
+    # replace=true redraws, but only while the bracket is unplayed.
+    r = h.post("/api/fixtures/%s/knockout?slots=4&replace=true" % tid, user_id=admin)
+    check("an unplayed bracket can be redrawn to a different size",
+          r.status_code == 200 and body(r).get("matchesReplaced") == drawn,
+          "%s %s" % (r.status_code, detail(r)))
+    check("redrawing leaves only the new bracket",
+          len(knockout_rows(h, tid, "singles")) == 3,
+          len(knockout_rows(h, tid, "singles")))
+
+    # Once a knockout match has been played, a redraw would delete a result.
+    ko = knockout_rows(h, tid, "singles")[0]
+    h.db.table("matches").update({"status": "completed", "result_confirmed": True}).eq(
+        "id", ko["id"]).execute()
+    r = h.post("/api/fixtures/%s/knockout?slots=8&replace=true" % tid, user_id=admin)
+    check("a played bracket cannot be redrawn even with replace", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+
+
+def test_bracket_waits_when_the_league_is_unfinished():
+    h = Harness()
+    admin = h.make_user("Admin", "admin")
+    tid = h.seed_tournament(owner_id=admin, format="round_robin", rules=RULES)
+    pool = singles_entrants(h, tid, 20)
+    seed_draw(h, tid, generate_round_robin_fixtures(tid, pool, 3))
+    decide_league(h, tid, [p["id"] for p in pool])
+
+    # Leave one league result open, the way a no-show leaves one open.
+    open_match = next(m for m in h.db.rows("matches")
+                      if m["tournament_id"] == tid and m.get("stage") == "league")
+    h.db.table("matches").update({"status": "scheduled", "result_confirmed": False}).eq(
+        "id", open_match["id"]).execute()
+
+    r = h.post("/api/fixtures/%s/knockout?slots=8" % tid, user_id=admin)
+    if not check("an unfinished league still gets its bracket drawn",
+                 r.status_code == 200, "%s %s" % (r.status_code, detail(r))):
+        return
+    payload = body(r)
+    check("the draw reports the league as unfinished",
+          payload.get("leagueComplete") is False, payload.get("leagueConfirmed"))
+    check("an unfinished league leaves the slots unseeded",
+          payload.get("promotion") is None, payload.get("promotion"))
+
+    rows = knockout_rows(h, tid, "singles")
+    check("the slots keep their rank labels until the league is decided",
+          all(slot_is_waiting(m, "player1") for m in first_round(rows)),
+          [m["player1_name"] for m in first_round(rows)])
+
+    # Confirming the last league result is what fills them -- the hook the
+    # confirm route already calls, not a second manual step.
+    h.db.table("matches").update({
+        "status": "completed", "result_confirmed": True,
+        "winner_id": open_match["player1_id"],
+        "winner_name": open_match["player1_name"],
+        "player1_board_wins": 2, "player2_board_wins": 1,
+        "player1_total_points": 20, "player2_total_points": 10,
+    }).eq("id", open_match["id"]).execute()
+    promotion = try_auto_promote(h.db, tid)
+    check("confirming the last league result promotes the qualifiers",
+          bool(promotion) and promotion.get("promotedCount") == 8, promotion)
+    check("every quarter-final slot is resolved once the league is decided",
+          not any(slot_is_waiting(m, s) for m in first_round(knockout_rows(h, tid, "singles"))
+                  for s in ("player1", "player2")),
+          [m["player1_name"] for m in first_round(knockout_rows(h, tid, "singles"))])
+
+
+
+
+# ---------------------------------------------------------------------------
+# How big the knockout is, is the organiser's decision
+#
+# generate_league_knockout_fixtures computed its bracket as
+# `min(4, max(2, len(participants) // 2))` -- a HARD CEILING of four. A league
+# of twenty, described as "top 8 move to the quarter-finals", still drew a
+# four-slot bracket, and no setting anywhere could change it. These cases pin
+# the rule that replaced it.
+# ---------------------------------------------------------------------------
+
+def test_the_knockout_is_sized_by_the_rule():
+    pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i} for i in range(20)]
+
+    cases = (
+        # (rule value, expected seats, expected first round name)
+        (None, 4, "Semi Final"),     # unchanged default, so old draws redraw the same
+        (2, 2, "Final"),
+        (4, 4, "Semi Final"),
+        (8, 8, "Quarter Final"),
+        (16, 16, "Round of 16"),
+    )
+    for value, seats, first_name in cases:
+        drawn = generate_league_knockout_fixtures(
+            "T", pool, 3, knockout_qualifiers=value)
+        ko = [m for m in drawn if m["stage"] == "knockout"]
+        labelled = [s for m in ko for s in ("player1", "player2")
+                    if str(m[s + "Name"]).startswith("League Rank")]
+        check("a knockout of %s has %d labelled seats" % (value, seats),
+              len(labelled) == seats,
+              "%s -> %d seats" % (value, len(labelled)))
+
+        fed = {m.get("nextMatchId") for m in ko if m.get("nextMatchId")}
+        opening = [m for m in ko if m["id"] not in fed]
+        check("a knockout of %s opens with the %s" % (value, first_name),
+              all(m["roundName"] == first_name for m in opening),
+              sorted({m["roundName"] for m in opening}))
+
+        check("a knockout of %s leaves exactly one final" % value,
+              len([m for m in ko if m["roundName"] == "Final"]) == 1,
+              [m["roundName"] for m in ko])
+
+        # The league is untouched by the knockout's size: everyone still plays
+        # everyone, whatever the bracket takes.
+        league = [m for m in drawn if m["stage"] == "league"]
+        check("the league is a full round robin whatever the bracket takes",
+              len(league) == len(pool) * (len(pool) - 1) // 2,
+              "%s -> %d league matches" % (value, len(league)))
+
+
+def test_an_odd_knockout_size_rounds_down_rather_than_giving_byes():
+    """
+    10 is not a bracket. Rounding DOWN to 8 is the honest answer.
+
+    Rounding up to 16 would seat six players who did not qualify, or six byes
+    that hand the top seeds a free round for no reason a spectator can see.
+    """
+    pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i} for i in range(20)]
+    for asked, got in ((3, 2), (6, 4), (10, 8), (12, 8), (31, 16)):
+        ko = [m for m in generate_league_knockout_fixtures(
+            "T", pool, 3, knockout_qualifiers=asked) if m["stage"] == "knockout"]
+        seats = len([s for m in ko for s in ("player1", "player2")
+                     if str(m[s + "Name"]).startswith("League Rank")])
+        check("asking for %d seats draws %d" % (asked, got), seats == got,
+              "asked %d, got %d" % (asked, seats))
+        check("no bracket drawn for %d carries a bye" % asked,
+              not any("TBD" in str(m["player1Name"]) and m["roundName"] == "Final"
+                      and len(ko) == 1 for m in ko),
+              [m["roundName"] for m in ko])
+
+
+def test_a_bracket_cannot_be_bigger_than_the_field():
+    """
+    Eight seats need eight players. A bracket with more seats than entrants
+    leaves "League Rank #9" in a field of eight, and promotion can never
+    resolve it -- the slot sits unfilled and the round cannot be played.
+    """
+    for entrants, asked, seats in ((8, 16, 8), (5, 8, 4), (3, 8, 2), (2, 16, 2)):
+        pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i}
+                for i in range(entrants)]
+        ko = [m for m in generate_league_knockout_fixtures(
+            "T", pool, 3, knockout_qualifiers=asked) if m["stage"] == "knockout"]
+        labelled = [s for m in ko for s in ("player1", "player2")
+                    if str(m[s + "Name"]).startswith("League Rank")]
+        check("a field of %d asked for %d seats draws %d" % (entrants, asked, seats),
+              len(labelled) == seats,
+              "%d entrants, asked %d, got %d" % (entrants, asked, len(labelled)))
+
+        ranks = [int(str(m[s + "Name"]).split("#")[1])
+                 for m in ko for s in ("player1", "player2")
+                 if str(m[s + "Name"]).startswith("League Rank")]
+        check("no seat asks for a rank the field cannot supply",
+              all(r <= entrants for r in ranks), sorted(ranks))
+
+
+def test_the_rule_reaches_the_draw_through_the_api():
+    """
+    End to end: the number an organiser picks on the create form is the number
+    of quarter-finalists, and the points table then flags exactly that many.
+    """
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid = h.seed_tournament(owner_id=admin, format="league_knockout",
+                            rules=dict(RULES, knockoutQualifiers=8))
+    pool = singles_entrants(h, tid, 12)
+
+    drawn = generate_league_knockout_fixtures(
+        tid, pool, 3, knockout_qualifiers=8)
+    seed_draw(h, tid, drawn)
+    decide_league(h, tid, [p["id"] for p in pool])
+
+    rows = knockout_rows(h, tid, "singles")
+    check("the drawn bracket has four quarter-finals",
+          len([m for m in rows if m["round_name"] == "Quarter Final"]) == 4,
+          [m["round_name"] for m in rows])
+
+    block = block_for(standings_of(h, tid), "singles")
+    check("the table reads the cut back off the bracket and flags eight",
+          block.get("qualifyingCount") == 8, block.get("qualifyingCount"))
+    top = qualified_in(block.get("standings") or [])
+    check("exactly the top eight are marked qualified",
+          [r.get("rank") for r in top] == list(range(1, 9)),
+          [r.get("rank") for r in top])
+
+    # And promotion fills them from the table, in seeded order.
+    promote_qualifiers(h.db, tid, standings_of(h, tid),
+                       [m for m in h.db.rows("matches") if m["tournament_id"] == tid])
+    filled = first_round(knockout_rows(h, tid, "singles"))
+    check("every quarter-final slot is resolved to a real entrant",
+          not any(slot_is_waiting(m, s) for m in filled for s in ("player1", "player2")),
+          [(m["player1_name"], m["player2_name"]) for m in filled])
+
+    strength = [p["id"] for p in pool]
+    seeded = {pid for m in filled for pid in (m["player1_id"], m["player2_id"]) if pid}
+    check("the eight quarter-finalists are the league's top eight",
+          seeded == set(strength[:8]), len(seeded))
+
+
+
+
+# ---------------------------------------------------------------------------
+# Head-to-head: the tiebreaker the app advertises
+# ---------------------------------------------------------------------------
+
+def _h2h_match(n, p1, p2, w, b1, b2, s1, s2):
+    return {"id": "h%d" % n, "stage": "league", "resultConfirmed": True,
+            "player1Id": p1, "player2Id": p2, "winnerId": w,
+            "player1BoardWins": b1, "player2BoardWins": b2,
+            "player1TotalPoints": s1, "player2TotalPoints": s2}
+
+
+def test_head_to_head_separates_entrants_no_column_can():
+    """
+    Both the points table and the create form promise organisers that a tie
+    is settled by "Head-to-Head match outcome". It never ran --
+    rules.tiebreakerRules stored the word and no ranking code read it -- so
+    two entrants level on every counted column were separated ALPHABETICALLY.
+    The player who won the meeting could be ranked below the player they beat,
+    and in a league feeding a knockout that decides who goes through.
+    """
+    parts = [{"id": "adam", "name": "Adam"}, {"id": "zara", "name": "Zara"},
+             {"id": "carl", "name": "Carl"}, {"id": "dave", "name": "Dave"}]
+    rules = {"pointsForWin": 2, "pointsForDraw": 1, "pointsForLoss": 0}
+
+    matches = [
+        # Zara beats Adam.
+        _h2h_match(1, "adam", "zara", "zara", 1, 2, 18, 20),
+        # Then Zara loses to Dave and Adam beats Carl by the SAME margins, so
+        # points, wins, board difference, net score difference and score for
+        # all come out identical.
+        _h2h_match(2, "zara", "dave", "dave", 1, 2, 18, 20),
+        _h2h_match(3, "adam", "carl", "adam", 2, 1, 20, 18),
+    ]
+
+    rows = calculate_points_table(matches, parts, rules)
+    by_id = {r["participantId"]: r for r in rows}
+    adam, zara = by_id["adam"], by_id["zara"]
+
+    def numeric(r):
+        return (r["points"], r["won"], r["boardDiff"], r["scoreDiff"], r["scoreFor"])
+
+    if not check("the two entrants really are level on every counted column",
+                 numeric(adam) == numeric(zara),
+                 "%s vs %s" % (numeric(adam), numeric(zara))):
+        return
+
+    check("the entrant who won the meeting is ranked above the one who lost it",
+          zara["rank"] < adam["rank"],
+          "Zara #%s, Adam #%s" % (zara["rank"], adam["rank"]))
+    check("alphabetical order no longer decides a head-to-head",
+          zara["rank"] < adam["rank"], "Adam #%s" % adam["rank"])
+
+
+def test_a_head_to_head_cycle_falls_back_rather_than_looping():
+    """
+    Beating somebody is not transitive. A beats B, B beats C, C beats A is a
+    real result, and no ordering satisfies it -- so the mini-league scores
+    them equal and the existing stable order stands. What must not happen is
+    a crash or a non-deterministic answer.
+    """
+    parts = [{"id": "a", "name": "Ann"}, {"id": "b", "name": "Bea"},
+             {"id": "c", "name": "Cal"}]
+    rules = {"pointsForWin": 2, "pointsForDraw": 1, "pointsForLoss": 0}
+    matches = [
+        _h2h_match(1, "a", "b", "a", 2, 1, 20, 18),
+        _h2h_match(2, "b", "c", "b", 2, 1, 20, 18),
+        _h2h_match(3, "c", "a", "c", 2, 1, 20, 18),
+    ]
+
+    first = calculate_points_table(matches, parts, rules)
+    second = calculate_points_table(matches, parts, rules)
+    check("a cycle still produces a full table", len(first) == 3, len(first))
+    check("a cycle produces the same order twice",
+          [r["participantId"] for r in first] == [r["participantId"] for r in second],
+          [r["participantId"] for r in first])
+    check("every entrant in a cycle keeps a distinct rank",
+          sorted(r["rank"] for r in first) == [1, 2, 3],
+          [r["rank"] for r in first])
+
+
+def test_a_cut_that_covers_the_field_flags_nobody():
+    """
+    A plain league takes the legacy cut of four, so a league of three or four
+    flagged EVERY row as qualified -- including last place, told they had gone
+    through to a knockout that does not exist. A cut covering the whole field
+    is not a cut. A cut the caller supplied is still honoured as given.
+    """
+    parts = [{"id": "p%d" % i, "name": "P%d" % i} for i in range(3)]
+    rows = calculate_points_table([], parts, {})
+    check("a three-entrant plain league flags nobody as qualified",
+          not any(r["isQualified"] for r in rows),
+          [(r["participantName"], r["isQualified"]) for r in rows])
+
+    rows = calculate_points_table([], parts, {}, qualifying_count=2)
+    check("an explicit cut inside the field is still applied",
+          sum(1 for r in rows if r["isQualified"]) == 2,
+          sum(1 for r in rows if r["isQualified"]))
+
+
 SUITES = [
     ("groups", test_groups_honour_qualifiers_per_group),
     ("league knockout", test_league_knockout_marks_the_bracket_size),
     ("legacy default", test_legacy_default_stays_four),
     ("mixed categories", test_mixed_categories_promote_into_both_brackets),
     ("flat standings", test_flat_standings_still_promote),
+    ("appended knockout", test_knockout_stage_appends_without_touching_the_league),
+    ("appended seeding", test_appended_bracket_seeds_itself_from_the_standings),
+    ("append guards", test_appending_a_bracket_is_guarded),
+    ("append waits", test_bracket_waits_when_the_league_is_unfinished),
+    ("knockout size is a rule", test_the_knockout_is_sized_by_the_rule),
+    ("odd sizes round down", test_an_odd_knockout_size_rounds_down_rather_than_giving_byes),
+    ("bracket fits the field", test_a_bracket_cannot_be_bigger_than_the_field),
+    ("the rule reaches the draw", test_the_rule_reaches_the_draw_through_the_api),
+    ("head-to-head decides", test_head_to_head_separates_entrants_no_column_can),
+    ("head-to-head cycle", test_a_head_to_head_cycle_falls_back_rather_than_looping),
+    ("a cut covering the field", test_a_cut_that_covers_the_field_flags_nobody),
 ]
 
 

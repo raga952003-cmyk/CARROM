@@ -58,6 +58,18 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const [isAddPlayerModalOpen, setIsAddPlayerModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const notify = useNotify();
+
+  // Closing registration is the moment the entry list becomes the thing the
+  // draw is made from. Someone entered after that appears here and nowhere
+  // else — no fixtures, no place in the table — and the only way to give them
+  // any is to regenerate the draw, which deletes every result in it. A draft
+  // tournament has not opened yet, so its list is still being built.
+  const entriesOpen = tournament.status === 'registration_open'
+    || tournament.status === 'draft';
+  const canAddParticipants = canManage && entriesOpen;
+  const addBlockedReason = !canManage
+    ? 'Entries belong to whoever runs this tournament.'
+    : `Registration is ${String(tournament.status).replace(/_/g, ' ')}, so no further participants can be entered. Reopen registration to add someone, or add a match for them from the Fixtures tab.`;
   // The entry a reject is being confirmed for; the modal is open while set.
   const [rejectTarget, setRejectTarget] = useState<Registration | null>(null);
   // Which row's approve or reject is in flight, as "<regId>:<action>", and the
@@ -347,7 +359,9 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
           <button
             type="button"
             onClick={() => setIsAddPlayerModalOpen(true)}
-            className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#0B5D3B] text-xs font-bold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1.5"
+            disabled={!canAddParticipants}
+            title={canAddParticipants ? 'Enter a participant' : addBlockedReason}
+            className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#0B5D3B] text-xs font-bold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-emerald-50"
           >
             <UserPlus className="w-4 h-4" />
             <span>Add Participant</span>
@@ -356,8 +370,9 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
           <button
             type="button"
             onClick={() => setIsImportModalOpen(true)}
-            className="px-3.5 py-2 bg-amber-50 hover:bg-[#D4A72C]/10 text-amber-800 text-xs font-bold rounded-xl border border-amber-200 transition-colors flex items-center gap-1.5"
-            title="Import Excel or CSV list"
+            disabled={!canAddParticipants}
+            title={canAddParticipants ? 'Import Excel or CSV list' : addBlockedReason}
+            className="px-3.5 py-2 bg-amber-50 hover:bg-[#D4A72C]/10 text-amber-800 text-xs font-bold rounded-xl border border-amber-200 transition-colors flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-amber-50"
           >
             <Upload className="w-4 h-4 text-[#D4A72C]" />
             <span>Import Participants</span>
@@ -374,6 +389,11 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
             </button>
           )}
         </div>
+        {!canAddParticipants && (
+          <div className="text-[11px] text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-2.5 py-1.5 max-w-sm">
+            {addBlockedReason}
+          </div>
+        )}
         {closeError && (
           <div role="alert" className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1.5 font-medium">
             {closeError}

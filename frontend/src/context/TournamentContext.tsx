@@ -110,6 +110,7 @@ interface TournamentContextType {
   /** Undo a confirmed result so a board can be corrected. Owner or manager only. */
   reopenMatch: (tournamentId: string, matchId: string, reason: string) => Promise<void>;
   generateFixturesForTournament: (id: string) => Promise<void>;
+  addKnockoutStage: (id: string, slots?: number) => Promise<void>;
   generateScheduleForTournament: (id: string, restMinutes?: number) => Promise<void>;
   publishScheduleForTournament: (id: string) => Promise<void>;
   
@@ -119,7 +120,14 @@ interface TournamentContextType {
   deletePlayerAccount: (id: string) => Promise<void>;
   
   // Registration
-  registerForTournament: (tournamentId: string, type: 'singles' | 'doubles', playerOrTeam: Player | Team | any) => Promise<boolean>;
+  /**
+   * Enter a tournament. Resolves with the registration that was created.
+   *
+   * Returns the row rather than a boolean because the caller needs its id: an
+   * entry with a fee is not finished at this point, and paying for it is a
+   * second call keyed on that id.
+   */
+  registerForTournament: (tournamentId: string, type: 'singles' | 'doubles', playerOrTeam: Player | Team | any) => Promise<Registration>;
   approveRegistration: (tournamentId: string, regId: string) => Promise<void>;
   rejectRegistration: (tournamentId: string, regId: string) => Promise<void>;
   
@@ -134,6 +142,26 @@ interface TournamentContextType {
     scheduledDate?: string;
     scheduledTime?: string;
   }) => Promise<void>;
+  /**
+   * Edit a fixture: who plays it, the round, the board, the date and time.
+   *
+   * Never the result — scores and the winner belong to the scoring engine.
+   * Returns the server's warnings, e.g. a board double-booked, which are
+   * reported rather than refused.
+   */
+  updateMatchFixture: (
+    tournamentId: string,
+    matchId: string,
+    changes: Record<string, any>,
+    force?: boolean,
+  ) => Promise<{ warnings?: string[] } | undefined>;
+  /**
+   * Remove one fixture from a draw.
+   *
+   * `force` is the organiser accepting the loss of whatever is on it: the
+   * server refuses a fixture with play recorded unless it is passed.
+   */
+  removeMatch: (tournamentId: string, matchId: string, force?: boolean) => Promise<void>;
   recordToss: (matchId: string, toss: {
     coinResult?: string | null;
     tossWinnerId?: string | null;
@@ -581,6 +609,14 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     await refresh(['tournaments']);
   };
 
+  // Adds the knockout bracket beside an existing league instead of redrawing
+  // the tournament. Regenerating fixtures deletes every board and score on
+  // them, which is not an option once the league has been played.
+  const addKnockoutStage = async (id: string, slots: number = 8) => {
+    await apiClient.post(`/fixtures/${id}/knockout?slots=${slots}`, {});
+    await refresh(['tournaments']);
+  };
+
   const generateScheduleForTournament = async (id: string, restMinutes: number = 10) => {
     await apiClient.post(`/tournaments/${id}/schedule?restMinutes=${restMinutes}`, {});
     await refresh(['tournaments']);
@@ -617,7 +653,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     tournamentId: string,
     type: 'singles' | 'doubles',
     playerOrTeam: any
-  ): Promise<boolean> => {
+  ): Promise<Registration> => {
     try {
       const isTeam = type === 'doubles' && playerOrTeam && 'player1' in playerOrTeam;
       const partner = isTeam ? playerOrTeam.player2 : null;
@@ -640,9 +676,11 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         partner_email: partner?.email || null,
       };
 
-      await tournamentService.registerForTournament(tournamentId, payload);
+      const registration = await tournamentService.registerForTournament(
+        tournamentId, payload
+      ) as Registration;
       await refresh(['tournaments', 'teams', 'players']);
-      return true;
+      return registration;
     } catch (e: any) {
       console.error('Registration failed:', e);
       throw e instanceof Error ? e : new Error('Registration failed.');
@@ -660,6 +698,26 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
   };
 
   // Match operations
+  const updateMatchFixture = async (
+    tournamentId: string,
+    matchId: string,
+    changes: Record<string, any>,
+    force: boolean = false,
+  ) => {
+    const result = await apiClient.put<{ warnings?: string[] }>(
+      `/matches/${matchId}${force ? '?force=true' : ''}`, changes);
+    // Re-pairing a fixture changes the standings, so the draw is re-read.
+    await refresh(['tournaments']);
+    return result;
+  };
+
+  const removeMatch = async (tournamentId: string, matchId: string, force: boolean = false) => {
+    await apiClient.delete(`/matches/${matchId}${force ? '?force=true' : ''}`);
+    // The draw AND the standings: deleting a confirmed league result changes
+    // the points table, and the dashboard must not keep showing the old one.
+    await refresh(['tournaments']);
+  };
+
   const addManualMatch = async (tournamentId: string, match: any) => {
     await apiClient.post(`/tournaments/${tournamentId}/matches`, match);
     await refresh(['tournaments']);
@@ -793,6 +851,7 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         cancelTournament,
         reopenMatch,
         generateFixturesForTournament,
+        addKnockoutStage,
         generateScheduleForTournament,
         publishScheduleForTournament,
         createPlayerAccount,
@@ -802,6 +861,8 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         approveRegistration,
         rejectRegistration,
         addManualMatch,
+        updateMatchFixture,
+        removeMatch,
         recordToss,
         startMatch,
         pauseMatch,

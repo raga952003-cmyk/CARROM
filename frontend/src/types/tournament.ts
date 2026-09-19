@@ -64,6 +64,13 @@ export interface Registration {
   status: 'pending' | 'approved' | 'rejected';
   registeredAt: string;
   paymentStatus: 'paid' | 'waived' | 'pending';
+  /**
+   * What this entry owes, in paise, fixed when it was made.
+   *
+   * Snapshotted so a fee changed mid-window does not change what an
+   * already-entered player owes. Absent on entries made before migration 015.
+   */
+  feePaise?: number | null;
   notes?: string;
 }
 
@@ -248,6 +255,14 @@ export interface TournamentRules {
   groupCount?: number;
   /** How many from each group reach the knockout. */
   qualifiersPerGroup?: number;
+  /**
+   * How many league finishers reach the knockout, in a league_knockout draw.
+   *
+   * 8 gives quarter-finals, 16 a round of 16. Omitted, the engine draws four
+   * — which used to be a hard ceiling, so a twenty-player league could not
+   * produce a quarter-final at all.
+   */
+  knockoutQualifiers?: number;
   tiebreakerRules: ('points' | 'board_difference' | 'net_score_difference' | 'head_to_head')[];
 }
 

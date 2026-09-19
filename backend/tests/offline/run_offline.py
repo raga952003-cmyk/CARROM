@@ -40,7 +40,18 @@ SUITES = [
     ("test_integration", "integration   real app + in-memory database", True),
     ("test_system", "system        whole app over HTTP, black box", True),
     ("test_e2e_matchday", "end-to-end    draw -> schedule -> board queues -> scoring", True),
+    ("test_payments", "payments      entry fees, signatures, webhook replay", True),
     ("test_acceptance", "acceptance    user stories per role", True),
+    # These five lived beside the others on disk but were never in this list,
+    # so `run_offline.py` reported PASS across the board while they failed
+    # unrun. test_health_probes had three assertions failing against the
+    # health payload and one against the unprobeable list, and nothing said
+    # so -- the suite has to be in the runner to be a check at all.
+    ("test_health_probes", "health        migration probes and the health payload", True),
+    ("test_lifecycle", "lifecycle     tournament state transitions", True),
+    ("test_reopen", "reopen        undoing a confirmed result", True),
+    ("test_qualifiers", "qualifiers    who goes through, and into which slot", True),
+    ("test_fixture_routes", "fixtures      draw, edit, remove, and who may", True),
 ]
 
 

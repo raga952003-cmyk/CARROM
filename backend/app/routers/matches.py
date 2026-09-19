@@ -3,6 +3,7 @@ from app.database import get_admin_db
 from app.models.match import (
     ScoreSubmitSchema, BoardScoreSchema, TossSchema,
     MatchSidesSchema, WalkoverSchema, TieBreakSchema, MatchReopenSchema,
+    MatchFixtureUpdateSchema,
 )
 from app.utils.security import verify_admin
 from app.services.scoring_engine import (
@@ -14,11 +15,15 @@ from app.services.transaction_service import apply_board_result, confirm_match_r
 from app.services.qualification import try_auto_promote
 from app.services.access_control import require_tournament_access
 from app.services.audit_service import record_audit
-from app.services.state_machine import validate_match_transition, assert_match_scorable
+from app.services.state_machine import (
+    validate_match_transition, assert_match_scorable,
+    assert_tournament_not_terminal, canonical_tournament_status,
+    set_tournament_status,
+)
 from app.services.score_validation import validate_board_score
 from app.utils.serializers import serialize_board, serialize_match
 from app.utils.idempotency import IdempotencyGuard, get_idempotency_key
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 import logging
 import time
@@ -162,8 +167,29 @@ def walkover_columns(admin_db) -> tuple:
 async def start_match(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        current = _authorise_match(admin_db, id, admin, "match.start")
+        current, start_tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.start")
+        # A cancelled event is not being played, and a completed one already
+        # has been -- starting a match in either makes the tournament's own
+        # record untrue. Checked on start rather than on every scoring call:
+        # a match that cannot begin cannot be scored.
+        assert_tournament_not_terminal(start_tournament, "have a match started in it")
         validate_match_transition(current.get("status"), "live")
+
+        # Already running: leave the clock alone.
+        #
+        # validate_match_transition treats live->live as a no-op rather than
+        # an error, so a second press fell through to the update below and
+        # reset timer_started_at to now. The elapsed time is measured FROM
+        # that stamp, so a match twenty minutes in went back to zero. Probed:
+        # 1,200,007 ms lost, HTTP 200, nothing said.
+        #
+        # This is not a rare double-click. The scorer's Start button shows
+        # whenever their copy of the row still reads 'scheduled', so any stale
+        # tab, second device or umpire returning to the match screen is one
+        # tap from wiping the clock of a match in progress.
+        if current.get("status") == "live" and current.get("is_timer_running"):
+            return serialize_match(current)
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         res = admin_db.table("matches").update({
@@ -208,6 +234,11 @@ async def resume_match(id: str, admin = Depends(verify_admin)):
     try:
         current = _authorise_match(admin_db, id, admin, "match.resume")
         validate_match_transition(current.get("status"), "live")
+
+        # Resuming a match that was never paused is the same no-op, for the
+        # same reason: it would restart the clock from now.
+        if current.get("status") == "live" and current.get("is_timer_running"):
+            return serialize_match(current)
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         res = admin_db.table("matches").update({
@@ -545,9 +576,35 @@ async def update_board(
             # what it looks like: no change.
             had1, had2, _ = queen_award(
                 pb.get("queen_claimed_by"), pb.get("queen_covered"), corrected_rules)
+
+            # Floored at zero before the new award goes on.
+            #
+            # Taking the old queen back is a subtraction, and a correction that
+            # moves the queen to the other player subtracts it from somebody
+            # whose remaining coins are worth less than the bonus. Probed: a
+            # board stored 23-5 (20 coins plus a covered queen), corrected to
+            # "Ann scored 0, the queen was Ben's", stored -3 for Ann and took
+            # her match total to -3. A negative board is not a thing in carrom,
+            # and the figure feeds straight into net score difference, which is
+            # the league's tie-break.
+            #
+            # Zero is the right floor rather than an error: the remaining-coins
+            # path already floors at zero for the same reason
+            # (scoring_engine.board_result), so the two modes now agree.
+            base1 = max(0, data.player1_score - had1)
+            base2 = max(0, data.player2_score - had2)
             c_p1, c_p2, _ = apply_queen_points(
-                data.player1_score - had1, data.player2_score - had2,
+                base1, base2,
                 data.queen_claimed_by, data.queen_covered, corrected_rules,
+            )
+
+            # Validate what is about to be STORED, not only what was typed.
+            # validate_board_score above checked data.player1_score; the queen
+            # is added after it, so a correction could store a total above the
+            # ceiling that the original submission would have been refused for.
+            validate_board_score(
+                c_p1, c_p2, match_data, data.queen_claimed_by,
+                allow_scoreless_queen=True,
             )
 
         board_patch = {
@@ -946,9 +1003,11 @@ async def confirm_match(
             else:
                 lead = p1_wins - p2_wins
 
-            if lead == 0:
-                # Genuinely level. That is a tie to be broken, not a match to
-                # be finished -- and it needs a human either way.
+            is_league = str(m.get("stage") or "") == "league"
+
+            if lead == 0 and not is_league:
+                # A knockout cannot be left level: nothing advances out of it
+                # and the bracket stops there. That needs a human either way.
                 rule = m.get("tie_break_rule") or (rules.get("tieBreak") or "organizer_decision")
                 how = ("Play a deciding board, or award the match."
                        if rule == "additional_board"
@@ -961,11 +1020,29 @@ async def confirm_match(
                     ).format(p1_points, len([b for b in boards if b.get("status") == "completed"]), how),
                 )
 
+            # A level LEAGUE match is a draw, and a draw is a result.
+            #
+            # This refused every stage alike, so a drawn league match could
+            # never be confirmed at all -- and everything downstream of that
+            # was unreachable with it. `calculate_points_table` has a whole
+            # branch awarding pointsForDraw and a D column to show it;
+            # recalculate_match_scores deliberately leaves a level league
+            # match drawn and says so in its own comment. None of it could
+            # ever run. Worse, the match stayed unconfirmed for good, so
+            # league_is_complete never became true and a league+knockout
+            # tournament with one drawn match could never promote anybody.
+            #
+            # Probed: two players level after 1-1 boards, confirm answered 409
+            # and result_confirmed stayed false with no way forward but to
+            # award the match to somebody who did not win it.
+            drawn = lead == 0
             winner_is_p1 = lead > 0
             settled = {
                 "status": "completed",
-                "winner_id": m.get("player1_id") if winner_is_p1 else m.get("player2_id"),
-                "winner_name": m.get("player1_name") if winner_is_p1 else m.get("player2_name"),
+                "winner_id": None if drawn else (
+                    m.get("player1_id") if winner_is_p1 else m.get("player2_id")),
+                "winner_name": None if drawn else (
+                    m.get("player1_name") if winner_is_p1 else m.get("player2_name")),
                 "player1_board_wins": p1_wins,
                 "player2_board_wins": p2_wins,
                 "player1_total_points": p1_points,
@@ -1126,6 +1203,44 @@ async def reopen_match(id: str, data: MatchReopenSchema, admin = Depends(verify_
         }
         res = admin_db.table("matches").update(reopened).eq("id", id).execute()
 
+        # If the tournament was already finished, it is not any more.
+        #
+        # Reopening the match that decided a completed tournament used to
+        # succeed while leaving the tournament 'completed' with its recorded
+        # champion intact -- so the public page showed a champion beside a
+        # final that now had no winner, /complete refused to re-run ("already
+        # completed"), and there was no way to put either right.
+        #
+        # The correction is the point of this route, so the tournament comes
+        # back to in_progress with the champion cleared, and is completed
+        # again once the corrected result is confirmed.
+        reopened_tournament = (admin_db.table("tournaments").select(
+            "id, status, champion_name").eq(
+            "id", match["tournament_id"]).execute().data or [None])[0]
+        reopened_event = False
+        if reopened_tournament and canonical_tournament_status(
+                reopened_tournament.get("status")) == "completed":
+            try:
+                admin_db.table("tournaments").update({
+                    "champion_id": None,
+                    "champion_name": None,
+                    "completed_at": None,
+                }).eq("id", match["tournament_id"]).execute()
+                set_tournament_status(admin_db, match["tournament_id"], "in_progress")
+                reopened_event = True
+                logger.info(
+                    "Tournament %s was completed; reopening match %s returned it to "
+                    "in_progress and cleared champion %r.",
+                    match["tournament_id"], id, reopened_tournament.get("champion_name"),
+                )
+            except Exception as e:
+                # The match is already reopened; say the tournament did not
+                # follow rather than fail the correction the organiser needs.
+                logger.error(
+                    "Reopened match %s but could not reopen tournament %s: %s",
+                    id, match["tournament_id"], e,
+                )
+
         # Pull the winner back out of the slot they were advanced into -- and
         # only them. If someone else is standing there the bracket has been
         # edited by hand since, and guessing would be worse than leaving it.
@@ -1219,12 +1334,48 @@ async def resolve_tie_break(id: str, data: TieBreakSchema, admin = Depends(verif
     """
     admin_db = get_admin_db()
     try:
-        match = _authorise_match(admin_db, id, admin, "match.confirm")
+        match, tb_tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.confirm")
 
         if match.get("result_confirmed"):
             raise HTTPException(
                 status_code=409,
                 detail="This result is already confirmed.",
+            )
+
+        # Only a match that is ACTUALLY level may be ruled on.
+        #
+        # The route checked that the named winner was one of the two players
+        # and that a reason was given, but never that there was a tie to
+        # break. So it would take a cleanly decided match and hand it to the
+        # other player: probed a 2-0 win, called tie-break naming the loser,
+        # got 200 and a match whose winner had lost it. The board wins and
+        # points were left untouched, so the record then contradicted itself.
+        #
+        # Level is recomputed from the boards, the same way /confirm does it,
+        # rather than trusted from the row -- and tie_break_required is
+        # honoured on its own because the sets layer sets it for a match that
+        # is level on sets rather than on this comparison.
+        tb_boards = admin_db.table("boards").select("*").eq(
+            "match_id", id).order("board_number").execute().data or []
+        tb_rules = (tb_tournament or {}).get("rules") or {}
+        tb_recomputed = recalculate_match_scores(match, tb_boards, tb_rules)
+        if scoring_mode(tb_rules) == "remaining_coins":
+            tb_lead = (tb_recomputed["player1TotalPoints"]
+                       - tb_recomputed["player2TotalPoints"])
+        else:
+            tb_lead = (tb_recomputed["player1BoardWins"]
+                       - tb_recomputed["player2BoardWins"])
+
+        if tb_lead != 0 and not match.get("tie_break_required"):
+            ahead = (match.get("player1_name") if tb_lead > 0
+                     else match.get("player2_name"))
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This match is not level -- {ahead} is ahead, so there is nothing "
+                    "to rule on. Confirm the result, or reopen it if the boards are wrong."
+                ),
             )
 
         p1, p2 = match.get("player1_id"), match.get("player2_id")
@@ -1530,4 +1681,373 @@ async def get_match_sets(id: str):
     except HTTPException:
         raise
     except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/{id}")
+async def remove_match(
+    id: str,
+    force: bool = Query(False,
+                        description="Delete a fixture that has play recorded on it."),
+    admin = Depends(verify_admin),
+):
+    """
+    Remove one fixture from a draw.
+
+    The counterpart to POST /tournaments/{id}/matches. A draw acquires fixtures
+    that should not be played -- a withdrawal, a pair fixtured twice, a
+    play-off added by mistake -- and until now the only way to be rid of one
+    was to regenerate the whole draw, which deletes every result in the
+    tournament.
+
+    Deleting a match takes its boards, its sets and its correction history with
+    it (all three cascade), and a league match leaves the points table the
+    moment it goes, so an unplayed fixture deletes freely and anything with
+    play on it needs `force` and is recorded in the audit log.
+    """
+    admin_db = get_admin_db()
+    try:
+        match, _tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "tournament.manage")
+        tournament_id = match["tournament_id"]
+
+        boards = admin_db.table("boards").select(
+            "id, status, player1_score, player2_score"
+        ).eq("match_id", id).execute().data or []
+        # The match row alone does not say whether anyone played. Under
+        # remaining-coins scoring a match stays 'live' until every board is in,
+        # so one with seven of eight boards scored is neither completed nor
+        # confirmed. Ask the boards.
+        #
+        # A board counts as played when it is finished or carries a score --
+        # NOT merely when it is not pending. Every match is drawn with its
+        # first board already 'in_progress', because that is how a board is
+        # queued for the umpire, so "not pending" is true of a fixture nobody
+        # has looked at and would refuse every deletion.
+        played_boards = [
+            b for b in boards
+            if b.get("status") == "completed"
+            or (b.get("player1_score") or 0)
+            or (b.get("player2_score") or 0)
+        ]
+        has_play = bool(
+            match.get("result_confirmed")
+            or match.get("status") in ("live", "paused", "completed")
+            or played_boards
+        )
+
+        if has_play and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Match {} ({} v {}) has play recorded on it: status {}, {} confirmed, "
+                    "{} board(s) scored. Deleting it discards those scores and the "
+                    "correction history with them, and removes the result from the points "
+                    "table. Reopen and correct it instead, or confirm you want it deleted."
+                ).format(
+                    match.get("match_number"), match.get("player1_name"),
+                    match.get("player2_name"), match.get("status"),
+                    "result" if match.get("result_confirmed") else "no result",
+                    len(played_boards),
+                ),
+            )
+
+        # A knockout match that others feed into is the round they advance to.
+        # next_match_id is ON DELETE SET NULL, so deleting it would quietly
+        # orphan them -- no error, and the winners simply stop advancing.
+        feeders = admin_db.table("matches").select(
+            "id, match_number, round_name"
+        ).eq("next_match_id", id).execute().data or []
+        if feeders and not force:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Match {} is the round {} other match(es) advance into, and deleting it "
+                    "would leave them with nowhere to send their winners. Delete those "
+                    "first, or redraw the knockout stage."
+                ).format(match.get("match_number"), len(feeders)),
+            )
+
+        # This match may already have put its winner into the next round. That
+        # slot has to go back to waiting, or the bracket shows a finalist from
+        # a quarter-final that no longer exists.
+        cleared_slot = None
+        parent_id, slot = match.get("next_match_id"), match.get("next_match_slot")
+        if parent_id and slot in ("player1", "player2"):
+            parent = (admin_db.table("matches").select(
+                "id, match_number, %s_id" % slot
+            ).eq("id", parent_id).execute().data or [None])[0]
+            if parent and parent.get("%s_id" % slot) and parent["%s_id" % slot] == match.get("winner_id"):
+                admin_db.table("matches").update({
+                    "%s_id" % slot: None,
+                    "%s_name" % slot: "Winner TBD",
+                }).eq("id", parent_id).execute()
+                cleared_slot = {"matchNumber": parent.get("match_number"), "slot": slot}
+
+        admin_db.table("matches").delete().eq("id", id).execute()
+
+        record_audit(
+            admin_db, actor=admin, action="match.delete",
+            entity_type="match", entity_id=id,
+            previous_state={
+                "matchNumber": match.get("match_number"),
+                "stage": match.get("stage"),
+                "roundName": match.get("round_name"),
+                "player1Name": match.get("player1_name"),
+                "player2Name": match.get("player2_name"),
+                "status": match.get("status"),
+                "resultConfirmed": match.get("result_confirmed"),
+                "winnerName": match.get("winner_name"),
+            },
+            request_context={
+                "forced": force,
+                "boardsDeleted": len(boards),
+                "boardsWithPlay": len(played_boards),
+                "orphanedFeeders": [f.get("match_number") for f in feeders],
+            },
+        )
+
+        return {
+            "status": "success",
+            "message": "Match {} ({} v {}) was removed.".format(
+                match.get("match_number"), match.get("player1_name"),
+                match.get("player2_name")),
+            "matchId": id,
+            "tournamentId": tournament_id,
+            "stage": match.get("stage"),
+            "boardsDeleted": len(boards),
+            "discardedPlay": has_play,
+            # Named rather than silently repaired: whoever deleted this has to
+            # know the bracket now has holes in it.
+            "orphanedFeeders": [
+                {"matchNumber": f.get("match_number"), "roundName": f.get("round_name")}
+                for f in feeders
+            ],
+            "clearedSlot": cleared_slot,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Deleting match %s failed: %s", id, e)
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _approved_entrants(admin_db, tournament_id: str) -> Dict[str, Any]:
+    """{participant_id: {name, type}} for everyone approved in a tournament."""
+    regs = admin_db.table("registrations").select(
+        "*, player:profiles(*), team:teams(*)"
+    ).eq("tournament_id", tournament_id).eq("status", "approved").execute().data or []
+
+    entrants: Dict[str, Any] = {}
+    for r in regs:
+        if r.get("type") == "singles" and r.get("player"):
+            entrants[r["player"]["id"]] = {"name": r["player"]["name"], "type": "singles"}
+        elif r.get("type") == "doubles" and r.get("team"):
+            entrants[r["team"]["id"]] = {"name": r["team"]["name"], "type": "doubles"}
+    return entrants
+
+
+def _schedule_clashes(admin_db, match: Dict[str, Any], tournament_id: str,
+                      date: Optional[str], time: Optional[str],
+                      board: Optional[int], sides: tuple) -> List[str]:
+    """
+    Who else is already booked into this slot.
+
+    Reported, not refused. An organiser moving a match knows things the draw
+    does not -- a board freed early, a pair who agreed to play late -- and the
+    auto-scheduler is there for anyone who wants the conflict-free version.
+    What they must not do is create a clash without being told.
+    """
+    if not date or not time:
+        return []
+
+    others = admin_db.table("matches").select(
+        "id, match_number, board_number, scheduled_date, scheduled_time, "
+        "player1_id, player2_id, player1_name, player2_name"
+    ).eq("tournament_id", tournament_id).eq(
+        "scheduled_date", date).eq("scheduled_time", time).execute().data or []
+
+    clashes = []
+    for other in others:
+        if other["id"] == match["id"]:
+            continue
+        if board is not None and other.get("board_number") == board:
+            clashes.append(
+                "board %s at %s on %s is already match %s"
+                % (board, time, date, other.get("match_number")))
+        for pid in sides:
+            if pid and pid in (other.get("player1_id"), other.get("player2_id")):
+                name = (other.get("player1_name") if pid == other.get("player1_id")
+                        else other.get("player2_name"))
+                clashes.append(
+                    "%s is already playing match %s at that time"
+                    % (name, other.get("match_number")))
+    return clashes
+
+
+@router.put("/{id}")
+async def update_match_fixture(
+    id: str,
+    data: MatchFixtureUpdateSchema,
+    force: bool = Query(False,
+                        description="Re-pair a fixture that has play recorded on it."),
+    admin = Depends(verify_admin),
+):
+    """
+    Edit a fixture: who plays it, what round it belongs to, and when and where.
+
+    The U of the draw's CRUD. A fixture could be created and removed but never
+    corrected, so a pairing entered wrong, a match moved to another board, or a
+    round misnamed all had to be deleted and made again -- which loses the
+    match number, and any boards already scored with it.
+
+    This does not touch the result. Scores, board wins and the winner are the
+    scoring engine's, and are changed by correcting boards and reconfirming.
+    Only the fields present in the request are written.
+    """
+    admin_db = get_admin_db()
+    try:
+        match, _tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "tournament.manage")
+        tournament_id = match["tournament_id"]
+
+        patch: Dict[str, Any] = {}
+        warnings: List[str] = []
+
+        # ---- who plays -----------------------------------------------------
+        repairing = (
+            (data.player1_id is not None and data.player1_id != match.get("player1_id"))
+            or (data.player2_id is not None and data.player2_id != match.get("player2_id"))
+        )
+        moving_stage = data.stage is not None and data.stage != match.get("stage")
+
+        if repairing or moving_stage:
+            boards = admin_db.table("boards").select(
+                "id, status, player1_score, player2_score"
+            ).eq("match_id", id).execute().data or []
+            # A board is play when it is finished or carries a score. Every
+            # match is drawn with its first board already in_progress, which is
+            # how it is queued for the umpire, not a sign it was played.
+            played = [
+                b for b in boards
+                if b.get("status") == "completed"
+                or (b.get("player1_score") or 0)
+                or (b.get("player2_score") or 0)
+            ]
+            if (match.get("result_confirmed") or played) and not force:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Match {} has {} and {} board(s) scored. Changing who plays it, or "
+                        "which stage it belongs to, would attach those scores to a different "
+                        "pairing and rewrite the points table under them. Reopen and correct "
+                        "the boards instead, or confirm you want the fixture re-paired."
+                    ).format(
+                        match.get("match_number"),
+                        "a confirmed result" if match.get("result_confirmed") else "no confirmed result",
+                        len(played),
+                    ),
+                )
+            if match.get("result_confirmed") or played:
+                warnings.append(
+                    "%d board(s) and any result stay on this fixture under the new pairing"
+                    % len(played))
+
+        if repairing:
+            p1 = data.player1_id if data.player1_id is not None else match.get("player1_id")
+            p2 = data.player2_id if data.player2_id is not None else match.get("player2_id")
+            if p1 and p2 and p1 == p2:
+                raise HTTPException(
+                    status_code=422,
+                    detail="A player cannot be fixtured against themselves.")
+
+            entrants = _approved_entrants(admin_db, tournament_id)
+            for slot, pid in (("Player 1", data.player1_id), ("Player 2", data.player2_id)):
+                if pid is None:
+                    continue
+                if pid not in entrants:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="%s is not an approved entrant in this tournament." % slot)
+
+            # Singles and doubles are separate competitions; a knockout slot
+            # that is still a placeholder has no type of its own to compare.
+            types = {entrants[pid]["type"]
+                     for pid in (p1, p2) if pid and pid in entrants}
+            if len(types) > 1:
+                raise HTTPException(
+                    status_code=422,
+                    detail="A singles player cannot be fixtured against a doubles team.")
+
+            for n, pid in ((1, data.player1_id), (2, data.player2_id)):
+                if pid is None:
+                    continue
+                patch["player%d_id" % n] = pid
+                patch["player%d_name" % n] = entrants[pid]["name"]
+
+        if moving_stage:
+            patch["stage"] = data.stage
+            if match.get("result_confirmed"):
+                warnings.append(
+                    "a confirmed result moved out of the league leaves the points table; "
+                    "moved into it, it joins")
+
+        if data.round_name is not None:
+            patch["round_name"] = data.round_name
+
+        # ---- when and where -------------------------------------------------
+        if data.board_number is not None:
+            patch["board_number"] = data.board_number
+        if data.scheduled_date is not None:
+            patch["scheduled_date"] = data.scheduled_date
+        if data.scheduled_time is not None:
+            patch["scheduled_time"] = data.scheduled_time
+
+        if not patch:
+            raise HTTPException(
+                status_code=422,
+                detail="Nothing to change. Send at least one field to update.")
+
+        warnings.extend(_schedule_clashes(
+            admin_db, match, tournament_id,
+            patch.get("scheduled_date", match.get("scheduled_date")),
+            patch.get("scheduled_time", match.get("scheduled_time")),
+            patch.get("board_number", match.get("board_number")),
+            (patch.get("player1_id", match.get("player1_id")),
+             patch.get("player2_id", match.get("player2_id"))),
+        ))
+
+        admin_db.table("matches").update(patch).eq("id", id).execute()
+
+        record_audit(
+            admin_db, actor=admin, action="match.update_fixture",
+            entity_type="match", entity_id=id,
+            previous_state={k: match.get(k) for k in patch},
+            new_state=dict(patch),
+            request_context={
+                "forced": force,
+                "reason": data.reason,
+                "repaired": repairing,
+                "warnings": warnings,
+            },
+        )
+
+        updated = (admin_db.table("matches").select("*").eq(
+            "id", id).execute().data or [match])[0]
+        boards = admin_db.table("boards").select("*").eq(
+            "match_id", id).order("board_number").execute().data or []
+
+        return {
+            "status": "success",
+            "message": "Match %s was updated." % updated.get("match_number"),
+            "changed": sorted(patch),
+            # Said out loud rather than enforced: the organiser may have a
+            # reason, but must not double-book a board by accident.
+            "warnings": warnings,
+            "match": serialize_match(updated, boards=boards),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Updating match %s failed: %s", id, e)
         raise HTTPException(status_code=400, detail=str(e))

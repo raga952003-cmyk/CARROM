@@ -88,22 +88,41 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
     }
   };
 
-  const getQualificationBadge = (rank: number) => {
-    if (tournament.format === 'league_knockout') {
-      if (rank <= 2) {
+  /**
+   * The cut comes from the server, not from a number written in here.
+   *
+   * This badged ranks 1-2 "Qualified" and 3-4 "Playoff Contender" whatever
+   * the draw. Every row already carries `isQualified`, computed by
+   * `qualifying_count` from the bracket the tournament actually has -- two per
+   * group in a group draw, or the seats in the knockout. So a tournament set
+   * to send its top 8 to the quarter-finals showed eight qualifiers in the
+   * server's answer and badged two of them on screen, which is the top-4
+   * problem organisers kept reporting, still visible after the engine was
+   * fixed.
+   */
+  const getQualificationBadge = (row: StandingsRow) => {
+    const rank = row.rank;
+    if (tournament.format === 'league_knockout' || row.isQualified) {
+      if (row.isQualified) {
         return (
           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
             Qualified (Knockouts)
           </span>
         );
-      } else if (rank <= 4) {
+      }
+      // The first name below the line: one result from going through, which
+      // is the thing worth pointing out on a table nobody has finished yet.
+      const cut = standings.filter(r => r.isQualified).length;
+      if (cut > 0 && rank === cut + 1) {
         return (
           <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-800">
-            Playoff Contender
+            First Reserve
           </span>
         );
       }
-    } else if (rank === 1) {
+      return null;
+    }
+    if (rank === 1) {
       return (
         <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
           Leader 👑
@@ -290,7 +309,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
                   <tr 
                     key={row.participantId} 
                     className={`hover:bg-gray-50/90 transition-colors ${
-                      row.rank <= 2 ? 'bg-emerald-50/20 font-medium' : ''
+                      row.isQualified ? 'bg-emerald-50/20 font-medium' : ''
                     }`}
                   >
                     <td className="px-4 py-3 font-bold text-gray-900">
@@ -333,7 +352,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
                     </td>
 
                     <td className="px-4 py-3 text-right">
-                      {getQualificationBadge(row.rank)}
+                      {getQualificationBadge(row)}
                     </td>
                   </tr>
                 ))

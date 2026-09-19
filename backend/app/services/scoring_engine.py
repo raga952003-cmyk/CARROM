@@ -165,7 +165,11 @@ def calculate_points_table(
     matches: List[Dict[str, Any]],
     participants: List[Dict[str, Any]],
     rules: Dict[str, Any],
-    qualifying_count: Optional[int] = 4,
+    # None means "nobody said", which is not the same as being told four.
+    # The body still falls back to four, so every existing caller is
+    # unaffected -- but the distinction is what lets a defaulted cut that
+    # covers the whole field be dropped while an explicit one is honoured.
+    qualifying_count: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     standings_map = {}
 
@@ -280,6 +284,23 @@ def calculate_points_table(
 
     rows.sort(key=sort_key)
 
+    # Head-to-head, applied last and only among the still-tied.
+    #
+    # Both the points table and the create-tournament form tell organisers
+    # that a tie is settled by "Head-to-Head match outcome". It never ran:
+    # rules.tiebreakerRules stored the word and no ranking code read it, so
+    # entrants level on every counted column were separated ALPHABETICALLY --
+    # the player who won the meeting could be ranked below the player they
+    # beat, and in a league feeding a knockout that decides who goes through.
+    #
+    # It cannot be a sort key: beating someone is not transitive, so A>B>C>A
+    # is a real possibility and no ordering satisfies it. So it runs as a
+    # pass over the groups that are still tied after every numeric column,
+    # scoring a mini-league of only the matches those entrants played against
+    # each other. A group that stays level after that keeps the alphabetical
+    # order it already had, which at least is stable.
+    _apply_head_to_head(rows, league_matches, standings_map, pts_win, pts_draw, pts_loss)
+
     # Assign ranks, and mark who goes through. How many that is depends on the
     # draw this table feeds -- two from each group, or as many as the knockout
     # has seats -- and only the caller knows that, so it says. It used to be a
@@ -290,11 +311,92 @@ def calculate_points_table(
         cut = 4 if qualifying_count is None else max(0, int(qualifying_count))
     except (TypeError, ValueError):
         cut = 4
+    # "Everyone qualifies" is not information -- but only when nobody asked.
+    #
+    # A plain league takes the legacy cut of four, so a league of three or
+    # four came back with every row flagged, including the entrant in last
+    # place, who was told they had gone through to a knockout that does not
+    # exist. That is the default guessing wrong, so the guess is dropped.
+    #
+    # A cut the CALLER supplied is honoured as given, even when it covers the
+    # field: it comes from the seats the bracket actually has, the caller is
+    # better informed than this function, and a test pins that contract.
+    if qualifying_count is None and cut >= len(rows):
+        cut = 0
+
     for idx, r in enumerate(rows):
         r["rank"] = idx + 1
         r["isQualified"] = (idx < cut)
 
     return rows
+
+
+def _apply_head_to_head(rows, league_matches, standings_map,
+                        pts_win, pts_draw, pts_loss) -> None:
+    """
+    Re-order each run of entrants that every numeric column left level.
+
+    Scored as a mini-league over only the matches the tied entrants played
+    against one another: the same win/draw/loss values the main table uses,
+    then the board difference and score difference of those matches alone.
+    Anyone the group never played simply scores nothing from it, which is the
+    honest answer -- they have no head-to-head to be judged on.
+    """
+    def numeric_key(r):
+        return (r["points"], r["won"], r["boardDiff"], r["scoreDiff"], r["scoreFor"])
+
+    start = 0
+    while start < len(rows):
+        end = start + 1
+        while end < len(rows) and numeric_key(rows[end]) == numeric_key(rows[start]):
+            end += 1
+
+        if end - start > 1:
+            tied = {r["participantId"] for r in rows[start:end]}
+            mini = {pid: {"points": 0, "boardDiff": 0, "scoreDiff": 0} for pid in tied}
+
+            for m in league_matches:
+                p1 = m.get("player1Id") or m.get("player1_id")
+                p2 = m.get("player2Id") or m.get("player2_id")
+                if p1 not in tied or p2 not in tied:
+                    continue
+
+                b1 = (m.get("player1BoardWins") if "player1BoardWins" in m
+                      else m.get("player1_board_wins")) or 0
+                b2 = (m.get("player2BoardWins") if "player2BoardWins" in m
+                      else m.get("player2_board_wins")) or 0
+                s1 = (m.get("player1TotalPoints") if "player1TotalPoints" in m
+                      else m.get("player1_total_points")) or 0
+                s2 = (m.get("player2TotalPoints") if "player2TotalPoints" in m
+                      else m.get("player2_total_points")) or 0
+                winner = m.get("winnerId") or m.get("winner_id")
+
+                mini[p1]["boardDiff"] += b1 - b2
+                mini[p2]["boardDiff"] += b2 - b1
+                mini[p1]["scoreDiff"] += s1 - s2
+                mini[p2]["scoreDiff"] += s2 - s1
+
+                if winner == p1:
+                    mini[p1]["points"] += pts_win
+                    mini[p2]["points"] += pts_loss
+                elif winner == p2:
+                    mini[p2]["points"] += pts_win
+                    mini[p1]["points"] += pts_loss
+                else:
+                    mini[p1]["points"] += pts_draw
+                    mini[p2]["points"] += pts_draw
+
+            rows[start:end] = sorted(
+                rows[start:end],
+                key=lambda r: (
+                    -mini[r["participantId"]]["points"],
+                    -mini[r["participantId"]]["boardDiff"],
+                    -mini[r["participantId"]]["scoreDiff"],
+                    r["participantName"],
+                ),
+            )
+
+        start = end
 
 
 def queen_award(

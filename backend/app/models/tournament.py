@@ -25,6 +25,9 @@ class TournamentRulesSchema(BaseCamelModel):
     # have to exist here for the setting to survive tournament creation.
     group_count: Optional[int] = None
     qualifiers_per_group: Optional[int] = None
+    # How many league finishers reach the knockout in a league_knockout draw.
+    # None keeps the engine's historical four.
+    knockout_qualifiers: Optional[int] = None
     # Board scoring. Associations score carrom differently, so the engine reads
     # these rather than assuming. Same caveat as above: an undeclared field is
     # dropped by the model, so it would never reach the scoring engine.

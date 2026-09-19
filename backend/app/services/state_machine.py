@@ -44,8 +44,19 @@ TOURNAMENT_TRANSITIONS: Dict[str, Set[str]] = {
                            "registration_closed", "cancelled"},
     "fixture_published": {"in_progress", "fixture_generation", "cancelled"},
     "in_progress": {"completed", "fixture_published", "cancelled"},
-    "completed": set(),          # terminal
-    "cancelled": set(),          # terminal
+    # Terminal to every lifecycle VERB: /start, /complete and /cancel all go
+    # through validate_tournament_transition and are refused from here.
+    #
+    # There is exactly one way back, and it is not a transition an organiser
+    # can ask for directly: reopening the match that DECIDED a completed
+    # tournament returns it to in_progress and clears the recorded champion
+    # (routers/matches.reopen_match). That path writes through
+    # set_tournament_status, which persists without consulting this table, so
+    # the correction works without opening the edge to anything else. Adding
+    # {"in_progress"} here instead let POST /start un-complete a finished
+    # tournament outright, which is how the lifecycle suite caught it.
+    "completed": set(),
+    "cancelled": set(),          # terminal, with no way back at all
 }
 
 MATCH_TRANSITIONS: Dict[str, Set[str]] = {
@@ -142,6 +153,93 @@ def assert_tournament_accepts_registrations(tournament: Dict) -> None:
             status_code=409,
             detail=f"Registration is not open for this tournament (state: {status}).",
         )
+
+
+# The two states a tournament does not come back from. `cancelled` means the
+# event is not happening; `completed` means it already has and a champion is
+# recorded against it.
+TERMINAL_TOURNAMENT_STATES = ("completed", "cancelled")
+
+
+def assert_tournament_not_terminal(tournament: Dict, action: str) -> None:
+    """
+    Refuse an action that rewrites a tournament which is over.
+
+    The lifecycle verbs guard themselves -- /start, /complete and /cancel all
+    go through validate_tournament_transition -- but the routes that CHANGE A
+    FINISHED TOURNAMENT'S CONTENTS never asked. Verified by probe: on a
+    cancelled tournament an organiser could still force a redraw (deleting and
+    rebuilding every match), publish the schedule (which fanned out "Match
+    Schedule Published! Check your boards and timings" to all five
+    participants of an event that is not happening), start a match, and add a
+    fixture. The same was true of a completed one, where a redraw deletes the
+    very matches the recorded champion was read from -- leaving a champion
+    displayed beside an unplayed draw.
+
+    Not applied to reads, to standings, or to the verbs themselves. This is for
+    the writes that would make a finished tournament's record untrue.
+    """
+    status = canonical_tournament_status(tournament.get("status"))
+    if status in TERMINAL_TOURNAMENT_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This tournament is {status}, so it cannot {action}. "
+                + ("Reopening a cancelled tournament is not supported; create a new one."
+                   if status == "cancelled"
+                   else "Its result is recorded and its matches are the evidence for it.")
+            ),
+        )
+
+
+def assert_participants_can_be_added(tournament: Dict, force: bool = False) -> None:
+    """
+    Whether anyone may still be entered -- organisers included.
+
+    `assert_tournament_accepts_registrations` above was applied to players
+    only: an admin could enter participants at any stage, deliberately, so a
+    late entry was possible after the desk had closed. But nothing narrowed
+    that as the tournament moved on, so a participant could be added to a
+    tournament whose draw was already generated and half played. They appear in
+    the entry list and in nothing else -- no fixtures, no place in the table --
+    and the only way to give them any is to regenerate the draw, which deletes
+    every result in it.
+
+    Closing registration is the moment the entry list becomes the thing the
+    draw is made from, so that is where this stops. `force` is the organiser
+    saying they know, and is audited by the routes that offer it; the app does
+    not send it, so in the interface the option is simply gone.
+    """
+    if force:
+        return
+    status = canonical_tournament_status(tournament.get("status"))
+    if status == "registration_open":
+        return
+    if status in ("draft", None):
+        # Nothing has been announced yet; the entry list is still being built.
+        return
+    # The advice has to be advice the server will actually accept. Reopening
+    # is only reachable from registration_closed and fixture_generation --
+    # TOURNAMENT_TRANSITIONS gives fixture_published no edge back to
+    # registration_open -- so offering it from a published draw sent
+    # organisers to a button that answers 409.
+    can_reopen = "registration_open" in TOURNAMENT_TRANSITIONS.get(status, set())
+    if can_reopen:
+        advice = ("Reopen registration to add someone, or add a match for them "
+                  "from the Fixtures tab if the draw is already made.")
+    elif status in TERMINAL_TOURNAMENT_STATES:
+        advice = "This tournament is over; nothing further can be entered."
+    else:
+        advice = ("The draw is already published, so registration cannot be "
+                  "reopened. Add a match for them from the Fixtures tab instead.")
+
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Registration is closed for this tournament (state: {status}), so no further "
+            f"participants can be entered. {advice}"
+        ),
+    )
 
 
 # Reverse of TOURNAMENT_ALIASES: the state name the *original* schema's CHECK

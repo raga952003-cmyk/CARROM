@@ -31,10 +31,13 @@ from app.services.state_machine import (
     validate_tournament_transition,
     canonical_tournament_status,
     assert_tournament_accepts_registrations,
+    assert_participants_can_be_added,
+    assert_tournament_not_terminal,
     set_tournament_status,
     LIFECYCLE_MIGRATION,
 )
 from app.routers.standings import compute_standings
+from app.services.razorpay_client import rupees_to_paise
 from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime, timezone
 import time
@@ -43,6 +46,59 @@ import logging
 import secrets
 
 logger = logging.getLogger("uvicorn.error")
+
+def _entrants_already_in(admin_db, tournament_id: str) -> Dict[str, str]:
+    """
+    {participant_id: display name} for everyone already entered, singles and
+    doubles alike.
+
+    Rejected entries are excluded -- an organiser who turned somebody away has
+    not used up their place -- but pending and approved both count, because a
+    second entry made while the first is queued is the same problem.
+    """
+    rows = admin_db.table("registrations").select(
+        "player_id, team_id, status"
+    ).eq("tournament_id", tournament_id).execute().data or []
+
+    live = [r for r in rows if r.get("status") != "rejected"]
+    entrants: Dict[str, str] = {}
+
+    team_ids = [r["team_id"] for r in live if r.get("team_id")]
+    if team_ids:
+        teams = admin_db.table("teams").select(
+            "id, player1_id, player2_id"
+        ).in_("id", team_ids).execute().data or []
+        for t in teams:
+            for pid in (t.get("player1_id"), t.get("player2_id")):
+                if pid:
+                    entrants[str(pid)] = ""
+
+    for r in live:
+        if r.get("player_id"):
+            entrants[str(r["player_id"])] = ""
+
+    if entrants:
+        names = admin_db.table("profiles").select("id, name").in_(
+            "id", list(entrants)).execute().data or []
+        for row in names:
+            entrants[str(row["id"])] = row.get("name") or "That player"
+
+    return {k: (v or "That player") for k, v in entrants.items()}
+
+
+def _missing_column(error: Exception, column: str) -> bool:
+    """
+    Whether this failure is Postgres refusing a column that is not there yet.
+
+    Same shape as access_control._looks_missing, kept local because the column
+    name is part of the question: a write that fails for any OTHER reason must
+    be re-raised, not quietly retried with a field dropped.
+    """
+    text = str(error).lower()
+    return column.lower() in text and any(
+        marker in text for marker in ("does not exist", "42703", "pgrst204", "schema cache")
+    )
+
 
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
 
@@ -733,15 +789,41 @@ async def get_tournament_registrations(id: str, viewer = Depends(get_optional_pr
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/{id}/registrations")
-async def register_for_tournament(id: str, data: RegistrationCreateSchema, profile = Depends(get_user_profile)):
+async def register_for_tournament(
+    id: str,
+    data: RegistrationCreateSchema,
+    force: bool = Query(False,
+                        description="Enter a participant after registration has closed."),
+    profile = Depends(get_user_profile),
+):
     admin_db = get_admin_db()
     try:
         tournament = admin_db.table("tournaments").select("*").eq("id", id).execute().data
         if not tournament:
             raise HTTPException(status_code=404, detail="Tournament not found.")
-        # Admins may enter participants at any stage; players only while open.
+        # A player may only enter while the desk is open. An organiser gets a
+        # little more room -- a draft tournament is still being built -- but
+        # not unlimited room: once registration closes the entry list is what
+        # the draw is made from, and someone added after that has no fixtures
+        # and no place in the table. `force` is theirs to pass deliberately.
         is_admin = profile.get("role") == "admin"
-        if not is_admin:
+        if is_admin:
+            # WHICH admin. This route was the only admin-facing tournament
+            # write without an ownership check: every other one -- fixtures,
+            # schedule, publish, add match, access -- goes through
+            # require_tournament_access, and this one went straight to the
+            # insert. So an admin who runs their own event could enter
+            # participants into somebody else's, auto-approved (the payload
+            # below sets status='approved' for an admin), skipping that
+            # organiser's approval queue entirely. Probed: /fixtures answered
+            # 403 for the same caller while this answered 200.
+            #
+            # `force` made it worse, because it also let them past the
+            # registration-closed guard and into a tournament already in play.
+            require_tournament_access(
+                admin_db, id, profile, "registration.create")
+            assert_participants_can_be_added(tournament[0], force=force)
+        else:
             assert_tournament_accepts_registrations(tournament[0])
 
         # Whose entry this is.
@@ -825,6 +907,32 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
                     detail="A player cannot be their own doubles partner.",
                 )
 
+            # Nobody plays twice. Checked BEFORE the team is created, so a
+            # refused entry leaves no orphan team behind.
+            #
+            # `unique_player_registration UNIQUE (tournament_id, player_id)`
+            # (schema.sql:80) stops a singles entrant entering twice -- but a
+            # doubles entry stores player_id NULL and the partner in a team,
+            # so the constraint never fires for it. Probed: Alice could enter
+            # with Bob AND with Cara, both approved, and the doubles draw then
+            # scheduled her for two matches in the same round with nothing
+            # preventing her meeting herself in the final.
+            #
+            # Done here rather than in the database because the answer spans
+            # two tables, and because the organiser needs to be told WHO is
+            # already in.
+            already = _entrants_already_in(admin_db, id)
+            for member_id in (player_id, partner_profile["id"]):
+                if str(member_id) in already:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"{already[str(member_id)]} is already entered in this "
+                            "tournament. A player can only hold one entry, whether "
+                            "singles or as part of a team."
+                        ),
+                    )
+
             # Find or create team
             # Check if team already exists for these 2 players
             team_res = admin_db.table("teams").select("*").or_(
@@ -853,17 +961,55 @@ async def register_for_tournament(id: str, data: RegistrationCreateSchema, profi
             # Reset player_id to NULL since it's a team registration
             player_id = None
 
+        # What this entry costs, fixed at the moment of entry.
+        #
+        # Snapshotted rather than read from the tournament when the player
+        # pays: an organiser may raise the fee, or correct a typo in it, while
+        # registration is open, and whoever entered under the old figure owes
+        # the old figure. It is also what a receipt has to quote, and
+        # `tournaments.entry_fee` stops being able to answer that the moment it
+        # is edited.
+        fee_paise = rupees_to_paise(tournament[0].get("entry_fee"))
+
+        # A free tournament has nothing to collect, so its entries are marked
+        # waived rather than left pending forever waiting on a payment that
+        # will never come. An admin entering somebody at the desk is taking the
+        # money in person, so those are waived here too -- the alternative is
+        # an organiser-created entry that the app insists is unpaid.
+        if fee_paise <= 0 or is_admin:
+            payment_status = "waived"
+        else:
+            payment_status = "pending"
+
         # Create registration record
         reg_payload = {
             "tournament_id": id,
             "type": data.type,
             "player_id": player_id,
             "team_id": team_id,
-            "status": "approved" if profile.get("role") == "admin" else "pending", # auto-approve if admin registering them
-            "payment_status": "pending",
+            "status": "approved" if is_admin else "pending", # auto-approve if admin registering them
+            "payment_status": payment_status,
             "notes": data.notes
         }
-        res = admin_db.table("registrations").insert(reg_payload).execute()
+
+        # fee_paise arrives with migration 015. Retried without it rather than
+        # failing the entry: an organiser mid-event should not lose
+        # registrations because a migration has not been pasted in yet, and the
+        # payment router falls back to the tournament's current fee when the
+        # snapshot is absent.
+        try:
+            res = admin_db.table("registrations").insert(
+                dict(reg_payload, fee_paise=fee_paise)
+            ).execute()
+        except Exception as e:
+            if not _missing_column(e, "fee_paise"):
+                raise
+            logger.warning(
+                "registrations.fee_paise is missing; apply "
+                "db/migrations/015_payments.sql. Entry recorded without a fee snapshot."
+            )
+            res = admin_db.table("registrations").insert(reg_payload).execute()
+
         return serialize_registration(res.data[0])
     except HTTPException:
         raise
@@ -885,6 +1031,7 @@ async def generate_fixtures(id: str, force: bool = Query(False,
         )
     try:
         t = require_tournament_access(admin_db, id, admin, "tournament.fixtures")
+        assert_tournament_not_terminal(t, "be drawn again")
 
         # Load approved registrations
         reg_res = admin_db.table("registrations").select("*, player:profiles(*), team:teams(*)").eq("tournament_id", id).eq("status", "approved").execute()
@@ -927,6 +1074,31 @@ async def generate_fixtures(id: str, force: bool = Query(False,
             format_type in ("group_stage", "group_knockout")
         qualifiers_per_group = int(rules.get("qualifiersPerGroup") or 2)
 
+        # A league feeding a knockout: how many go through. Read here so both
+        # spellings work and a bad value cannot reach the engine.
+        raw_ko = rules.get("knockoutQualifiers") or rules.get("knockout_qualifiers")
+        knockout_qualifiers = None
+        if raw_ko not in (None, ""):
+            # Refused rather than clamped. The engine takes max(2, min(n, field))
+            # so -4, 0 and 1 all quietly became a two-slot bracket -- a
+            # tournament drawn as a single Final, reported as success, from a
+            # value that was plainly a mistake. An organiser who typed
+            # something wrong needs to be told, not have it rounded into
+            # something legal.
+            try:
+                knockout_qualifiers = int(raw_ko)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"knockoutQualifiers must be a whole number, not {raw_ko!r}.",
+                )
+            if knockout_qualifiers < 2:
+                raise HTTPException(
+                    status_code=422,
+                    detail=("knockoutQualifiers must be at least 2 -- a knockout "
+                            f"needs two finalists. Got {knockout_qualifiers}."),
+                )
+
         def build(pool: List[Dict[str, Any]], prefix: str) -> List[Dict[str, Any]]:
             group_count = int(requested_groups) if requested_groups else suggest_group_count(len(pool))
 
@@ -945,7 +1117,12 @@ async def generate_fixtures(id: str, force: bool = Query(False,
                 return generate_round_robin_fixtures(id, pool, max_boards, number_of_sets=number_of_sets, id_prefix=prefix + "rr")
             if format_type == "knockout":
                 return generate_knockout_bracket(id, pool, max_boards, number_of_sets=number_of_sets, id_prefix=prefix + "ko")
-            return generate_league_knockout_fixtures(id, pool, max_boards, number_of_sets=number_of_sets, id_prefix=prefix)
+            # How many league finishers reach the knockout, as the organiser
+            # set it when creating the tournament. Absent, the engine keeps
+            # its historical four.
+            return generate_league_knockout_fixtures(
+                id, pool, max_boards, number_of_sets=number_of_sets,
+                id_prefix=prefix, knockout_qualifiers=knockout_qualifiers)
 
         matches = []
         per_category: Dict[str, int] = {}
@@ -989,14 +1166,22 @@ async def generate_fixtures(id: str, force: bool = Query(False,
         # in, so one with seven of eight boards scored is neither confirmed nor
         # completed -- it passed a guard that checked only those two and was
         # deleted along with its boards and its correction history. Ask the
-        # boards instead: anything not pending, or carrying a score, is play.
+        # boards instead: a board that is finished, or carries a score, is play.
+        #
+        # "Anything not pending" was too wide. Every match is drawn with its
+        # first board already 'in_progress' -- that is how a board is queued for
+        # the umpire, not a sign anyone has played it -- so a draw nobody had
+        # touched reported one board of play per match. Redrawing it needed
+        # force, under a message promising to delete results that did not
+        # exist, which is exactly the warning an organiser has to be able to
+        # trust when it is real.
         played_boards = 0
         match_ids = [m["id"] for m in existing]
         for start in range(0, len(match_ids), 100):
             for b in (admin_db.table("boards").select(
                 "id, status, player1_score, player2_score"
             ).in_("match_id", match_ids[start:start + 100]).execute().data or []):
-                if (b.get("status") != "pending"
+                if (b.get("status") == "completed"
                         or (b.get("player1_score") or 0)
                         or (b.get("player2_score") or 0)):
                     played_boards += 1
@@ -1172,6 +1357,7 @@ async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depen
     admin_db = get_admin_db()
     try:
         t = require_tournament_access(admin_db, id, admin, "tournament.schedule")
+        assert_tournament_not_terminal(t, "be rescheduled")
 
         # Load all matches
         matches_res = admin_db.table("matches").select("*").eq("tournament_id", id).execute()
@@ -1274,7 +1460,11 @@ async def generate_schedule(id: str, restMinutes: int = Query(10), admin = Depen
 async def publish_schedule(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        require_tournament_access(admin_db, id, admin, "tournament.publish")
+        published_t = require_tournament_access(admin_db, id, admin, "tournament.publish")
+        # Checked BEFORE the write and before the fan-out: this route notifies
+        # every participant, and an event that is cancelled or already over
+        # must not tell people to check their boards and timings.
+        assert_tournament_not_terminal(published_t, "publish a schedule")
         admin_db.table("tournaments").update({"schedule_published": True}).eq("id", id).execute()
         
         # Load tournament name
@@ -1515,6 +1705,7 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
     admin_db = get_admin_db()
     try:
         t = require_tournament_access(admin_db, id, admin, "tournament.manage")
+        assert_tournament_not_terminal(t, "take a new fixture")
 
         if data.player1_id == data.player2_id:
             raise HTTPException(status_code=422, detail="A player cannot be fixtured against themselves.")

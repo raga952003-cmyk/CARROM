@@ -23,6 +23,23 @@ class Settings(BaseSettings):
     # never inlined into the frontend bundle.
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 
+    # Razorpay. RAZORPAY_KEY_ID identifies the account and is handed to the
+    # browser checkout widget; RAZORPAY_KEY_SECRET signs orders and verifies
+    # payment signatures, and must stay server-side.
+    #
+    # The key_id carries its own environment: rzp_test_* only ever touches
+    # Razorpay's test mode, rzp_live_* moves real money. Swapping one pair for
+    # the other is the whole of "going live" -- there is no separate mode flag.
+    RAZORPAY_KEY_ID: str = os.getenv("RAZORPAY_KEY_ID", "")
+    RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
+
+    # Set when the webhook is created in the Razorpay dashboard. A DIFFERENT
+    # value from RAZORPAY_KEY_SECRET, and per-mode: the test webhook and the
+    # live webhook have their own secrets. Without it the webhook endpoint
+    # refuses every delivery, which is the safe failure -- an unverified
+    # webhook is an open endpoint for marking entries paid.
+    RAZORPAY_WEBHOOK_SECRET: str = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+
     # Comma-separated list of allowed browser origins, used outside development.
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
 

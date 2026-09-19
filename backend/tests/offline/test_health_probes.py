@@ -38,7 +38,8 @@ MIGRATIONS_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "db", "migration
 
 # The names the payload must always carry, whatever the schema looks like.
 UNPROBEABLE = {"008_drop_city_default", "009_stop_timer_on_finish",
-               "013_profiles_trigger_and_rls"}
+               "013_profiles_trigger_and_rls", "014_lock_profile_role",
+               "016_payment_ledger_integrity"}
 
 # 007 replaces a function, so it is probed by rpc rather than by column.
 RPC_PROBED = {"007_apply_board_result_sets"}
@@ -47,6 +48,13 @@ PAYLOAD_KEYS = {
     "status", "pending_migrations", "migrations", "env", "database_client",
     "database_admin_client", "transactional_writes", "idempotency",
     "tournament_ownership", "unprobeable_migrations",
+    # Which Razorpay mode the deployment is in. Test and live differ only by
+    # the key prefix, so this is the only place a person can see which one is
+    # configured without making a payment and watching for real money.
+    "payments",
+    # The resolved CORS posture. An open or blocking-all deployment is a
+    # configuration mistake, and this is where a person can see it.
+    "cors",
 }
 
 
@@ -203,7 +211,7 @@ def test_unprobeable_migrations_are_listed_not_claimed():
     check("unprobeable_migrations is a list",
           isinstance(listed, list), payload)
     names = {m.get("migration") for m in (listed or []) if isinstance(m, dict)}
-    check("the unprobeable list names 008, 009 and 013",
+    check("the unprobeable list names 008, 009, 013, 014 and 016",
           names == UNPROBEABLE, sorted(names))
     for m in listed or []:
         check("each unprobeable migration carries a one-line reason",

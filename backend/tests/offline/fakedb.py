@@ -38,6 +38,8 @@ _COL_FK = re.compile(
     r"[^,;]*?REFERENCES\s+(?:public\.)?([a-z_.]+)\s*\(\s*([a-z_]+)\s*\)",
     re.IGNORECASE,
 )
+_ON_DELETE = re.compile(r"ON\s+DELETE\s+(CASCADE|SET\s+NULL|SET\s+DEFAULT|RESTRICT|NO\s+ACTION)",
+                        re.IGNORECASE)
 _CREATE = re.compile(r"CREATE TABLE (?:IF NOT EXISTS )?(?:public\.)?([a-z_]+)",
                      re.IGNORECASE)
 _ALTER = re.compile(r"ALTER TABLE (?:IF EXISTS )?(?:public\.)?([a-z_]+)",
@@ -45,7 +47,17 @@ _ALTER = re.compile(r"ALTER TABLE (?:IF EXISTS )?(?:public\.)?([a-z_]+)",
 
 
 def parse_foreign_keys(paths):
-    """{(table, column): (ref_table, ref_column)} read from the real SQL."""
+    """
+    {(table, column): (ref_table, ref_column, on_delete)} read from the real SQL.
+
+    `on_delete` is "cascade", "set null" or "" (no action), taken from the
+    constraint itself. It used to be dropped, and every foreign key was treated
+    as ON DELETE CASCADE -- which is wrong for exactly the one that matters
+    most: matches.next_match_id is ON DELETE SET NULL, so deleting a
+    knockout match in Postgres orphans the matches that feed it, while the fake
+    deleted them outright. A guard against orphaning a bracket could not be
+    tested against a database that removed the evidence.
+    """
     fks = {}
     for path in paths:
         if not os.path.exists(path):
@@ -66,7 +78,11 @@ def parse_foreign_keys(paths):
                 m = _COL_FK.match(line)
                 if m and current:
                     col, ref_table, ref_col = m.group(1), m.group(2), m.group(3)
-                    fks[(current, col)] = (ref_table.split(".")[-1], ref_col)
+                    action = ""
+                    hit = _ON_DELETE.search(line)
+                    if hit:
+                        action = hit.group(1).lower().replace("  ", " ")
+                    fks[(current, col)] = (ref_table.split(".")[-1], ref_col, action)
     return fks
 
 
@@ -451,7 +467,7 @@ class FakeSupabase:
 
     # -- constraints ------------------------------------------------------
     def enforce_foreign_keys(self, table, row, changed=None):
-        for (t, col), (ref_table, ref_col) in self.foreign_keys.items():
+        for (t, col), (ref_table, ref_col, _action) in self.foreign_keys.items():
             if t != table or col not in row:
                 continue
             if changed is not None and col not in changed:
@@ -472,10 +488,29 @@ class FakeSupabase:
                             % (col, value, ref_table))
 
     def cascade_delete(self, table, row):
-        for (t, col), (ref_table, ref_col) in self.foreign_keys.items():
+        """
+        Apply what each constraint actually says, not CASCADE for all of them.
+
+        SET NULL is the difference between a bracket that loses its links and
+        one that loses its matches, and the app has a guard that only makes
+        sense against the first.
+        """
+        for (t, col), (ref_table, ref_col, action) in self.foreign_keys.items():
             if ref_table != table:
                 continue
             children = self.tables.get(t, [])
+            hits = [c for c in children if str(c.get(col)) == str(row.get(ref_col))]
+            if not hits:
+                continue
+            if action == "set null":
+                for c in hits:
+                    c[col] = None
+                continue
+            if action in ("restrict", "no action", ""):
+                # Postgres would refuse the delete. Nothing in this app relies
+                # on that, so leave the rows alone rather than inventing an
+                # error the real database would raise at a different moment.
+                continue
             self.tables[t] = [c for c in children
                               if str(c.get(col)) != str(row.get(ref_col))]
 

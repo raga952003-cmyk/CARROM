@@ -274,6 +274,7 @@ def generate_league_knockout_fixtures(
     max_boards: int = 3,
     number_of_sets: int = 1,
     id_prefix: str = "lk",
+    knockout_qualifiers: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Round-robin league followed by a knockout between the league's top finishers.
@@ -289,7 +290,25 @@ def generate_league_knockout_fixtures(
         number_of_sets=number_of_sets, id_prefix=f"{id_prefix}rr"
     )
 
-    qualifier_count = min(4, max(2, len(participants) // 2))
+    # How many league finishers reach the knockout.
+    #
+    # `knockout_qualifiers` is the organiser's answer, from the tournament
+    # rules. Without it this fell back to `min(4, ...)` -- a HARD CEILING of
+    # four, which meant a league-knockout draw could never produce anything
+    # larger than a semi-final. Twenty entrants and a description promising
+    # quarter-finals still got a four-slot bracket, and the only way to get
+    # eight was to not use this format at all.
+    #
+    # The default stays four so an existing tournament redraws exactly as it
+    # did before.
+    if knockout_qualifiers is None:
+        qualifier_count = min(4, max(2, len(participants) // 2))
+    else:
+        # Never more slots than there are people to fill them: a bracket with
+        # more seats than entrants leaves "League Rank #9" in a tournament of
+        # eight, which promotion can never resolve.
+        qualifier_count = max(2, min(int(knockout_qualifiers), len(participants)))
+
     # Round down to a power of two so the bracket has no byes of its own.
     bracket_slots = 2
     while bracket_slots * 2 <= qualifier_count:
@@ -397,7 +416,22 @@ def generate_group_stage_fixtures(
     if len(participants) < 2:
         return []
 
-    count = group_count or suggest_group_count(len(participants))
+    # Never more groups than the field can fill two apiece.
+    #
+    # A group of one has nobody to play, and the loop below skips any group
+    # with fewer than two members -- silently, so those entrants vanished from
+    # the draw entirely. Probed: 20 entrants with groupCount=16 drew 4 matches
+    # between 8 people and dropped the other 12; 8 entrants with groupCount=8
+    # drew NOTHING AT ALL -- zero matches, every approved, fee-paying entrant
+    # left out, and HTTP 200 reporting success.
+    #
+    # Clamped rather than refused because the engine is also called with a
+    # suggested count, and the organiser's intent ("as many groups as
+    # sensible") is better served by the largest workable number than by an
+    # error. The route validates the organiser's own figure separately, so a
+    # deliberate 16 is still told it was reduced.
+    requested = group_count or suggest_group_count(len(participants))
+    count = max(1, min(int(requested), len(participants) // 2))
     groups = allocate_groups(participants, count)
 
     matches: List[Dict[str, Any]] = []
@@ -419,6 +453,68 @@ def generate_group_stage_fixtures(
     for i, m in enumerate(matches, start=1):
         m["matchNumber"] = i
     return matches
+
+
+def _separate_groupmates(placeholders: List[Dict[str, Any]]) -> None:
+    """
+    Re-seed so no two qualifiers from one group meet in the opening round.
+
+    Two entrants from the same group have just played each other; opening the
+    knockout with a rematch wastes the group stage that separated them.
+
+    Which seeds meet is decided by `_seed_order`, which pairs seed s with
+    (bracket_size + 1 - s). Whether a given numbering avoids groupmates
+    therefore depends on the group count, the qualifiers per group AND the
+    bracket size, and the answer flips between them: numbering the runners-up
+    in label order opens "Group C #1 vs Group C #2" with three groups, and
+    reversing it pairs EVERY group against itself with four. Probed both.
+
+    So rather than pick a formula and hope, this computes the pairing the
+    bracket will actually produce and swaps seeds until none of them is a
+    rematch. Mutates `placeholders` in place; a no-op when the seeding was
+    already clean, which is the common case.
+    """
+    size = 2
+    while size < len(placeholders):
+        size *= 2
+    order = _seed_order(size)
+    pairs = [(order[i], order[i + 1]) for i in range(0, size, 2)]
+
+    by_seed = {p["seed"]: p for p in placeholders}
+
+    def group_of(seed):
+        p = by_seed.get(seed)
+        return p.get("groupLabel") if p else None
+
+    def clashes():
+        return [(a, b) for a, b in pairs
+                if group_of(a) is not None and group_of(a) == group_of(b)]
+
+    # Bounded: every swap fixes one pair, and there are at most len/2 of them.
+    for _ in range(len(placeholders)):
+        bad = clashes()
+        if not bad:
+            return
+        a, b = bad[0]
+        swapped = False
+        for candidate in sorted(by_seed):
+            if candidate in (a, b):
+                continue
+            # Would moving `candidate` into b's slot leave both pairs clean?
+            partner = next((y if x == candidate else x)
+                           for x, y in pairs if candidate in (x, y))
+            if group_of(candidate) == group_of(a):
+                continue
+            if group_of(b) == group_of(partner):
+                continue
+            by_seed[b]["seed"], by_seed[candidate]["seed"] = candidate, b
+            by_seed = {p["seed"]: p for p in placeholders}
+            swapped = True
+            break
+        if not swapped:
+            # Every remaining arrangement is a rematch -- true when one group
+            # supplies most of the bracket. Left as drawn rather than looped.
+            return
 
 
 def generate_group_knockout_fixtures(
@@ -449,16 +545,32 @@ def generate_group_knockout_fixtures(
 
     labels = sorted({m["groupName"] for m in group_matches})
 
-    # Standard cross-group pairing: winners meet runners-up from another group.
+    # Never ask a group for more qualifiers than it has members.
+    #
+    # "Top 3 of each group" over groups of two draws a seat labelled
+    # "Group A #3" that no table can ever fill: promotion looks for a third
+    # place that does not exist, leaves the slot empty, and the opening round
+    # cannot be played. Probed with 8 entrants in 4 groups: 4 of 12 seats were
+    # unfillable and the bracket dead-ended after the group stage.
+    smallest = min(
+        len({pid for m in group_matches if m.get("groupName") == label
+             for pid in (m.get("player1Id"), m.get("player2Id")) if pid})
+        for label in labels
+    )
+    per_group = max(1, min(int(qualifiers_per_group), smallest))
+
+    # Winners seeded first, then runners-up, then thirds.
     placeholders: List[Dict[str, Any]] = []
-    for rank in range(1, qualifiers_per_group + 1):
-        ordered = labels if rank % 2 == 1 else list(reversed(labels))
-        for label in ordered:
+    for rank in range(1, per_group + 1):
+        for position, label in enumerate(labels):
             placeholders.append({
                 "id": f"{QUALIFIER_PREFIX}{label}_{rank}",
                 "name": f"Group {label} #{rank}",
-                "seed": (rank - 1) * len(labels) + labels.index(label) + 1,
+                "seed": (rank - 1) * len(labels) + position + 1,
+                "groupLabel": label,
             })
+
+    _separate_groupmates(placeholders)
 
     # Every qualifier enters the bracket. Trimming to a power of two dropped
     # them by list position: with 12 groups, all 12 winners went through but

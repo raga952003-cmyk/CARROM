@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
 from app.services.access_control import require_tournament_access
+from app.services.state_machine import assert_participants_can_be_added
 from app.services.sheet_parser import read_sheet, parse_participants
 from app.services.audit_service import record_audit
 from app.routers.tournaments import generate_fixtures, generate_schedule, publish_schedule
@@ -43,7 +44,17 @@ async def import_excel_file(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read the file: {str(e)}")
 
-    if df.empty:
+    # `not df.rows`, not `df.empty`.
+    #
+    # `.empty` is the pandas DataFrame API. pandas was removed from this
+    # project -- it cost 60 MB plus numpy plus pyarrow and broke the 225 MB
+    # serverless ceiling -- and replaced by services/sheet_parser.Sheet, which
+    # defines __slots__ and therefore raises AttributeError here rather than
+    # returning a falsy value. The line sits outside the try/except above, so
+    # every single upload answered 500: the bulk import was dead for every
+    # .csv, .xls and .xlsx file, however clean, and the only remaining way in
+    # was to add participants one at a time.
+    if not df.rows:
         raise HTTPException(status_code=400, detail="The sheet has no rows.")
 
     try:
@@ -118,6 +129,8 @@ async def confirm_bulk_import(
     # every participant. Rebuilding a draw is not a side effect of adding a
     # player to it.
     autoGenerate: bool = Form(False),
+    # Same escape the single-entry route has, and the browser does not send it.
+    force: bool = Form(False),
     admin = Depends(verify_admin),
 ):
     """
@@ -143,6 +156,11 @@ async def confirm_bulk_import(
     tournament = admin_db.table("tournaments").select("*").eq("id", tournamentId).execute().data
     if not tournament:
         raise HTTPException(status_code=404, detail="Tournament not found.")
+    # A bulk import is the same act as entering people one at a time, and was
+    # the unguarded way in: the single-entry route checked the tournament's
+    # state and this one never did, so a whole sheet could be imported into a
+    # tournament that was already being played.
+    assert_participants_can_be_added(tournament[0], force=force)
     category = (tournament[0].get("category") or "both").lower()
 
     try:

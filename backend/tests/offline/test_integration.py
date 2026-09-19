@@ -961,6 +961,184 @@ def test_correcting_a_classic_board_is_idempotent():
           board()["player1_score"])
 
 
+
+
+# ---------------------------------------------------------------------------
+# Three defects in how a match is finished, each probed before it was fixed
+# ---------------------------------------------------------------------------
+
+_SCORING_RULES = {
+    "queenPoints": 3, "coinsPerSide": 9, "targetScore": 29,
+    "pointsForWin": 2, "pointsForDraw": 1, "pointsForLoss": 0,
+    "maxBoardsPerMatch": 3, "boardsPerSet": 3,
+}
+
+
+def _scoring_match(rules, boards=3, stage="league"):
+    h = Harness()
+    admin = h.make_user("Org", "admin")
+    p1 = h.make_user("Ann")
+    p2 = h.make_user("Ben")
+    tid = h.seed_tournament(admin, status="in_progress", rules=dict(rules))
+    mid = h.seed_match(tid, p1, p2, boards=boards, stage=stage)
+    h.post("/api/matches/%s/start" % mid, {}, user_id=admin)
+    return h, admin, tid, mid, p1, p2
+
+
+def _board(h, mid, n):
+    return [x for x in h.db.rows("boards")
+            if x["match_id"] == mid and x["board_number"] == n][0]
+
+
+def test_a_correction_cannot_drive_a_board_negative():
+    """
+    Moving the queen to the other player subtracts its bonus from somebody
+    who may not have that many points.
+
+    The classic correction path takes back the award the row already carries
+    before applying the stated one. That subtraction had no floor, so a board
+    stored 23-5 (20 coins plus a covered queen), corrected to "Ann scored 0
+    coins and the queen was Ben's", stored -3 for Ann -- and her match total
+    with it. A negative board is not a thing in carrom, and the figure feeds
+    net score difference, which is the league's tie-break.
+    """
+    h, admin, tid, mid, p1, p2 = _scoring_match(
+        dict(_SCORING_RULES, scoringMode="classic"))
+
+    r = h.put("/api/matches/%s/boards/1" % mid,
+              {"boardNumber": 1, "player1Score": 20, "player2Score": 5,
+               "queenClaimedBy": "player1", "queenCovered": True,
+               "status": "completed"}, user_id=admin)
+    if not check("a classic board with a covered queen is accepted",
+                 r.status_code == 200, detail(r)):
+        return
+    check("the queen bonus is on the board", _board(h, mid, 1)["player1_score"] == 23,
+          _board(h, mid, 1)["player1_score"])
+
+    r = h.put("/api/matches/%s/boards/1" % mid,
+              {"boardNumber": 1, "player1Score": 0, "player2Score": 5,
+               "queenClaimedBy": "player2", "queenCovered": True,
+               "status": "completed", "auditReason": "the queen was Ben's"},
+              user_id=admin)
+    check("the correction is accepted", r.status_code == 200, detail(r))
+
+    b = _board(h, mid, 1)
+    check("a corrected board is never negative",
+          (b["player1_score"] or 0) >= 0 and (b["player2_score"] or 0) >= 0,
+          "%s-%s" % (b["player1_score"], b["player2_score"]))
+
+    m = [x for x in h.db.rows("matches") if x["id"] == mid][0]
+    check("a corrected match total is never negative",
+          (m.get("player1_total_points") or 0) >= 0
+          and (m.get("player2_total_points") or 0) >= 0,
+          "%s-%s" % (m.get("player1_total_points"), m.get("player2_total_points")))
+
+
+def test_a_drawn_league_match_can_be_confirmed():
+    """
+    A level league match is a draw, and a draw is a result.
+
+    /confirm refused every level match whatever its stage, so a drawn league
+    match could not be confirmed at all -- and everything behind that was
+    unreachable with it. calculate_points_table has a branch awarding
+    pointsForDraw and a D column to show it; recalculate_match_scores
+    deliberately leaves a level league match drawn. None of it could run.
+    The match also stayed unconfirmed for good, so league_is_complete never
+    became true and a league+knockout tournament could never promote.
+    """
+    h, admin, tid, mid, p1, p2 = _scoring_match(
+        dict(_SCORING_RULES, scoringMode="classic", boardsPerSet=2), boards=2)
+    for n, (a, b, w) in enumerate(((10, 5, "player1"), (5, 10, "player2")), start=1):
+        h.put("/api/matches/%s/boards/%d" % (mid, n),
+              {"boardNumber": n, "player1Score": a, "player2Score": b,
+               "boardWinner": w, "status": "completed"}, user_id=admin)
+
+    r = h.post("/api/matches/%s/confirm" % mid, {}, user_id=admin)
+    if not check("a drawn league match can be confirmed", r.status_code == 200,
+                 "%s %s" % (r.status_code, detail(r))):
+        return
+
+    m = [x for x in h.db.rows("matches") if x["id"] == mid][0]
+    check("the confirmed draw has no winner", not m.get("winner_id"), m.get("winner_id"))
+    check("the confirmed draw is recorded as confirmed",
+          m.get("result_confirmed") is True, m.get("result_confirmed"))
+    check("the confirmed draw is completed", m.get("status") == "completed",
+          m.get("status"))
+
+    st = body(h.get("/api/standings/%s" % tid, admin))
+    rows = (st.get("categories") or [{}])[0].get("standings") or []
+    check("both players are shown as having drawn",
+          sum(r.get("drawn") or 0 for r in rows) == 2,
+          [(r.get("participantName"), r.get("drawn")) for r in rows])
+    check("pointsForDraw is actually awarded",
+          sum(r.get("points") or 0 for r in rows) == 2,
+          [(r.get("participantName"), r.get("points")) for r in rows])
+    check("neither player is credited with a win",
+          sum(r.get("won") or 0 for r in rows) == 0,
+          [(r.get("participantName"), r.get("won")) for r in rows])
+
+
+def test_a_knockout_still_cannot_be_left_drawn():
+    """The other half of the same rule: a bracket cannot advance a draw."""
+    h, admin, tid, mid, p1, p2 = _scoring_match(
+        dict(_SCORING_RULES, scoringMode="classic", boardsPerSet=2),
+        boards=2, stage="knockout")
+    for n, (a, b, w) in enumerate(((10, 5, "player1"), (5, 10, "player2")), start=1):
+        h.put("/api/matches/%s/boards/%d" % (mid, n),
+              {"boardNumber": n, "player1Score": a, "player2Score": b,
+               "boardWinner": w, "status": "completed"}, user_id=admin)
+
+    r = h.post("/api/matches/%s/confirm" % mid, {}, user_id=admin)
+    check("a level knockout match is still refused", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+    check("the refusal explains there is no winner",
+          "no winner" in detail(r).lower(), detail(r))
+
+
+def test_the_tie_break_ruling_needs_an_actual_tie():
+    """
+    The route checked that the named winner was one of the two players and
+    that a reason was given -- never that there was a tie. So it would take a
+    decided match and hand it to the other player, leaving the board wins and
+    points saying the opposite.
+    """
+    h, admin, tid, mid, p1, p2 = _scoring_match(
+        dict(_SCORING_RULES, scoringMode="classic"))
+    for n in (1, 2):
+        h.put("/api/matches/%s/boards/%d" % (mid, n),
+              {"boardNumber": n, "player1Score": 10, "player2Score": 2,
+               "boardWinner": "player1", "status": "completed"}, user_id=admin)
+
+    m = [x for x in h.db.rows("matches") if x["id"] == mid][0]
+    if not check("the match is decided 2-0", m.get("player1_board_wins") == 2,
+                 m.get("player1_board_wins")):
+        return
+
+    r = h.post("/api/matches/%s/tie-break" % mid,
+               {"winnerId": p2, "reason": "handing it to the loser"}, user_id=admin)
+    check("a decided match cannot be ruled on", r.status_code == 409,
+          "%s %s" % (r.status_code, detail(r)))
+    check("the refusal names who is ahead", "ahead" in detail(r).lower(), detail(r))
+
+    m2 = [x for x in h.db.rows("matches") if x["id"] == mid][0]
+    check("the winner of a decided match is not overwritten",
+          m2.get("winner_id") != p2, m2.get("winner_id"))
+
+    # And a genuinely level match is still rulable, which is what the route
+    # exists for.
+    h2, admin2, tid2, mid2, q1, q2 = _scoring_match(
+        dict(_SCORING_RULES, scoringMode="classic", boardsPerSet=2), boards=2,
+        stage="knockout")
+    for n, (a, b, w) in enumerate(((10, 5, "player1"), (5, 10, "player2")), start=1):
+        h2.put("/api/matches/%s/boards/%d" % (mid2, n),
+               {"boardNumber": n, "player1Score": a, "player2Score": b,
+                "boardWinner": w, "status": "completed"}, user_id=admin2)
+    r = h2.post("/api/matches/%s/tie-break" % mid2,
+                {"winnerId": q1, "reason": "sudden death board"}, user_id=admin2)
+    check("a genuinely level match can still be ruled on", r.status_code == 200,
+          "%s %s" % (r.status_code, detail(r)))
+
+
 SUITES = [
     ("identity branches", test_identity_branches),
     ("profile-less admin scoring", test_profileless_admin_scoring),
@@ -972,6 +1150,10 @@ SUITES = [
     ("out-of-range score", test_out_of_range_score_rejected),
     ("forgot password origin", test_forgot_password_origin),
     ("health", test_health_reports_schema_state),
+    ("no negative board", test_a_correction_cannot_drive_a_board_negative),
+    ("drawn league confirms", test_a_drawn_league_match_can_be_confirmed),
+    ("knockout cannot draw", test_a_knockout_still_cannot_be_left_drawn),
+    ("tie-break needs a tie", test_the_tie_break_ruling_needs_an_actual_tie),
     ("multi-set boards survive the list", test_multi_set_boards_survive_the_list),
     ("rescheduling preserves results", test_reschedule_preserves_results),
     ("create then publish", test_create_then_publish),
