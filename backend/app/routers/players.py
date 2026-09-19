@@ -118,10 +118,47 @@ async def create_player(data: PlayerSchema, admin = Depends(verify_admin)):
             raise
         raise HTTPException(status_code=400, detail=str(e))
 
+def _assert_target_is_a_player(admin_db, player_id: str) -> Dict[str, Any]:
+    """
+    This router is the PLAYER directory. It does not touch admin accounts.
+
+    Neither write here checked the target's ROLE, only that the caller was an
+    admin -- so one organiser could delete another's account outright. GET
+    /players filters on role='player' (so an admin is not even listed), but
+    DELETE and PUT took any id, and the id is not a secret: every tournament
+    payload carries its owner's as `ownerId`.
+
+    Deleting it cascades. profiles.id references auth.users ON DELETE CASCADE
+    (schema.sql:6), and tournaments.owner_id references profiles ON DELETE SET
+    NULL (003_ownership_and_access.sql:27) -- so the victim's tournaments
+    become "unowned", and access_control treats unowned as manageable by ANY
+    admin. Probed end to end: an outsider refused with 403 ("Only the
+    tournament owner can do this") deleted the owner's account, and then
+    edited and deleted the tournament, both 200. The ownership boundary this
+    codebase enforces by default falls to one call.
+    """
+    rows = admin_db.table("profiles").select("id, name, role").eq(
+        "id", player_id).execute().data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Player profile not found.")
+    target = rows[0]
+    if (target.get("role") or "player") != "player":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This is the player directory and that account is an "
+                f"{target.get('role')}. Administrator accounts are not managed here."
+            ),
+        )
+    return target
+
+
 @router.put("/{id}")
 async def update_player(id: str, data: PlayerSchema, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
+        _assert_target_is_a_player(admin_db, id)
+
         profile_update = {}
         if data.name is not None: profile_update["name"] = data.name
         if data.club is not None: profile_update["club"] = data.club
@@ -148,6 +185,8 @@ async def update_player(id: str, data: PlayerSchema, admin = Depends(verify_admi
 async def delete_player(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
+        _assert_target_is_a_player(admin_db, id)
+
         # Delete user from Supabase Auth, which cascades to public.profiles
         before = admin_db.table("profiles").select("*").eq("id", id).execute().data
         admin_db.auth.admin.delete_user(id)

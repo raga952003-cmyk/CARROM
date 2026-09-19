@@ -954,6 +954,109 @@ def test_reopening_the_decider_reopens_the_tournament():
 
 
 
+
+
+def test_put_cannot_write_a_terminal_state_behind_its_verb():
+    """
+    validate_tournament_transition checks the EDGE, not the verb's rules.
+
+    in_progress -> completed is a legal edge, so PUT {"status":"completed"}
+    sailed through on a tournament with six unplayed matches while POST
+    /complete refused the identical move. What was left was a tournament
+    stored 'completed' with no champion, no completed_at, nobody notified --
+    and /complete answering "already completed" from then on, so it could not
+    be put right.
+    """
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    tid, players = create(h, admin, fmt="round_robin", entrants=4, draw=True)
+    if not tid:
+        return
+    h.db.table("tournaments").update({"status": "in_progress"}).eq("id", tid).execute()
+    unplayed = len([m for m in h.db.rows("matches") if m["tournament_id"] == tid])
+
+    r = h.post("/api/tournaments/%s/complete" % tid, {}, user_id=admin)
+    if not check("the verb refuses to complete a tournament with unplayed matches",
+                 r.status_code == 409, "%s %s" % (r.status_code, detail(r))):
+        return
+
+    for target in ("completed", "cancelled"):
+        r = h.put("/api/tournaments/%s" % tid, {"status": target}, user_id=admin)
+        check("PUT cannot write '%s' behind its verb" % target, r.status_code == 409,
+              "%s %s" % (r.status_code, detail(r)))
+        check("the refusal names the verb to use for '%s'" % target,
+              "POST /tournaments" in detail(r), detail(r))
+        check("the tournament is not moved by a refused PUT to '%s'" % target,
+              canonical(row_of(h, tid).get("status")) == "in_progress",
+              row_of(h, tid).get("status"))
+
+    check("no match was lost to the refused writes",
+          len([m for m in h.db.rows("matches") if m["tournament_id"] == tid]) == unplayed,
+          len([m for m in h.db.rows("matches") if m["tournament_id"] == tid]))
+
+    # And the verb still gives its real reason rather than "already completed".
+    r = h.post("/api/tournaments/%s/complete" % tid, {}, user_id=admin)
+    check("the tournament is not stranded: /complete still explains why",
+          r.status_code == 409 and "still need a result" in detail(r), detail(r))
+
+    # The reversible states stay writable, which older builds rely on.
+    h2 = Harness()
+    a2 = h2.make_user("Owner2", "admin")
+    t2 = h2.seed_tournament(owner_id=a2, status="draft")
+    r = h2.put("/api/tournaments/%s" % t2, {"status": "registration_open"}, user_id=a2)
+    check("PUT still moves a tournament between reversible states",
+          r.status_code == 200 and canonical(row_of(h2, t2).get("status")) == "registration_open",
+          "%s now=%s" % (r.status_code, row_of(h2, t2).get("status")))
+
+
+def test_the_player_directory_will_not_touch_an_admin_account():
+    """
+    DELETE /players/{id} checked that the CALLER was an admin, never that the
+    TARGET was a player -- and the target id is not a secret: every tournament
+    payload carries its owner's as `ownerId`.
+
+    profiles.id references auth.users ON DELETE CASCADE and
+    tournaments.owner_id references profiles ON DELETE SET NULL, so deleting
+    an organiser leaves their tournaments "unowned" -- which access_control
+    treats as manageable by ANY admin. Probed: an outsider refused with 403 on
+    the tournament deleted its owner's account, then edited and deleted the
+    tournament itself.
+    """
+    h = Harness()
+    owner = h.make_user("Owner", "admin")
+    outsider = h.make_user("Outsider", "admin")
+    tid = h.seed_tournament(owner_id=owner, status="registration_open")
+
+    r = h.put("/api/tournaments/%s" % tid, {"name": "Mine now"}, user_id=outsider)
+    if not check("an outsider cannot edit somebody else's tournament",
+                 r.status_code == 403, "%s %s" % (r.status_code, detail(r))):
+        return
+
+    r = h.delete("/api/players/%s" % owner, user_id=outsider)
+    check("an admin account cannot be deleted through the player directory",
+          r.status_code == 403, "%s %s" % (r.status_code, detail(r)))
+    check("the refusal says why", "player directory" in detail(r).lower(), detail(r))
+    check("the owner's account survives",
+          any(p.get("id") == owner for p in h.db.rows("profiles")),
+          [p.get("name") for p in h.db.rows("profiles")])
+
+    r = h.put("/api/players/%s" % owner, {"name": "Renamed By Rival"}, user_id=outsider)
+    check("an admin account cannot be edited through the player directory either",
+          r.status_code == 403, "%s %s" % (r.status_code, detail(r)))
+    owner_row = next(p for p in h.db.rows("profiles") if p.get("id") == owner)
+    check("the owner's name is untouched", owner_row.get("name") == "Owner",
+          owner_row.get("name"))
+
+    # A real player is still manageable, which is what the directory is for.
+    rp = h.post("/api/players", {"name": "Pat", "email": "pat@x.com",
+                                 "rating": 1500}, user_id=owner)
+    pid = body(rp).get("id")
+    r = h.put("/api/players/%s" % pid, {"name": "Pat Renamed"}, user_id=owner)
+    check("a player can still be edited", r.status_code == 200, detail(r))
+    r = h.delete("/api/players/%s" % pid, user_id=owner)
+    check("a player can still be deleted", r.status_code == 200, detail(r))
+
+
 SUITES = [
     ("full lifecycle", test_full_lifecycle),
     ("start from closed registration with a draw", test_start_from_closed_registration_with_a_draw),
@@ -969,6 +1072,8 @@ SUITES = [
     ("live is still editable", test_a_live_tournament_is_still_fully_editable),
     ("closed message is honest", test_the_closed_registration_message_offers_only_what_works),
     ("reopening the decider", test_reopening_the_decider_reopens_the_tournament),
+    ("PUT cannot reach terminal", test_put_cannot_write_a_terminal_state_behind_its_verb),
+    ("directory spares admins", test_the_player_directory_will_not_touch_an_admin_account),
 ]
 
 

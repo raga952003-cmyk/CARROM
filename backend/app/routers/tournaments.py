@@ -708,6 +708,36 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
         # Reject illegal lifecycle moves before touching the database (spec 75)
         status_target = update_dict.pop("status", None)
         if status_target is not None:
+            # The two terminal states belong to their verbs, and only to them.
+            #
+            # validate_tournament_transition below checks the EDGE is legal;
+            # it knows nothing about the verb's preconditions or its side
+            # effects. in_progress -> completed is a perfectly legal edge, so
+            # PUT {"status": "completed"} sailed through on a tournament with
+            # six unplayed matches -- while POST /complete refused the same
+            # move with "6 match(es) still need a result". The result was a
+            # tournament stored 'completed' with no champion, no completed_at,
+            # nobody notified, and /complete answering "already completed"
+            # for good. Same for cancelled: no reason on the record and no
+            # participant told.
+            #
+            # Every other status stays writable here. Older builds drive the
+            # lifecycle buttons through this route, and the reversible states
+            # carry no precondition worth protecting -- the compatibility
+            # suite pins draft -> registration_open and the legacy
+            # in_progress synonym, and both still work.
+            if canonical_tournament_status(status_target) in ("completed", "cancelled"):
+                verb = ("complete" if canonical_tournament_status(status_target) == "completed"
+                        else "cancel")
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Use POST /tournaments/{{id}}/{verb} to "
+                        f"{verb} a tournament. Setting the status directly skips the "
+                        "checks that go with it -- that every match has a result, or "
+                        "that a reason was given -- and the state cannot be undone."
+                    ),
+                )
             validate_tournament_transition(before.get("status"), status_target)
         changed_fields = set(update_dict.keys())
 
