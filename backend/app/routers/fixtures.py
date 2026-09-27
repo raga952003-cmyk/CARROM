@@ -25,6 +25,7 @@ from app.services.qualification import (
     promote_qualifiers,
 )
 from app.services.audit_service import record_audit
+from app.services.state_machine import assert_tournament_not_terminal
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -145,6 +146,7 @@ async def add_knockout_stage(
         return cached
 
     t = require_tournament_access(admin_db, tournament_id, admin, "tournament.fixtures")
+    assert_tournament_not_terminal(t, "add a knockout stage")
 
     # A bracket that is not a power of two gives the top seeds byes. That is
     # right for a knockout drawn from entrants and wrong for one drawn from a
@@ -171,18 +173,17 @@ async def add_knockout_stage(
             detail="This tournament has no league stage to promote out of.",
         )
 
-    ranked = len({
-        pid for m in league
-        for pid in (m.get("player1_id"), m.get("player2_id")) if pid
-    })
-    if ranked < slots:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"The league has {ranked} participant(s), so it cannot fill {slots} "
-                "knockout slots."
-            ),
-        )
+    categories = sorted({(m.get("type") or "singles") for m in league})
+    for category in categories:
+        ranked = len({
+            pid for m in league if (m.get("type") or "singles") == category
+            for pid in (m.get("player1_id"), m.get("player2_id")) if pid
+        })
+        if ranked < slots:
+            raise HTTPException(
+                status_code=422,
+                detail=f"The {category} league has {ranked} participant(s), so it cannot fill {slots} knockout slots.",
+            )
 
     existing_ko = [m for m in matches if m.get("stage") == "knockout"]
     if existing_ko and not replace:
@@ -204,8 +205,8 @@ async def add_knockout_stage(
     max_boards = int(rules.get("maxBoardsPerMatch") or 8)
     number_of_sets = int(rules.get("numberOfSets") or 1)
     boards_per_set = int(rules.get("boardsPerSet") or max_boards)
-    if not sets_supported(admin_db):
-        number_of_sets = 1
+    if number_of_sets > 1 and not sets_supported(admin_db):
+        raise HTTPException(status_code=503, detail="Multi-set matches require the database set migration before drawing a knockout stage.")
     # Same rule the league was drawn under, so a knockout match is the same
     # length as the matches that fed it.
     if boards_per_set:
@@ -214,7 +215,6 @@ async def add_knockout_stage(
     # One bracket per category that actually has a league, so a tournament
     # running singles and doubles side by side gets one of each rather than a
     # singles bracket the doubles table is then promoted into.
-    categories = sorted({(m.get("type") or "singles") for m in league})
 
     drawn: List[Dict[str, Any]] = []
     for category in categories:
@@ -266,7 +266,7 @@ async def add_knockout_stage(
             "board_number": (i % venue_boards) + 1,
             "status": "scheduled",
             "max_boards": match["maxBoards"],
-            "target_points": rules.get("targetScore", 29),
+            "target_points": rules.get("targetScore", 25),
             "bracket_position": match.get("bracketPosition"),
         }
         if number_of_sets > 1:

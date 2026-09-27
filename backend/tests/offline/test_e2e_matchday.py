@@ -22,6 +22,7 @@ import os
 import sys
 import traceback
 from collections import Counter
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -57,15 +58,22 @@ RULES = {
     "scoringMode": "remaining_coins", "queenPoints": 3, "coinsPerSide": 9,
     "targetScore": 29, "pointsForWin": 2, "pointsForDraw": 1, "pointsForLoss": 0,
     "maxBoardsPerMatch": 3,
+    "numberOfSets": 1,
+    "boardsPerSet": 3,
+    "setWinnerRule": "total_points",
+    "restTimeMinutes": 1,
 }
 
 
 def tournament_payload(fmt, boards):
+    today = date.today()
     return {
         "name": "Match Day %s" % fmt, "description": "", "category": "singles",
         "format": fmt,
-        "registrationStartDate": "2026-01-01", "registrationEndDate": "2026-02-01",
-        "tournamentStartDate": "2026-03-01", "tournamentEndDate": "2026-03-02",
+        "registrationStartDate": today.isoformat(),
+        "registrationEndDate": (today + timedelta(days=30)).isoformat(),
+        "tournamentStartDate": (today + timedelta(days=40)).isoformat(),
+        "tournamentEndDate": (today + timedelta(days=42)).isoformat(),
         "venue": "Hall A", "city": "Chennai",
         "numberOfBoards": boards, "entryFee": 0,
         "rules": dict(RULES), "status": "draft",

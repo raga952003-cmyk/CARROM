@@ -5,7 +5,10 @@ from app.services.access_control import require_tournament_access
 from app.services.state_machine import assert_participants_can_be_added
 from app.services.sheet_parser import read_sheet, parse_participants
 from app.services.audit_service import record_audit
-from app.routers.tournaments import generate_fixtures, generate_schedule, publish_schedule
+from app.services.razorpay_client import rupees_to_paise
+from app.routers.tournaments import (
+    _entrants_already_in, generate_fixtures, generate_schedule, publish_schedule,
+)
 from typing import Any, Dict, List, Optional, Tuple
 import io
 import json
@@ -129,7 +132,8 @@ async def confirm_bulk_import(
     # every participant. Rebuilding a draw is not a side effect of adding a
     # player to it.
     autoGenerate: bool = Form(False),
-    # Same escape the single-entry route has, and the browser does not send it.
+    # Same lifecycle escape as single-entry; the browser does not send it and
+    # it never bypasses the registration closing date.
     force: bool = Form(False),
     admin = Depends(verify_admin),
 ):
@@ -162,11 +166,21 @@ async def confirm_bulk_import(
     # tournament that was already being played.
     assert_participants_can_be_added(tournament[0], force=force)
     category = (tournament[0].get("category") or "both").lower()
+    fee_paise = rupees_to_paise(tournament[0].get("entry_fee"))
+    # Confirming a spreadsheet is not evidence of payment. Free entries can be
+    # admitted by this organiser action; paid entries join the draw only after
+    # their payment is recorded or their fee is explicitly waived.
+    new_status = "pending" if fee_paise > 0 else "approved"
+    new_payment_status = "pending" if fee_paise > 0 else "waived"
 
     try:
         existing = admin_db.table("profiles").select("id, name, email").execute().data or []
         by_email = {(p["email"] or "").lower(): p for p in existing if p.get("email")}
         by_name = {(p["name"] or "").lower(): p for p in existing if p.get("name")}
+        # Include members of existing doubles teams, not just player_id on a
+        # singles registration. Keep this map current as rows in this sheet are
+        # inserted so a later row cannot give somebody a second entry.
+        entered = _entrants_already_in(admin_db, tournamentId)
 
         singles_added = 0
         doubles_added = 0
@@ -190,11 +204,35 @@ async def confirm_bulk_import(
                 skipped.append(f"'{name}' is a singles entry but this tournament is doubles only.")
                 continue
 
+            partner_name = (entry.get("partnerName") or "").strip() if entry_type == "doubles" else ""
+            if entry_type == "doubles" and not partner_name:
+                skipped.append(f"'{name}' has no partner name, so no team was formed.")
+                continue
+
+            matched = _find_profile(admin_db, name, entry.get("email"), by_email, by_name)
+            partner_match = (
+                _find_profile(admin_db, partner_name, entry.get("partnerEmail"), by_email, by_name)
+                if entry_type == "doubles" else None
+            )
+            # Refuse known conflicts before creating any new auth profiles or
+            # teams. An existing pending entry also counts; a rejected one does
+            # not occupy a place in the draw.
+            conflict = next((
+                entered[str(profile["id"])]
+                for profile in (matched, partner_match)
+                if profile and str(profile["id"]) in entered
+            ), None)
+            if conflict:
+                skipped.append(
+                    f"'{name}' was skipped: {conflict} is already entered in this "
+                    "tournament. A player can only hold one entry."
+                )
+                continue
+
             club = entry.get("club") or "Independent"
             city = entry.get("city")
             rating = int(entry.get("rating") or 1500)
 
-            matched = _find_profile(admin_db, name, entry.get("email"), by_email, by_name)
             if matched:
                 player_id = matched["id"]
             else:
@@ -206,11 +244,8 @@ async def confirm_bulk_import(
                     by_email[entry["email"].lower()] = {"id": player_id, "name": name}
 
             if entry_type == "doubles":
-                partner_name = (entry.get("partnerName") or "").strip()
-                if not partner_name:
-                    skipped.append(f"'{name}' has no partner name, so no team was formed.")
-                    continue
-
+                # Repeat the lookup after adding the primary player to the
+                # local cache, so the same person in both slots is caught.
                 partner_match = _find_profile(
                     admin_db, partner_name, entry.get("partnerEmail"), by_email, by_name
                 )
@@ -227,6 +262,14 @@ async def confirm_bulk_import(
 
                 if partner_id == player_id:
                     skipped.append(f"'{name}' was paired with themselves.")
+                    continue
+
+                conflict = entered.get(str(player_id)) or entered.get(str(partner_id))
+                if conflict:
+                    skipped.append(
+                        f"'{name}' was skipped: {conflict} is already entered in this "
+                        "tournament. A player can only hold one entry."
+                    )
                     continue
 
                 team_name = entry.get("teamName") or f"{name} & {partner_name}"
@@ -248,18 +291,33 @@ async def confirm_bulk_import(
                 if not already:
                     admin_db.table("registrations").insert({
                         "tournament_id": tournamentId, "type": "doubles",
-                        "team_id": team_id, "status": "approved", "payment_status": "pending",
+                        "team_id": team_id, "status": new_status,
+                        "payment_status": new_payment_status, "fee_paise": fee_paise,
                     }).execute()
                     doubles_added += 1
+                    entered[str(player_id)] = name
+                    entered[str(partner_id)] = partner_name
+                else:
+                    skipped.append(f"'{name}' is already registered as a team in this tournament.")
             else:
+                if str(player_id) in entered:
+                    skipped.append(
+                        f"'{name}' was skipped: {entered[str(player_id)]} is already "
+                        "entered in this tournament. A player can only hold one entry."
+                    )
+                    continue
                 already = admin_db.table("registrations").select("id").eq(
                     "tournament_id", tournamentId).eq("player_id", player_id).execute().data
                 if not already:
                     admin_db.table("registrations").insert({
                         "tournament_id": tournamentId, "type": "singles",
-                        "player_id": player_id, "status": "approved", "payment_status": "pending",
+                        "player_id": player_id, "status": new_status,
+                        "payment_status": new_payment_status, "fee_paise": fee_paise,
                     }).execute()
                     singles_added += 1
+                    entered[str(player_id)] = name
+                else:
+                    skipped.append(f"'{name}' is already registered in this tournament.")
 
         imported = singles_added + doubles_added
         record_audit(
@@ -271,7 +329,12 @@ async def confirm_bulk_import(
 
         fixtures_built = False
         fixture_error = None
-        if autoGenerate and imported > 0:
+        if autoGenerate and imported > 0 and fee_paise > 0:
+            fixture_error = (
+                "Imported entries await payment or an explicit fee waiver. "
+                "Record or waive their entry fees before generating fixtures."
+            )
+        elif autoGenerate and imported > 0:
             try:
                 # Keyword arguments, deliberately. generate_fixtures is
                 # (id, force, admin) and this used to call it as (id, admin):
@@ -303,6 +366,8 @@ async def confirm_bulk_import(
         message = f"Imported {summary}."
         if skipped:
             message += f" {len(skipped)} row(s) were skipped."
+        if fee_paise > 0 and imported:
+            message += " These entries await recorded payment or an explicit fee waiver."
         if fixtures_built:
             message += " Fixtures generated and the schedule published."
         elif fixture_error:

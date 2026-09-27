@@ -26,8 +26,8 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
   onSelectMatch,
   rows
 }) => {
-  const [sortField, setSortField] = useState<keyof StandingsRow>('points');
-  const [sortAsc, setSortAsc] = useState<boolean>(false);
+  const [sortField, setSortField] = useState<keyof StandingsRow>('rank');
+  const [sortAsc, setSortAsc] = useState<boolean>(true);
   const [showTiebreakerHelp, setShowTiebreakerHelp] = useState(false);
 
   // Standings are computed server-side from official, confirmed results
@@ -86,6 +86,16 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
       setSortField(field);
       setSortAsc(false);
     }
+  };
+
+  const tiebreakerOrder = tournament.rules.tiebreakerRules?.length
+    ? tournament.rules.tiebreakerRules
+    : ['points', 'net_score_difference', 'board_difference', 'head_to_head'] as const;
+  const tiebreakerLabels: Record<string, string> = {
+    points: `Total match points (win ${tournament.rules.pointsForWin}, draw ${tournament.rules.pointsForDraw})`,
+    net_score_difference: 'Net score difference (points scored minus points conceded)',
+    board_difference: 'Board wins difference (boards won minus boards lost)',
+    head_to_head: 'Head-to-head result between tied competitors',
   };
 
   /**
@@ -152,7 +162,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
             Tournament Points & Ranking Table
           </h3>
           <p className="text-xs text-gray-600">
-            Deterministic ranking calculated in real time. Standard rules: Win = {tournament.rules.pointsForWin} pts, Draw = {tournament.rules.pointsForDraw} pt, Loss = {tournament.rules.pointsForLoss} pts.
+            Ranking calculated from confirmed results. This tournament awards {tournament.rules.pointsForWin} for a win, {tournament.rules.pointsForDraw} for a draw, and {tournament.rules.pointsForLoss} for a loss.
           </p>
         </div>
 
@@ -170,13 +180,10 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
         <div className="bg-amber-50/80 border border-amber-200/90 rounded-2xl p-4 text-xs text-amber-950 animate-in fade-in duration-150">
           <div className="flex items-center space-x-2 font-bold mb-1">
             <ShieldCheck className="w-4 h-4 text-[#0B5D3B]" />
-            <span>Official Carrom Federation Deterministic Tiebreaker Order:</span>
+            <span>This tournament's tiebreaker order:</span>
           </div>
           <ol className="list-decimal list-inside space-y-1 text-[11px] text-amber-900 ml-1">
-            <li><strong>Total Match Points</strong> (Won matches × {tournament.rules.pointsForWin} + Drawn matches × {tournament.rules.pointsForDraw})</li>
-            <li><strong>Board Wins Difference (BD)</strong> = Total Boards Won − Total Boards Lost</li>
-            <li><strong>Net Score Difference (NSD)</strong> = Total Game Points Scored − Total Game Points Conceded</li>
-            <li><strong>Head-to-Head Result</strong> between the tied competitors</li>
+            {tiebreakerOrder.map(rule => <li key={rule}>{tiebreakerLabels[rule]}</li>)}
           </ol>
         </div>
       )}
@@ -187,7 +194,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
         <div className="p-4 bg-[#0B5D3B] text-white flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center space-x-2">
             <Trophy className="w-4 h-4 text-[#D4A72C]" />
-            <span className="font-bold text-sm tracking-tight">Standings & Federation Points</span>
+            <span className="font-bold text-sm tracking-tight">Standings & Tournament Points</span>
           </div>
           <span className="text-[10px] text-[#D4A72C] font-bold uppercase tracking-wider">
             Deterministic Tiebreakers Active

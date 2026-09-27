@@ -834,6 +834,35 @@ def _h2h_match(n, p1, p2, w, b1, b2, s1, s2):
             "player1TotalPoints": s1, "player2TotalPoints": s2}
 
 
+def test_nsd_is_the_default_first_tiebreaker_and_can_be_reordered():
+    parts = [{"id": pid, "name": pid.upper()} for pid in ("a", "b", "c", "d")]
+    matches = [
+        _h2h_match(1, "a", "b", "a", 3, 0, 20, 19),
+        _h2h_match(2, "c", "a", "c", 3, 2, 20, 19),
+        _h2h_match(3, "d", "b", "d", 2, 1, 29, 10),
+        _h2h_match(4, "c", "d", "c", 2, 1, 20, 10),
+    ]
+    rows = calculate_points_table(matches, parts, {})
+    by_id = {r["participantId"]: r for r in rows}
+    check("NSD is points scored minus points conceded",
+          by_id["d"]["scoreFor"] == 39
+          and by_id["d"]["scoreAgainst"] == 30
+          and by_id["d"]["scoreDiff"] == 9, by_id["d"])
+    check("equal match points rank by NSD before board difference by default",
+          by_id["a"]["points"] == by_id["d"]["points"] == 2
+          and by_id["a"]["boardDiff"] > by_id["d"]["boardDiff"]
+          and by_id["d"]["rank"] < by_id["a"]["rank"],
+          (by_id["a"], by_id["d"]))
+
+    configured = calculate_points_table(matches, parts, {
+        "tiebreakerRules": ["points", "board_difference",
+                             "net_score_difference", "head_to_head"],
+    })
+    ranks = {r["participantId"]: r["rank"] for r in configured}
+    check("an explicit board difference first rule is honoured",
+          ranks["a"] < ranks["d"], ranks)
+
+
 def test_head_to_head_separates_entrants_no_column_can():
     """
     Both the points table and the create form promise organisers that a tie
@@ -936,6 +965,7 @@ SUITES = [
     ("odd sizes round down", test_an_odd_knockout_size_rounds_down_rather_than_giving_byes),
     ("bracket fits the field", test_a_bracket_cannot_be_bigger_than_the_field),
     ("the rule reaches the draw", test_the_rule_reaches_the_draw_through_the_api),
+    ("NSD tiebreaker order", test_nsd_is_the_default_first_tiebreaker_and_can_be_reordered),
     ("head-to-head decides", test_head_to_head_separates_entrants_no_column_can),
     ("head-to-head cycle", test_a_head_to_head_cycle_falls_back_rather_than_looping),
     ("a cut covering the field", test_a_cut_that_covers_the_field_flags_nobody),

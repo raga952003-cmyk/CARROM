@@ -126,12 +126,17 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   // never filled.
   const activeBoard = useMemo(() => {
     if (!match) return null;
+    if (match.tieBreakRequired && tournament?.rules?.setWinnerRule === 'target_points') {
+      // Future games have pending boards, but a tied current game needs its
+      // deciding board first. Do not show the future game's score form.
+      return null;
+    }
     const boards = [...(match.boards || [])].sort((a, b) =>
       ((a.setNumber || 1) - (b.setNumber || 1)) || (a.boardNumber - b.boardNumber));
     return boards.find(b => b.status === 'in_progress')
       || boards.find(b => b.status === 'pending')
       || null;
-  }, [match]);
+  }, [match, tournament?.rules?.setWinnerRule]);
 
   // A new board, or a new match, starts blank. `obs` was left out of this:
   // under remaining-coins scoring the classic fields reset and the observation
@@ -141,9 +146,9 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   useEffect(() => {
     setP1(0); setP2(0); setQueen('none'); setError('');
     setObs(emptyObservation);
-  }, [match?.id, activeBoard?.boardNumber]);
+  }, [match?.id, activeBoard?.setNumber, activeBoard?.boardNumber]);
 
-  const target = match?.targetPoints || tournament?.rules?.targetScore || 29;
+  const target = match?.targetPoints || tournament?.rules?.targetScore || 25;
 
   // Says whether the write went through, so a modal can stay open on a refusal
   // and close only on success.
@@ -253,13 +258,14 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
         {!decided && !activeBoard && match.tieBreakRequired && (
           <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 space-y-3">
             <div>
-              <div className="text-sm font-black text-amber-900">This match finished level</div>
+              <div className="text-sm font-black text-amber-900">{rules.setWinnerRule === 'target_points' ? 'This game finished level' : 'This match finished level'}</div>
               <div className="text-xs text-amber-800 mt-0.5">
-                Both players scored {match.player1TotalPoints} across all{' '}
-                {(match.boards || []).length} boards.
+                {rules.setWinnerRule === 'target_points'
+                  ? 'Play an additional board in this game to decide it.'
+                  : `Both players scored ${match.player1TotalPoints} across all ${(match.boards || []).length} boards.`}
                 {match.tieBreakRule === 'additional_board'
-                  ? ' Add a deciding board and play it.'
-                  : ' Award it to one of them.'}
+                  ? rules.setWinnerRule === 'target_points' ? '' : ' Add a deciding board and play it.'
+                  : rules.setWinnerRule === 'target_points' ? '' : ' Award it to one of them.'}
               </div>
             </div>
             {match.tieBreakRule === 'additional_board' && (
@@ -271,7 +277,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                 Add a deciding board
               </button>
             )}
-            <div className="grid grid-cols-2 gap-2">
+            {rules.setWinnerRule !== 'target_points' && <div className="grid grid-cols-2 gap-2">
               {[
                 { id: match.player1Id, name: match.player1Name },
                 { id: match.player2Id, name: match.player2Name },
@@ -285,7 +291,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                   Award to {p.name}
                 </button>
               ))}
-            </div>
+            </div>}
           </div>
         )}
 

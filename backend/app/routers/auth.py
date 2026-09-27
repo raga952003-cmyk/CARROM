@@ -16,28 +16,19 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-SIGNUP_ROLES = ("player", "admin")
+SIGNUP_ROLES = ("player",)
 
 
 def _role_for_signup(requested) -> str:
     """
-    The role a registration asked for, checked for spelling and nothing else.
+    Public registration only creates players. Organizers are provisioned separately.
 
-    Registration is open in this deployment: whoever fills in the form picks
-    the role and gets it. That is a deliberate choice and worth being plain
-    about -- there is no key, no invitation and no approval step, so anybody
-    who can load the sign-up page can make themselves an administrator of
-    every tournament this instance runs.
-
-    What is still refused is a role that is not one of the two. An unknown
-    value used to fall through to 'player', which turns a typo into an account
-    that quietly is not what its owner believes it is.
     """
     role = (requested or "player").strip().lower()
     if role not in SIGNUP_ROLES:
         raise HTTPException(
-            status_code=422,
-            detail="Role must be either 'player' or 'admin'.",
+            status_code=403,
+            detail="Organizer accounts require an invitation. Public signup is for players.",
         )
     return role
 
@@ -62,108 +53,35 @@ def _session_response(session, profile_data) -> Dict[str, Any]:
 
 @router.post("/signup")
 async def signup(data: SignUpSchema):
+    """Create a player account through Supabase's email-confirmation flow."""
     supabase = get_db()
     if not supabase:
         raise HTTPException(status_code=500, detail="Database client not configured.")
-    
-    admin_supabase = get_admin_db()
 
-    # Settled before anything is written, so a bad value costs no account.
-    role = _role_for_signup(data.role)
-
+    _role_for_signup(data.role)
     try:
-        logger.info(f"Step 1: Attempting user signup via Admin API for {data.email}")
-        user_response = admin_supabase.auth.admin.create_user({
-            "email": data.email,
+        response = supabase.auth.sign_up({
+            "email": str(data.email).strip().lower(),
             "password": data.password,
-            "email_confirm": True,
-            "user_metadata": {
+            "options": {"data": {
                 "name": data.name,
-                # app_metadata is what the API trusts for authorisation, so
-                # this is the line that makes the choice on the sign-up form
-                # real. It is written from _role_for_signup and nowhere else,
-                # which is what keeps the two copies of the role in step.
-                "role": role,
                 "club": data.club,
                 "city": data.city,
                 "phone": data.phone,
-                "rating": data.rating
-            },
-            "app_metadata": {
-                "role": role
-            }
+                "rating": data.rating,
+            }},
         })
-        
-        # create_user returns a UserResponse wrapper; the id lives on .user
-        created_user = getattr(user_response, "user", None) if user_response else None
-        if not created_user:
-            logger.error("Admin signup returned no user.")
-            raise HTTPException(status_code=400, detail="Signup failed. Please try again.")
-
-        user_id = created_user.id
-        logger.info(f"Step 2: Admin user creation successful. Created auth user: {user_id}")
+        if not response or not response.user:
+            raise HTTPException(status_code=400, detail="Could not create account.")
+        return {
+            "status": "confirmation_required",
+            "message": "Check your email to confirm your account, then sign in.",
+        }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Signup exception details: {str(e)}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-    try:
-        # The handle_new_user trigger only copies name/email/role/rating, so the
-        # remaining profile fields are written here.
-        profile_extras = {
-            k: v for k, v in {
-                "club": data.club,
-                "city": data.city,
-                "phone": data.phone,
-            }.items() if v is not None
-        }
-        # The role is written here as well as in the metadata above. The
-        # trigger reads it out of app_metadata, but a database without the
-        # trigger has its profile row healed from token claims instead, and an
-        # admin whose profiles row says 'player' is refused at every door --
-        # including the sign-in that would let anyone put it right.
-        profile_extras["role"] = role
-        if profile_extras:
-            admin_supabase.table("profiles").update(profile_extras).eq("id", user_id).execute()
-
-        # Log the user in programmatically to generate an access token session
-        logger.info(f"Step 3: Programmatic sign in to generate session token for {data.email}")
-        login_response = supabase.auth.sign_in_with_password({
-            "email": data.email,
-            "password": data.password
-        })
-        if not login_response or not login_response.session:
-            raise HTTPException(status_code=400, detail="Account created but session could not be started.")
-
-        # Retrieve the profile that was created by the Postgres trigger
-        logger.info("Step 4: Fetching user profile from profiles table")
-        profile_response = admin_supabase.table("profiles").select("*").eq("id", user_id).execute()
-        profile_data = profile_response.data[0] if profile_response.data else {
-            "id": user_id,
-            "email": data.email,
-            "name": data.name,
-            "role": role,
-            "club": data.club,
-            "city": data.city,
-            "phone": data.phone,
-            "rating": data.rating,
-            "created_at": ""
-        }
-
-        logger.info("Step 5: Signup workflow complete.")
-        return _session_response(login_response.session, profile_data)
-    except Exception as e:
-        # Roll the auth user back so a half-finished signup does not leave an
-        # orphaned account that blocks the user from retrying with that email.
-        logger.error(f"Signup failed after user creation, rolling back {user_id}: {str(e)}")
-        try:
-            admin_supabase.auth.admin.delete_user(user_id)
-        except Exception as cleanup_error:
-            logger.error(f"Could not roll back auth user {user_id}: {str(cleanup_error)}")
-        if isinstance(e, HTTPException):
-            raise
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Signup failed: %s", e)
+        raise HTTPException(status_code=400, detail="Could not create account. Check your details and try again.")
 
 @router.post("/login")
 async def login(data: LoginSchema):
@@ -182,7 +100,11 @@ async def login(data: LoginSchema):
             raise HTTPException(status_code=401, detail="Invalid email or password.")
         
         # Load the user profile
-        profile_response = supabase.table("profiles").select("*").eq("id", auth_response.user.id).execute()
+        # The identity comes from the successful password sign-in. Load its
+        # profile through the service client rather than relying on mutable
+        # Auth-session headers on this request's anon client.
+        profile_response = get_admin_db().table("profiles").select("*").eq(
+            "id", auth_response.user.id).execute()
         
         if not profile_response.data:
             # No profiles row yet -- the trigger should have made one, but a
@@ -447,22 +369,14 @@ async def forgot_password(data: ForgotPasswordSchema, request: Request):
 @router.post("/reset-password")
 async def reset_password(data: ResetPasswordSchema):
     """
-    Set a new password using the token from a reset link.
-
-    Supabase's own flow expects the browser to hold a Supabase client and call
-    updateUser itself. This deployment has no such client -- the VITE_SUPABASE_*
-    variables are not set in the build -- so the token comes here instead and
-    the change is made with the service role after the token is verified.
+    Consume a one-time recovery proof before changing the password.
     """
-    token = (data.access_token or "").strip()
+    token = (data.token_hash or "").strip()
     if not token:
         raise HTTPException(status_code=422, detail="That reset link is missing its token.")
 
     try:
-        # The token identifies the account; an expired or forged one resolves
-        # to nobody, and this is the only thing standing between a link and a
-        # password change.
-        result = get_admin_db().auth.get_user(token)
+        result = get_db().auth.verify_otp({"token_hash": token, "type": "recovery"})
         user = getattr(result, "user", None)
     except Exception:
         user = None

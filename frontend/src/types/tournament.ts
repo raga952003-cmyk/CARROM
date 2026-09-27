@@ -220,7 +220,7 @@ export interface TournamentRules {
   pointsForDraw: number;
   pointsForLoss: number;
   maxBoardsPerMatch: number;
-  targetScore: number; // 29 for standard carrom
+  targetScore: number; // 25 for the senior standard; configurable for other formats
   queenPoints: number; // usually 3 points
   /**
    * 'classic'         — each player keeps the coins they pocketed.
@@ -242,7 +242,7 @@ export interface TournamentRules {
   /** What one coin is worth. 1 in standard carrom. */
   coinValue?: number;
   /** How a set is decided: on total points, or on boards won. */
-  setWinnerRule?: 'total_points' | 'board_wins';
+  setWinnerRule?: 'target_points' | 'total_points' | 'board_wins';
   /**
    * What the scorer is asked for on a board.
    * 'simple'   — who finished, and how many coins were left. Nothing else.
@@ -290,6 +290,7 @@ export interface Tournament {
   city: string;
   numberOfBoards: number;
   entryFee: number;
+  gpayUpiId?: string | null;
   prizePool: string;
   rules: TournamentRules;
   posterConfig: PosterConfig;

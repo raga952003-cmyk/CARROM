@@ -23,7 +23,15 @@ else:
         logger.warning("SUPABASE_SERVICE_ROLE_KEY is missing. Admin operations might fail.")
 
 def get_db():
-    """Returns the standard user-authenticated Supabase client"""
+    """Return an isolated anon client for an Auth request.
+
+    Supabase Auth stores the current session on its client. Sharing the
+    process-wide readiness client across login, signup, recovery and refresh
+    requests can therefore reuse another request's auth state. The offline
+    harness has no configured URL and injects its fake through supabase_client.
+    """
+    if settings.SUPABASE_URL and settings.SUPABASE_ANON_KEY:
+        return create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
     return supabase_client
 
 def get_admin_db():

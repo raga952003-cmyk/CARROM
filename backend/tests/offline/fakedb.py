@@ -26,6 +26,7 @@ it -- see the note in test_integration.py.
 import os
 import re
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -338,6 +339,8 @@ class _AdminAuth:
             "email": email,
             "user_metadata": dict(attrs.get("user_metadata") or {}),
             "app_metadata": dict(attrs.get("app_metadata") or {}),
+            "password": attrs.get("password"),
+            "email_confirmed": attrs.get("email_confirm", True),
         }
         self.db.auth_users.append(user)
         # The handle_new_user trigger in db/triggers_and_security.sql. Turn it
@@ -348,8 +351,7 @@ class _AdminAuth:
                 "id": user["id"],
                 "name": meta.get("name") or "User",
                 "email": email,
-                "role": (user["app_metadata"].get("role")
-                         or meta.get("role") or "player"),
+                "role": "admin" if user["app_metadata"].get("role") == "admin" else "player",
                 "rating": meta.get("rating") or 1500,
                 "club": meta.get("club"),
                 "city": meta.get("city"),
@@ -410,10 +412,33 @@ class _Auth:
             raise PostgrestError("invalid claim: missing sub claim", "invalid_token")
         return _Obj(user=_Obj(**user))
 
+    def sign_up(self, credentials):
+        """Model Supabase signup with Confirm email enabled."""
+        user = self.admin.create_user({
+            "email": credentials["email"],
+            "password": credentials["password"],
+            "user_metadata": (credentials.get("options") or {}).get("data") or {},
+            "app_metadata": {"role": "player"},
+            "email_confirm": False,
+        }).user
+        return _Obj(user=user, session=None)
+
+    def confirm_email(self, email):
+        """Offline stand-in for following the confirmation link in an inbox."""
+        for user in self.db.auth_users:
+            if user["email"] == email:
+                user["email_confirmed"] = True
+                return
+        raise PostgrestError("User not found", "user_not_found")
+
     def sign_in_with_password(self, credentials):
         email = credentials.get("email")
         for u in self.db.auth_users:
             if u["email"] == email:
+                if u.get("password") and u["password"] != credentials.get("password"):
+                    raise PostgrestError("Invalid login credentials", "invalid_credentials")
+                if not u.get("email_confirmed", True):
+                    raise PostgrestError("Email not confirmed", "email_not_confirmed")
                 return _Obj(session=_Obj(
                     access_token="tok:" + u["id"],
                     refresh_token="ref:" + u["id"],
@@ -464,6 +489,7 @@ class FakeSupabase:
         self.auth = _Auth(self)
         self.postgrest = _Postgrest(self)
         self.rpc_calls = []
+        self.registration_auto_approval_ready = True
 
     # -- constraints ------------------------------------------------------
     def enforce_foreign_keys(self, table, row, changed=None):
@@ -543,11 +569,81 @@ class _Rpc:
         self.params = params or {}
 
     def execute(self):
+        if self.name == "registration_auto_approval_ready":
+            return Result(self.db.registration_auto_approval_ready)
         if self.name == "apply_board_result":
             return self._apply_board_result()
+        if self.name == "apply_board_result_with_next_set":
+            return self._apply_board_result_with_next_set()
+        if self.name == "delete_match_safely":
+            return self._delete_match_safely()
+        if self.name == "replace_tournament_fixtures":
+            return self._replace_tournament_fixtures()
+        if self.name == "update_match_schedule_batch":
+            return self._update_match_schedule_batch()
         # Unknown RPCs behave like a database without that migration applied.
         raise PostgrestError(
             'Could not find the function public.%s' % self.name, "PGRST202")
+
+    def _replace_tournament_fixtures(self):
+        """Emulate the database RPC's all-or-nothing draw replacement."""
+        tournament_id = self.params["p_tournament_id"]
+        matches = self.params.get("p_matches") or []
+        boards = self.params.get("p_boards") or []
+        links = self.params.get("p_links") or []
+        before = deepcopy(self.db.tables)
+        try:
+            existing = [m for m in self.db.rows("matches")
+                        if m.get("tournament_id") == tournament_id]
+            if not self.params.get("p_force") and any(
+                    m.get("result_confirmed") or m.get("status") in ("live", "completed")
+                    for m in existing):
+                raise PostgrestError("The existing draw has played results", "P0001")
+            self.db.table("matches").delete().eq("tournament_id", tournament_id).execute()
+            if matches:
+                self.db.table("matches").insert(matches).execute()
+            if boards:
+                self.db.table("boards").insert(boards).execute()
+            for link in links:
+                updated = self.db.table("matches").update({
+                    "next_match_id": link["next_match_id"],
+                    "next_match_slot": link.get("next_match_slot"),
+                }).eq("id", link["id"]).eq("tournament_id", tournament_id).execute().data
+                if len(updated) != 1:
+                    raise PostgrestError("Concurrent draw change", "P0001")
+            updated = self.db.table("tournaments").update({
+                "fixtures_generated": True,
+            }).eq("id", tournament_id).execute().data
+            if len(updated) != 1:
+                raise PostgrestError("Tournament not found", "P0001")
+        except Exception:
+            self.db.tables = before
+            raise
+        return Result(len(matches))
+
+    def _update_match_schedule_batch(self):
+        """Update only schedule fields, or leave every row untouched."""
+        tournament_id = self.params["p_tournament_id"]
+        rows = self.params.get("p_rows") or []
+        before = deepcopy(self.db.tables)
+        try:
+            seen = set()
+            for patch in rows:
+                match_id = patch["id"]
+                if match_id in seen:
+                    raise PostgrestError("Duplicate match in schedule", "P0001")
+                seen.add(match_id)
+                updated = self.db.table("matches").update({
+                    "board_number": patch["board_number"],
+                    "scheduled_date": patch["scheduled_date"],
+                    "scheduled_time": patch["scheduled_time"],
+                }).eq("id", match_id).eq("tournament_id", tournament_id).execute().data
+                if len(updated) != 1:
+                    raise PostgrestError("Concurrent schedule change", "P0001")
+        except Exception:
+            self.db.tables = before
+            raise
+        return Result(len(rows))
 
     def _apply_board_result(self):
         """
@@ -623,3 +719,80 @@ class _Rpc:
                     b["status"] = "in_progress"
 
         return Result(dict(target))
+
+    def _apply_board_result_with_next_set(self):
+        p = self.params
+        next_set = p.get("p_next_set_number")
+        current_set = p.get("p_set_number") or 1
+        if next_set != current_set + 1 or p.get("p_next_board_number") is not None:
+            raise PostgrestError("Invalid game transition", "P0001")
+        next_board = next((board for board in self.db.tables.get("boards", [])
+                           if str(board.get("match_id")) == str(p.get("p_match_id"))
+                           and board.get("set_number") == next_set
+                           and board.get("board_number") == 1), None)
+        if next_board is None or next_board.get("status") not in ("pending", "in_progress"):
+            raise PostgrestError("The next game has no available first board", "P0001")
+        before = deepcopy(self.db.tables)
+        try:
+            result = self._apply_board_result()
+            next_board["status"] = "in_progress"
+            return result
+        except Exception:
+            self.db.tables = before
+            raise
+
+    def _delete_match_safely(self):
+        match_id = self.params.get("p_match_id")
+        force = self.params.get("p_force") is True
+        match = next((m for m in self.db.tables.get("matches", [])
+                      if str(m.get("id")) == str(match_id)), None)
+        if match is None:
+            raise PostgrestError("Match does not exist", "P0001")
+        tournament_id = match["tournament_id"]
+        feeders = [m for m in self.db.tables.get("matches", [])
+                   if str(m.get("next_match_id")) == str(match_id)]
+        if feeders:
+            raise PostgrestError("Delete the feeder matches first or redraw the knockout stage", "P0001")
+        boards = [b for b in self.db.tables.get("boards", [])
+                  if str(b.get("match_id")) == str(match_id)]
+        played = [b for b in boards if b.get("status") == "completed"
+                  or b.get("player1_score") or b.get("player2_score")]
+        has_play = bool(match.get("result_confirmed") or match.get("winner_id")
+                        or match.get("status") in ("live", "paused", "completed")
+                        or played)
+        if has_play and not force:
+            raise PostgrestError("Match has play or a result; force is required to delete it", "P0001")
+        parent = next((m for m in self.db.tables.get("matches", [])
+                       if str(m.get("id")) == str(match.get("next_match_id"))), None)
+        if parent is not None:
+            parent_boards = [b for b in self.db.tables.get("boards", [])
+                             if str(b.get("match_id")) == str(parent.get("id"))]
+            if (parent.get("status") in ("live", "paused", "completed")
+                    or parent.get("result_confirmed")
+                    or any(b.get("status") == "completed" or b.get("player1_score")
+                           or b.get("player2_score") for b in parent_boards)):
+                raise PostgrestError("The next-round match already has play", "P0001")
+        before = deepcopy(self.db.tables)
+        try:
+            cleared = None
+            if parent is not None and match.get("winner_id"):
+                slot = match.get("next_match_slot")
+                if slot in ("player1", "player2") and parent.get(slot + "_id") == match["winner_id"]:
+                    parent[slot + "_id"] = None
+                    parent[slot + "_name"] = "Winner TBD"
+                    cleared = {"matchNumber": parent.get("match_number"), "slot": slot}
+            self.db.tables["boards"] = [b for b in self.db.tables.get("boards", [])
+                                        if str(b.get("match_id")) != str(match_id)]
+            self.db.tables["matches"] = [m for m in self.db.tables.get("matches", [])
+                                         if str(m.get("id")) != str(match_id)]
+            self.db.tables.setdefault("audit_logs", []).append({
+                "id": str(uuid.uuid4()), "user_id": self.params.get("p_actor_id"),
+                "action": "match.delete", "entity_type": "match", "entity_id": str(match_id),
+                "previous_state": dict(match), "new_state": {"deleted": True},
+            })
+            return Result({"match": dict(match), "tournamentId": tournament_id,
+                           "boardsDeleted": len(boards), "boardsWithPlay": len(played),
+                           "discardedPlay": has_play, "clearedSlot": cleared})
+        except Exception:
+            self.db.tables = before
+            raise

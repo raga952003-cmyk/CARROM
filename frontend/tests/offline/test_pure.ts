@@ -21,7 +21,6 @@ import { resourcesToRefresh, Resource } from '../../src/utils/refreshScope';
 
 type Slot = { failed: number; ran: number; examples: string[] };
 const RESULTS = new Map<string, Slot>();
-const KNOWN = new Map<string, Slot>();
 
 function record(map: Map<string, Slot>, label: string, ok: boolean, example = '') {
   let slot = map.get(label);
@@ -34,7 +33,6 @@ function record(map: Map<string, Slot>, label: string, ok: boolean, example = ''
 }
 
 const check = (label: string, ok: boolean, example = '') => record(RESULTS, label, ok, example);
-const observe = (label: string, ok: boolean, example = '') => record(KNOWN, label, ok, example);
 
 // ---------------------------------------------------------------------------
 // Preview / server parity
@@ -237,42 +235,44 @@ function suiteMyMatches() {
         findMyMatches(doubles, { id: 'u2', name: 'Partner' }).length === 1,
         JSON.stringify(findMyMatches(doubles, { id: 'u2', name: 'Partner' })));
 
-  // Name fallback, for an account whose login is not its roster row.
+  // An imported roster row must be linked by id before appearing as personal data.
   const byName = {
     matches: [match({ matchNumber: 1, player1Name: 'Srinivasan S', player2Name: 'Other' })],
     registrations: [],
   } as any;
-  check('a name fallback finds the fixture when no id matches',
-        findMyMatches(byName, { id: 'unknown', name: 'Srinivasan S' }).length === 1);
-  check('the name fallback does not match a different person by prefix',
+  check('an exact name without matching id cannot claim a fixture',
+        findMyMatches(byName, { id: 'unknown', name: 'Srinivasan S' }).length === 0);
+  check('a prefix name without matching id cannot claim a fixture',
         findMyMatches(byName, { id: 'unknown', name: 'Srinivas' }).length === 0,
         'Srinivas must not match Srinivasan S');
-  check('the name fallback ignores case and surrounding space',
-        findMyMatches(byName, { id: 'unknown', name: '  srinivasan s  ' }).length === 1);
+  check('case and whitespace do not turn a name into an identity',
+        findMyMatches(byName, { id: 'unknown', name: '  srinivasan s  ' }).length === 0);
   check('a user with neither id nor name sees nothing',
         findMyMatches(byName, { id: '', name: '' }).length === 0);
   check('a null user sees nothing', findMyMatches(byName, null).length === 0);
   check('an empty tournament yields nothing',
         findMyMatches({ matches: [], registrations: [] } as any, { id: 'u1' }).length === 0);
 
-  // The live database holds roster names carrying the sheet's serial number.
+  // A spreadsheet ordinal in a display name is still not an account link.
   const prefixed = {
     matches: [match({ matchNumber: 1, player1Name: '2. Ragavendra S', player2Name: 'Other' })],
     registrations: [],
   } as any;
-  observe('a roster name carrying its sheet ordinal is still matched by name',
-          findMyMatches(prefixed, { id: 'unknown', name: 'Ragavendra S' }).length === 1,
-          'login "Ragavendra S" vs roster "2. Ragavendra S" -> ' +
-          findMyMatches(prefixed, { id: 'unknown', name: 'Ragavendra S' }).length + ' matches');
+  check('a roster name carrying its sheet ordinal does not claim a fixture',
+        findMyMatches(prefixed, { id: 'unknown', name: 'Ragavendra S' }).length === 0);
 
   // opponentOf
-  const m1 = match({ player1Id: 'u1', player1Name: 'Me', player2Name: 'You' });
+  const m1 = match({ player1Id: 'u1', player1Name: 'Me', player2Id: 'u2', player2Name: 'You' });
   check('the opponent of my match is the other side',
         opponentOf(m1 as any, { id: 'u1', name: 'Me' }) === 'You',
         opponentOf(m1 as any, { id: 'u1', name: 'Me' }));
   check('the opponent is resolved from the other slot too',
         opponentOf(m1 as any, { id: 'u2', name: 'You' }) === 'Me',
         opponentOf(m1 as any, { id: 'u2', name: 'You' }));
+  check('an unrelated account cannot infer a personal opponent',
+        opponentOf(m1 as any, { id: 'someone-else', name: 'Me' }) === 'TBD');
+  check('a doubles partner sees the opposing team',
+        opponentOf(doubles.matches[0], { id: 'u2', name: 'Partner' }, doubles) === 'Team Two');
   const blank = match({ player1Id: 'u1', player1Name: 'Me', player2Name: '' });
   check('an unfilled opponent slot reads as TBD',
         opponentOf(blank as any, { id: 'u1', name: 'Me' }) === 'TBD',
@@ -547,16 +547,33 @@ function suiteMatchGroups() {
         outcomeFor(match({ status: 'live', player1Id: 'u1' }) as any, { id: 'u1' }) === null, '');
   check('no signed-in user means no outcome', outcomeFor(won, null) === null, '');
 
-  // Name fallback, matching findMyMatches: exact, never a substring.
+  // Names alone cannot establish a player's match outcome.
   const byName = match({
     status: 'completed', resultConfirmed: true,
     player1Name: 'Srinivasan S', player2Name: 'Other', winnerName: 'Srinivasan S',
     player1BoardWins: 2, player2BoardWins: 0,
   }) as any;
-  check('a player with no id is matched by exact name',
-        outcomeFor(byName, { name: 'Srinivasan S' }) === 'won', '');
+  check('a player with no id cannot claim a result by name',
+        outcomeFor(byName, { name: 'Srinivasan S' }) === null, '');
   check('a shorter name is not matched against a longer one',
         outcomeFor(byName, { name: 'Srinivas' }) === null, '');
+
+  const doublesResult = {
+    matches: [],
+    registrations: [{ type: 'doubles', team: {
+      id: 'team-1', player1: { id: 'u1' }, player2: { id: 'u2' },
+    } }],
+  } as any;
+  const teamWin = match({
+    status: 'completed', resultConfirmed: true,
+    player1Id: 'team-1', player1Name: 'Team One',
+    player2Id: 'team-2', player2Name: 'Team Two',
+    winnerId: 'team-1', winnerName: 'Team One',
+  }) as any;
+  check('both doubles partners see their team win',
+        outcomeFor(teamWin, { id: 'u2', name: 'Partner' }, doublesResult) === 'won');
+  check('a player outside the doubles team cannot claim its result',
+        outcomeFor(teamWin, { id: 'unrelated', name: 'Team One' }, doublesResult) === null);
 }
 
 // ---------------------------------------------------------------------------
@@ -645,17 +662,6 @@ function main() {
       for (const ex of slot.examples) console.log(`     e.g. ${ex}`);
       console.log();
     }
-  }
-
-  const noted = [...KNOWN.entries()].filter(([, s]) => s.failed).sort();
-  if (noted.length) {
-    console.log('OBSERVATIONS (behaviour worth a decision, not asserted as bugs)');
-    console.log('-'.repeat(78));
-    for (const [label, slot] of noted) {
-      console.log(`  ${label} -> ${slot.failed} of ${slot.ran}`);
-      for (const ex of slot.examples) console.log(`     e.g. ${ex}`);
-    }
-    console.log();
   }
 
   process.exit(failed.length);

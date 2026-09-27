@@ -12,6 +12,7 @@ writes and log a loud warning — the app keeps working, but without atomicity.
 import time
 from typing import Any, Dict, List, Optional
 import logging
+from fastapi import HTTPException
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -90,20 +91,36 @@ def apply_board_result(
     audit: Dict[str, Any],
     next_board_number: Optional[int] = None,
     set_number: Optional[int] = None,
+    next_set_number: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Board row + audit row + match aggregates + next board, in one transaction."""
+    params = {
+        "p_match_id": match_id,
+        "p_board_number": board_number,
+        "p_board_patch": board_patch,
+        "p_match_patch": match_patch,
+        "p_audit": audit,
+        "p_next_board_number": next_board_number,
+        "p_set_number": set_number or 1,
+    }
+    if next_set_number is not None:
+        # The last scored board of a game must open the following game's first
+        # board in the same transaction. A separate update can leave an
+        # unscorable match when one write succeeds and the other fails.
+        params["p_next_set_number"] = next_set_number
+        try:
+            result = _with_retry(lambda: admin_db.rpc(
+                "apply_board_result_with_next_set", params).execute())
+        except Exception as exc:
+            if _looks_like_missing_function(exc):
+                raise HTTPException(status_code=503, detail=(
+                    "Official game scoring needs migration 021. Ask the organiser to finish database setup."
+                )) from exc
+            raise
+        _mark(True)
+        return result.data or {}
     try:
-        result = _with_retry(lambda: admin_db.rpc("apply_board_result", {
-            "p_match_id": match_id,
-            "p_board_number": board_number,
-            "p_board_patch": board_patch,
-            "p_match_patch": match_patch,
-            "p_audit": audit,
-            "p_next_board_number": next_board_number,
-            # Board numbers restart each set, so the set is part of the board's
-            # identity; without it the lock matches every set at once.
-            "p_set_number": set_number or 1,
-        }).execute())
+        result = _with_retry(lambda: admin_db.rpc("apply_board_result", params).execute())
         _mark(True)
         return result.data or {}
     except Exception as e:

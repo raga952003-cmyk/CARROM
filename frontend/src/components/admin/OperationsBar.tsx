@@ -44,6 +44,7 @@ export const OperationsBar: React.FC<OperationsBarProps> = ({ tournament }) => {
   const [bulkOpen, setBulkOpen] = useState(false);
 
   const publicUrl = `${window.location.origin}${window.location.pathname}#/live/${tournament.id}`;
+  const isPublic = tournament.status !== 'draft';
   const boards = Array.from({ length: Math.max(1, tournament.numberOfBoards || 1) }, (_, i) => i + 1);
 
   const open = (hash: string) => window.open(`${window.location.pathname}${hash}`, '_blank');
@@ -103,10 +104,10 @@ export const OperationsBar: React.FC<OperationsBarProps> = ({ tournament }) => {
         <Btn onClick={() => open(`#/live/${tournament.id}`)}>
           <Globe className="w-3.5 h-3.5" /> Public board
         </Btn>
-        <Btn onClick={copyPublicLink}>
+        {isPublic && <Btn onClick={copyPublicLink}>
           {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
           {copied ? 'Copied' : 'Copy link'}
-        </Btn>
+        </Btn>}
 
         <Btn onClick={() => setBulkOpen(true)}>
           <Zap className="w-3.5 h-3.5" /> Rapid scores

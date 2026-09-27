@@ -4,17 +4,8 @@ from typing import Optional
 
 class SignUpSchema(BaseCamelModel):
     """
-    Public registration, in whichever role the form asked for.
-
-    `role` is taken from the request. Registration is therefore OPEN: anyone who
-    can reach the sign-up page can create an administrator account, which is a
-    deliberate choice for this deployment and not an oversight. There is no key
-    and no invitation; the only thing standing between a visitor and admin
-    rights is the sign-up form itself.
-
-    Anything narrower has to be done elsewhere -- put the app behind something,
-    or take the Administrator tab off the form and promote accounts with
-    db/promote_admin.py instead.
+    Public registration creates a player account. Admins are provisioned by
+    invitation or a trusted operator.
     """
     email: EmailStr
     password: str = Field(..., min_length=6)
@@ -23,8 +14,7 @@ class SignUpSchema(BaseCamelModel):
     city: Optional[str] = None
     phone: Optional[str] = None
     rating: Optional[int] = 1500
-    # "player" or "admin". Anything else is refused rather than guessed at,
-    # so a typo cannot quietly create the wrong kind of account.
+    # Kept for older clients; the public endpoint accepts only player.
     role: Optional[str] = "player"
 
 class LoginSchema(BaseModel):
@@ -67,10 +57,8 @@ class ResetPasswordSchema(BaseCamelModel):
     """
     Finish a reset.
 
-    The recovery token arrives in the URL fragment of the emailed link. The
-    browser hands it back here rather than talking to Supabase directly,
-    because the frontend Supabase client is not configured in this deployment
-    -- so the standard client-side recovery flow has nothing to run on.
+    The recovery token hash from the email is verified as a one-time recovery
+    proof by Supabase Auth before any password change.
     """
-    access_token: str
+    token_hash: str
     new_password: str = Field(..., min_length=6)

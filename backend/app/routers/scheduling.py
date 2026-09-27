@@ -14,64 +14,16 @@ from app.routers.tournaments import (
     publish_schedule as _publish_schedule,
 )
 from typing import Any, Dict, List, Optional
-from collections import defaultdict
+from app.services.schedule_validation import detect_schedule_conflicts
 
 router = APIRouter(prefix="/scheduling", tags=["scheduling"])
 
 
 def detect_conflicts(matches: List[Dict[str, Any]],
-                     team_members: Optional[Dict[str, List[str]]] = None
-                     ) -> List[Dict[str, Any]]:
-    """
-    Two kinds of clash matter (spec 69):
-      * one board hosting two matches in the same slot
-      * one participant playing two matches in the same slot
-
-    `team_members` maps a team id to its two player ids. Without it a doubles
-    side is only compared as a team, so a person entered in both singles and
-    doubles could be double-booked without detection.
-    """
-    team_members = team_members or {}
-    conflicts: List[Dict[str, Any]] = []
-    by_slot = defaultdict(list)
-
-    for m in matches:
-        date, time = m.get("scheduled_date"), m.get("scheduled_time")
-        if not date or not time:
-            continue
-        by_slot[(date, time)].append(m)
-
-    for (date, time), slot_matches in sorted(by_slot.items()):
-        boards_seen: Dict[int, int] = {}
-        players_seen: Dict[str, int] = {}
-
-        for m in slot_matches:
-            board = m.get("board_number")
-            if board in boards_seen:
-                conflicts.append({
-                    "type": "board_double_booked",
-                    "date": date, "time": time, "boardNumber": board,
-                    "matchNumbers": [boards_seen[board], m.get("match_number")],
-                    "detail": f"Board {board} has two matches at {date} {time}.",
-                })
-            else:
-                boards_seen[board] = m.get("match_number")
-
-            sides = [pid for pid in (m.get("player1_id"), m.get("player2_id")) if pid]
-            people = [person for side in sides for person in team_members.get(side, [side])]
-            for pid in people:
-                if pid in players_seen:
-                    conflicts.append({
-                        "type": "participant_double_booked",
-                        "date": date, "time": time, "participantId": pid,
-                        "matchNumbers": [players_seen[pid], m.get("match_number")],
-                        "detail": f"A participant is scheduled for two matches at {date} {time}.",
-                    })
-                else:
-                    players_seen[pid] = m.get("match_number")
-
-    return conflicts
-
+                     team_members: Optional[Dict[str, List[str]]] = None,
+                     duration_minutes: int = 30,
+                     rest_minutes: int = 10) -> List[Dict[str, Any]]:
+    return detect_schedule_conflicts(matches, team_members, duration_minutes, rest_minutes)
 
 def _team_members(admin_db, matches: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     """Team id -> the two player ids on it, for the doubles sides in `matches`."""
@@ -133,7 +85,7 @@ async def get_conflicts(tournament_id: str):
 @router.post("/{tournament_id}/generate")
 async def generate(
     tournament_id: str,
-    restMinutes: int = Query(10, ge=0, le=240),
+    restMinutes: Optional[int] = Query(None, ge=0, le=240),
     admin = Depends(verify_admin),
 ):
     require_tournament_access(get_admin_db(), tournament_id, admin)
@@ -142,25 +94,5 @@ async def generate(
 
 @router.post("/{tournament_id}/publish")
 async def publish(tournament_id: str, admin = Depends(verify_admin)):
-    """
-    Publishing is refused while the schedule still contains conflicts
-    (spec 69: validate before committing).
-    """
-    admin_db = get_admin_db()
-    require_tournament_access(admin_db, tournament_id, admin)
-
-    matches = admin_db.table("matches").select("*").eq(
-        "tournament_id", tournament_id
-    ).execute().data or []
-
-    conflicts = detect_conflicts(matches, _team_members(admin_db, matches))
-    if conflicts:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Schedule has {len(conflicts)} unresolved conflict(s). "
-                "Regenerate the schedule before publishing."
-            ),
-        )
-
+    """Use the same completeness and conflict gate as the tournament route."""
     return await _publish_schedule(tournament_id, admin)

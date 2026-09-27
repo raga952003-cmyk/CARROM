@@ -40,7 +40,10 @@ SUITES = [
     ("test_integration", "integration   real app + in-memory database", True),
     ("test_system", "system        whole app over HTTP, black box", True),
     ("test_e2e_matchday", "end-to-end    draw -> schedule -> board queues -> scoring", True),
+    ("test_official_carrom", "carrom        target-point games and best-of-three match", False),
     ("test_payments", "payments      entry fees, signatures, webhook replay", True),
+    ("test_auth_client_isolation", "auth          isolated sessions and profile lookup", True),
+    ("test_payment_proofs", "payment proof private upload and review access", True),
     ("test_acceptance", "acceptance    user stories per role", True),
     # These five lived beside the others on disk but were never in this list,
     # so `run_offline.py` reported PASS across the board while they failed

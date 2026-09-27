@@ -256,7 +256,28 @@ async def resume_match(id: str, admin = Depends(verify_admin)):
 async def add_board(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
-        _authorise_match(admin_db, id, admin, "match.add_board")
+        match, tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.add_board")
+        rules = (tournament or {}).get("rules") or {}
+        if rules.get("setWinnerRule") == "target_points":
+            boards = admin_db.table("boards").select("*").eq("match_id", id).execute().data or []
+            tied = next((row for row in summarise_sets(match, boards, rules)
+                         if row["needsExtraBoard"]), None)
+            if tied is None:
+                raise HTTPException(status_code=409,
+                                    detail="A deciding board can be added only after a game ends level.")
+            set_number = tied["setNumber"]
+            number = max(b["board_number"] for b in boards
+                         if (b.get("set_number") or 1) == set_number) + 1
+            row = admin_db.table("boards").insert({
+                "match_id": id, "set_number": set_number,
+                "board_number": number, "status": "in_progress",
+                "player1_score": 0, "player2_score": 0,
+            }).execute().data[0]
+            admin_db.table("matches").update({
+                "tie_break_required": False,
+            }).eq("id", id).execute()
+            return serialize_board(row)
 
         # Count existing boards
         boards_res = admin_db.table("boards").select("board_number").eq("match_id", id).execute()
@@ -664,7 +685,7 @@ async def update_board(
         baseline = ({**match_data, "status": "live"}
                     if match_data.get("status") == "completed" else match_data)
         updated_match = (apply_set_results(baseline, projected, corrected_rules)
-                         if total_sets > 1
+                         if total_sets > 1 or corrected_rules.get("setWinnerRule") == "target_points"
                          else recalculate_match_scores(baseline, projected, corrected_rules))
 
         match_patch = {
@@ -780,6 +801,23 @@ async def submit_board(
 
         rules = ((tournament_row or {}).get("rules") or {})
         mode = scoring_mode(rules)
+        official_game = rules.get("setWinnerRule") == "target_points"
+        if official_game:
+            games = summarise_sets(match_data, boards, rules)
+            active = next((game for game in games if game["status"] != "completed"), None)
+            if active is None or set_number != active["setNumber"]:
+                raise HTTPException(status_code=409,
+                                    detail="Play the current game before scoring another one.")
+            if active["needsExtraBoard"]:
+                raise HTTPException(status_code=409,
+                                    detail="Add a deciding board for this tied game.")
+            first_open = next((b for b in sorted(
+                (b for b in boards if (b.get("set_number") or 1) == set_number),
+                key=lambda b: b["board_number"])
+                if b.get("status") != "completed"), None)
+            if first_open is None or first_open["board_number"] != board_number:
+                raise HTTPException(status_code=409,
+                                    detail="Score the next unplayed board in this game.")
 
         validate_board_score(
             data.p1_score, data.p2_score, match_data, data.queen_claimed_by,
@@ -878,7 +916,8 @@ async def submit_board(
             for b in boards
         ]
         total_sets, _ = set_layout(match_data, rules)
-        updated_match = (apply_set_results(match_data, projected, rules) if total_sets > 1
+        updated_match = (apply_set_results(match_data, projected, rules)
+                         if total_sets > 1 or official_game
                          else recalculate_match_scores(match_data, projected, rules))
 
         match_patch = {
@@ -917,16 +956,16 @@ async def submit_board(
                 degraded_note = " [detail not stored: apply migration 005]"
 
         next_board_number = board_number + 1
-        has_next = any(b["board_number"] == next_board_number
+        game_finished = (official_game and updated_match["sets"][set_number - 1]["status"] == "completed")
+        has_next = (not game_finished and any(b["board_number"] == next_board_number
                        and (b.get("set_number") or 1) == set_number
-                       for b in boards)
-        if not has_next and total_sets > 1:
-            # End of a set: the following set opens at its first board.
-            if any(b["board_number"] == 1 and (b.get("set_number") or 1) == set_number + 1
-                   for b in boards):
-                admin_db.table("boards").update({"status": "in_progress"}).eq(
-                    "match_id", id).eq("set_number", set_number + 1).eq(
-                    "board_number", 1).eq("status", "pending").execute()
+                       for b in boards))
+        opens_next_set = ((not has_next or game_finished) and total_sets > 1
+                          and updated_match["status"] != "completed"
+                          and (not official_game or game_finished)
+                          and any(b["board_number"] == 1
+                                  and (b.get("set_number") or 1) == set_number + 1
+                                  for b in boards))
 
         board_row = apply_board_result(
             admin_db,
@@ -945,7 +984,14 @@ async def submit_board(
             },
             next_board_number=next_board_number if has_next else None,
             set_number=set_number if total_sets > 1 else None,
+            next_set_number=set_number + 1 if opens_next_set and official_game else None,
         )
+        if opens_next_set and not official_game:
+            # Existing custom formats keep their old transition path. The
+            # official preset uses the atomic RPC above for this hand-off.
+            admin_db.table("boards").update({"status": "in_progress"}).eq(
+                "match_id", id).eq("set_number", set_number + 1).eq(
+                "board_number", 1).eq("status", "pending").execute()
 
         response = serialize_board(board_row) if board_row else {"status": "ok"}
         guard.store(response)
@@ -977,6 +1023,29 @@ async def confirm_match(
         m, confirm_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.confirm")
 
+        confirm_rules = (confirm_tournament or {}).get("rules") or {}
+        if not m.get("winner_id") and confirm_rules.get("setWinnerRule") == "target_points":
+            game_boards = admin_db.table("boards").select("*").eq(
+                "match_id", id).execute().data or []
+            decided = apply_set_results(m, game_boards, confirm_rules)
+            if not decided.get("winnerId"):
+                raise HTTPException(status_code=409, detail=(
+                    "Complete enough games to win the match. A game ends at 25 points "
+                    "or after eight boards; a tied game needs a deciding board."))
+            settled = {
+                "status": "completed", "winner_id": decided["winnerId"],
+                "winner_name": decided["winnerName"],
+                "player1_board_wins": decided["player1BoardWins"],
+                "player2_board_wins": decided["player2BoardWins"],
+                "player1_total_points": decided["player1TotalPoints"],
+                "player2_total_points": decided["player2TotalPoints"],
+                "player1_sets_won": decided["player1SetsWon"],
+                "player2_sets_won": decided["player2SetsWon"],
+                "match_completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            admin_db.table("matches").update(settled).eq("id", id).execute()
+            m = {**m, **settled}
+
         if not m.get("winner_id"):
             # Finishing a match is the organiser's decision, not arithmetic on
             # how many board rows happen to exist. A match can be settled after
@@ -990,6 +1059,11 @@ async def confirm_match(
             # every board complete and still recorded as live with no winner.
             boards = admin_db.table("boards").select("*").eq(
                 "match_id", id).order("board_number").execute().data or []
+            if not any(board.get("status") == "completed" for board in boards):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Complete at least one board, or record a walkover or award before confirming this match.",
+                )
             rules = (confirm_tournament or {}).get("rules") or {}
             recomputed = recalculate_match_scores(m, boards, rules)
 
@@ -1359,6 +1433,9 @@ async def resolve_tie_break(id: str, data: TieBreakSchema, admin = Depends(verif
         tb_boards = admin_db.table("boards").select("*").eq(
             "match_id", id).order("board_number").execute().data or []
         tb_rules = (tb_tournament or {}).get("rules") or {}
+        if tb_rules.get("setWinnerRule") == "target_points":
+            raise HTTPException(status_code=409,
+                                detail="Play the deciding board for a tied game.")
         tb_recomputed = recalculate_match_scores(match, tb_boards, tb_rules)
         if scoring_mode(tb_rules) == "remaining_coins":
             tb_lead = (tb_recomputed["player1TotalPoints"]
@@ -1457,7 +1534,7 @@ async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_
             raise HTTPException(status_code=422, detail="A reason is required for a walkover.")
 
         rules = (walkover_tournament or {}).get("rules") or {}
-        max_boards = match.get("max_boards") or rules.get("maxBoardsPerMatch") or 3
+        max_boards = match.get("max_boards") or rules.get("maxBoardsPerMatch") or 8
         # Enough boards to have taken the match, not all of them: a 3-board
         # match is won 2-0, and recording 3-0 would overstate it.
         default_wins = (int(max_boards) // 2) + 1
@@ -1700,10 +1777,10 @@ async def remove_match(
     was to regenerate the whole draw, which deletes every result in the
     tournament.
 
-    Deleting a match takes its boards, its sets and its correction history with
-    it (all three cascade), and a league match leaves the points table the
-    moment it goes, so an unplayed fixture deletes freely and anything with
-    play on it needs `force` and is recorded in the audit log.
+    The database deletes the match, its boards, propagated bracket slot and
+    audit row in one transaction. An unplayed fixture deletes freely; one
+    with play requires force. A knockout match with feeder matches cannot be
+    removed until those feeders are removed first.
     """
     admin_db = get_admin_db()
     try:
@@ -1711,119 +1788,30 @@ async def remove_match(
             admin_db, id, admin, "tournament.manage")
         tournament_id = match["tournament_id"]
 
-        boards = admin_db.table("boards").select(
-            "id, status, player1_score, player2_score"
-        ).eq("match_id", id).execute().data or []
-        # The match row alone does not say whether anyone played. Under
-        # remaining-coins scoring a match stays 'live' until every board is in,
-        # so one with seven of eight boards scored is neither completed nor
-        # confirmed. Ask the boards.
-        #
-        # A board counts as played when it is finished or carries a score --
-        # NOT merely when it is not pending. Every match is drawn with its
-        # first board already 'in_progress', because that is how a board is
-        # queued for the umpire, so "not pending" is true of a fixture nobody
-        # has looked at and would refuse every deletion.
-        played_boards = [
-            b for b in boards
-            if b.get("status") == "completed"
-            or (b.get("player1_score") or 0)
-            or (b.get("player2_score") or 0)
-        ]
-        has_play = bool(
-            match.get("result_confirmed")
-            or match.get("status") in ("live", "paused", "completed")
-            or played_boards
-        )
+        try:
+            result = admin_db.rpc("delete_match_safely", {
+                "p_match_id": id, "p_force": force, "p_actor_id": admin["id"],
+            }).execute().data or {}
+        except Exception as exc:
+            detail = str(exc)
+            if "PGRST202" in detail or "could not find the function" in detail.lower():
+                raise HTTPException(status_code=503, detail="Match deletion needs database migration 021.") from exc
+            if any(term in detail.lower() for term in ("play", "feeder", "advance", "terminal", "cannot delete")):
+                raise HTTPException(status_code=409, detail=detail)
+            raise
 
-        if has_play and not force:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Match {} ({} v {}) has play recorded on it: status {}, {} confirmed, "
-                    "{} board(s) scored. Deleting it discards those scores and the "
-                    "correction history with them, and removes the result from the points "
-                    "table. Reopen and correct it instead, or confirm you want it deleted."
-                ).format(
-                    match.get("match_number"), match.get("player1_name"),
-                    match.get("player2_name"), match.get("status"),
-                    "result" if match.get("result_confirmed") else "no result",
-                    len(played_boards),
-                ),
-            )
-
-        # A knockout match that others feed into is the round they advance to.
-        # next_match_id is ON DELETE SET NULL, so deleting it would quietly
-        # orphan them -- no error, and the winners simply stop advancing.
-        feeders = admin_db.table("matches").select(
-            "id, match_number, round_name"
-        ).eq("next_match_id", id).execute().data or []
-        if feeders and not force:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Match {} is the round {} other match(es) advance into, and deleting it "
-                    "would leave them with nowhere to send their winners. Delete those "
-                    "first, or redraw the knockout stage."
-                ).format(match.get("match_number"), len(feeders)),
-            )
-
-        # This match may already have put its winner into the next round. That
-        # slot has to go back to waiting, or the bracket shows a finalist from
-        # a quarter-final that no longer exists.
-        cleared_slot = None
-        parent_id, slot = match.get("next_match_id"), match.get("next_match_slot")
-        if parent_id and slot in ("player1", "player2"):
-            parent = (admin_db.table("matches").select(
-                "id, match_number, %s_id" % slot
-            ).eq("id", parent_id).execute().data or [None])[0]
-            if parent and parent.get("%s_id" % slot) and parent["%s_id" % slot] == match.get("winner_id"):
-                admin_db.table("matches").update({
-                    "%s_id" % slot: None,
-                    "%s_name" % slot: "Winner TBD",
-                }).eq("id", parent_id).execute()
-                cleared_slot = {"matchNumber": parent.get("match_number"), "slot": slot}
-
-        admin_db.table("matches").delete().eq("id", id).execute()
-
-        record_audit(
-            admin_db, actor=admin, action="match.delete",
-            entity_type="match", entity_id=id,
-            previous_state={
-                "matchNumber": match.get("match_number"),
-                "stage": match.get("stage"),
-                "roundName": match.get("round_name"),
-                "player1Name": match.get("player1_name"),
-                "player2Name": match.get("player2_name"),
-                "status": match.get("status"),
-                "resultConfirmed": match.get("result_confirmed"),
-                "winnerName": match.get("winner_name"),
-            },
-            request_context={
-                "forced": force,
-                "boardsDeleted": len(boards),
-                "boardsWithPlay": len(played_boards),
-                "orphanedFeeders": [f.get("match_number") for f in feeders],
-            },
-        )
-
+        old = result.get("match") or match
         return {
             "status": "success",
             "message": "Match {} ({} v {}) was removed.".format(
-                match.get("match_number"), match.get("player1_name"),
-                match.get("player2_name")),
+                old.get("match_number"), old.get("player1_name"), old.get("player2_name")),
             "matchId": id,
             "tournamentId": tournament_id,
-            "stage": match.get("stage"),
-            "boardsDeleted": len(boards),
-            "discardedPlay": has_play,
-            # Named rather than silently repaired: whoever deleted this has to
-            # know the bracket now has holes in it.
-            "orphanedFeeders": [
-                {"matchNumber": f.get("match_number"), "roundName": f.get("round_name")}
-                for f in feeders
-            ],
-            "clearedSlot": cleared_slot,
+            "stage": old.get("stage"),
+            "boardsDeleted": result.get("boardsDeleted", 0),
+            "discardedPlay": result.get("discardedPlay", False),
+            "orphanedFeeders": [],
+            "clearedSlot": result.get("clearedSlot"),
         }
     except HTTPException:
         raise

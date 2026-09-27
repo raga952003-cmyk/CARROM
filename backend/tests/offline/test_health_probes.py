@@ -39,10 +39,12 @@ MIGRATIONS_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "db", "migration
 # The names the payload must always carry, whatever the schema looks like.
 UNPROBEABLE = {"008_drop_city_default", "009_stop_timer_on_finish",
                "013_profiles_trigger_and_rls", "014_lock_profile_role",
-               "016_payment_ledger_integrity"}
+               "016_payment_ledger_integrity", "017_secure_data_api",
+               "018_duplicate_charge_ledger", "019_atomic_draw_and_schedule",
+               "021_atomic_match_delete"}
 
 # 007 replaces a function, so it is probed by rpc rather than by column.
-RPC_PROBED = {"007_apply_board_result_sets"}
+RPC_PROBED = {"007_apply_board_result_sets", "022_auto_approve_settled_registrations"}
 
 PAYLOAD_KEYS = {
     "status", "pending_migrations", "migrations", "env", "database_client",
@@ -164,6 +166,9 @@ def test_complete_schema_is_ok():
     check("the 007 probe calls apply_board_result by rpc",
           any(name == "apply_board_result" for name, _ in h.db.rpc_calls),
           h.db.rpc_calls)
+    check("the 022 probe checks the enabled registration trigger",
+          any(name == "registration_auto_approval_ready"
+              for name, _ in h.db.rpc_calls), h.db.rpc_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +204,18 @@ def test_missing_column_is_pending():
           set(payload.keys()) == PAYLOAD_KEYS, sorted(payload.keys()))
 
 
+def test_missing_auto_approval_trigger_is_pending():
+    h = Harness()
+    with_schema(h)
+    h.db.registration_auto_approval_ready = False
+    payload = fresh_health(h)
+    check("a missing payment approval trigger reports migration 022",
+          payload.get("pending_migrations") ==
+          ["022_auto_approve_settled_registrations"], payload)
+    check("missing approval trigger degrades health",
+          payload.get("status") == "degraded", payload)
+
+
 # ---------------------------------------------------------------------------
 # What cannot be seen is never claimed
 # ---------------------------------------------------------------------------
@@ -211,7 +228,7 @@ def test_unprobeable_migrations_are_listed_not_claimed():
     check("unprobeable_migrations is a list",
           isinstance(listed, list), payload)
     names = {m.get("migration") for m in (listed or []) if isinstance(m, dict)}
-    check("the unprobeable list names 008, 009, 013, 014 and 016",
+    check("the unprobeable list names each migration without a safe read probe",
           names == UNPROBEABLE, sorted(names))
     for m in listed or []:
         check("each unprobeable migration carries a one-line reason",
@@ -314,6 +331,7 @@ def test_every_migration_is_accounted_for():
 SUITES = [
     ("complete schema", test_complete_schema_is_ok),
     ("missing column", test_missing_column_is_pending),
+    ("missing approval trigger", test_missing_auto_approval_trigger_is_pending),
     ("unprobeable migrations", test_unprobeable_migrations_are_listed_not_claimed),
     ("cached paths", test_cached_paths_carry_the_list),
     ("every migration accounted for", test_every_migration_is_accounted_for),

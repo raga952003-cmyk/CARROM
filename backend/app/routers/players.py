@@ -18,18 +18,15 @@ async def get_players(viewer = Depends(get_optional_profile)):
     """
     Player directory.
 
-    Contact details are returned only to admins. This endpoint is reachable
-    without a session (the spectator views rely on it), and it previously
-    returned whole profile rows -- publishing every participant's phone number
-    and email address.
+    The directory is public. Contact details belong only in an authorized
+    tournament's registration view.
     """
     supabase = get_admin_db()
-    is_admin = bool(viewer and viewer.get("role") == "admin")
-    columns = "*" if is_admin else "id, name, avatar, club, city, rating, role, created_at"
+    columns = "id, name, avatar, club, city, rating, role, created_at"
     try:
         res = supabase.table("profiles").select(columns).eq(
             "role", "player").order("name").execute()
-        return [serialize_player(p, include_contact=is_admin) for p in (res.data or [])]
+        return [serialize_player(p, include_contact=False) for p in (res.data or [])]
     except HTTPException:
         raise
     except Exception as e:

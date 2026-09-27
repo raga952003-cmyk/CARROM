@@ -14,11 +14,14 @@ import {
 import { Tournament, Player } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { tournamentService } from '../../services/tournamentService';
+import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
 
 interface ImportParticipantsModalProps {
   isOpen: boolean;
   onClose: () => void;
   tournament: Tournament;
+  canAddParticipants: boolean;
+  blockedReason: string;
 }
 
 interface ParsedPlayer {
@@ -41,7 +44,9 @@ interface ParsedPlayer {
 export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = ({
   isOpen,
   onClose,
-  tournament
+  tournament,
+  canAddParticipants,
+  blockedReason,
 }) => {
   const { 
     createPlayerAccount, 
@@ -68,6 +73,12 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
   const [step, setStep] = useState<'input' | 'preview'>('input');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const deadlinePassed = isRegistrationDeadlinePassed(tournament.registrationEndDate);
+  const hasEntryFee = Number(tournament.entryFee || 0) > 0;
+  const canImport = canAddParticipants && !deadlinePassed;
+  const importBlockedReason = deadlinePassed
+    ? `Registration closed at the end of ${tournament.registrationEndDate} (India time). Entries cannot be imported now.`
+    : blockedReason;
 
   if (!isOpen) return null;
 
@@ -91,6 +102,10 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
   };
 
   const handleAnalyze = async () => {
+    if (!canAddParticipants || isRegistrationDeadlinePassed(tournament.registrationEndDate)) {
+      setErrorMsg(importBlockedReason);
+      return;
+    }
     if (!rawText.trim() && !fileObj) {
       setErrorMsg('Please upload a file or paste a player list.');
       return;
@@ -182,6 +197,10 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
   };
 
   const handleImportAndSchedule = async () => {
+    if (!canAddParticipants || isRegistrationDeadlinePassed(tournament.registrationEndDate)) {
+      setErrorMsg(importBlockedReason);
+      return;
+    }
     const selectedPlayers = parsedPlayers.filter(p => p.selected);
     if (selectedPlayers.length === 0) {
       setErrorMsg('No players selected for import.');
@@ -194,7 +213,7 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
     try {
       // Use backend bulk import confirmation transaction (accounts creation + registrations + fixtures + scheduling + publish)
       const response: any = await tournamentService.confirmImport(
-        tournament.id, selectedPlayers, autoSchedule);
+        tournament.id, selectedPlayers, autoSchedule && !hasEntryFee);
       setSuccessMsg(response.message || 'Successfully registered the players.');
       // The import created players, teams, entries and possibly a whole draw,
       // none of which the screen behind this modal knows about yet.
@@ -261,11 +280,21 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
             <span>AI Player Import & Auto-Scheduler</span>
           </h3>
           <p className="text-xs text-gray-500">
-            Upload CSV/Spreadsheets or copy-paste player list texts to register competitors and generate fixtures instantly.
+            Upload CSV/Spreadsheets or copy-paste a player list to register competitors.
           </p>
+          {hasEntryFee && (
+            <p className="mt-2 rounded-lg border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800">
+              Imported entries stay pending until you record each payment or waive its fee. Draw fixtures after the entries are approved.
+            </p>
+          )}
         </div>
 
         {/* Error/Success Feed */}
+        {!canImport && (
+          <div role="alert" className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+            {importBlockedReason}
+          </div>
+        )}
         {errorMsg && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-800 text-xs rounded-xl flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
@@ -439,31 +468,31 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
           {step === 'input' ? (
             <button
               onClick={handleAnalyze}
-              disabled={loading}
-              className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5"
+              disabled={loading || !canImport}
+              className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5 disabled:opacity-50"
             >
               <Sparkles className="w-4 h-4 text-[#D4A72C]" />
               <span>Analyze & Preview List</span>
             </button>
           ) : (
             <div className="flex items-center gap-3">
-              <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-700 cursor-pointer">
+              <label className={`flex items-center gap-1.5 text-xs font-semibold ${hasEntryFee ? 'text-gray-400' : 'text-gray-700 cursor-pointer'}`}>
                 <input
                   type="checkbox"
-                  checked={autoSchedule}
+                  checked={autoSchedule && !hasEntryFee}
                   onChange={e => setAutoSchedule(e.target.checked)}
-                  disabled={loading}
+                  disabled={loading || hasEntryFee}
                   className="accent-[#0B5D3B]"
                 />
                 <span>Draw and publish the schedule too</span>
               </label>
               <button
                 onClick={handleImportAndSchedule}
-                disabled={loading}
-                className="px-5 py-2.5 bg-[#D4A72C] hover:bg-[#c29623] text-[#0B5D3B] text-xs font-black rounded-xl shadow-md flex items-center gap-1.5"
+                disabled={loading || !canImport}
+                className="px-5 py-2.5 bg-[#D4A72C] hover:bg-[#c29623] text-[#0B5D3B] text-xs font-black rounded-xl shadow-md flex items-center gap-1.5 disabled:opacity-50"
               >
                 <Calendar className="w-4 h-4 text-[#0B5D3B]" />
-                <span>{autoSchedule ? 'Confirm Import & Auto-Schedule' : 'Confirm Import'}</span>
+                <span>{autoSchedule && !hasEntryFee ? 'Confirm Import & Auto-Schedule' : 'Confirm Import'}</span>
               </button>
             </div>
           )}

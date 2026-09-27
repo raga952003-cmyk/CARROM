@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { findMyMatches, opponentOf } from '../../utils/myMatches';
 import { groupMatches, resultSummary, outcomeFor, finishedIsProvisional, MatchGroupKey } from '../../utils/matchGroups';
-import { paymentService, PaymentDismissedError } from '../../services/paymentService';
+import { paymentService, PaymentDismissedError, PaymentUnconfirmedError } from '../../services/paymentService';
 import { 
   Trophy, 
   Calendar, 
@@ -30,7 +30,9 @@ import { FixtureScheduleView } from '../admin/FixtureScheduleView';
 import { LiveMatchController } from '../admin/LiveMatchController';
 import { StandingsSections } from '../common/StandingsSections';
 import { NextMatchCard } from './NextMatchCard';
+import { GPayPaymentProof } from './GPayPaymentProof';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
+import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
 
 export const PlayerDashboard: React.FC = () => {
   const { 
@@ -49,6 +51,12 @@ export const PlayerDashboard: React.FC = () => {
 
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
   const [selectedTournamentForReg, setSelectedTournamentForReg] = useState<Tournament | null>(null);
+  const [clockNow, setClockNow] = useState(() => Date.now());
+
+  React.useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Sub-view in active tournament
   const [activeTab, setActiveTab] = useState<'my_matches' | 'schedule' | 'standings' | 'knockout' | 'poster'>('my_matches');
@@ -58,16 +66,11 @@ export const PlayerDashboard: React.FC = () => {
   // Check if current user is registered in current tournament
   const userRegistration = currentTournament?.registrations?.find(r => 
     (currentUser?.id && r.player?.id === currentUser.id) || 
-    (currentUser?.name && r.player?.name.toLowerCase() === currentUser.name.toLowerCase()) ||
     (currentUser?.id && r.team?.player1?.id === currentUser.id) ||
     (currentUser?.id && r.team?.player2?.id === currentUser.id)
   );
 
-  // Matches this player is actually in. See utils/myMatches: the id is the
-  // identity, with an exact-name fallback for the case where the signed-in
-  // account and the roster entry are different rows -- which is why this
-  // screen read "No personal matches found" for a player with nineteen
-  // fixtures in the draw.
+  // Matches linked to this account or to a doubles team containing it.
   const myMatches = React.useMemo(
     () => findMyMatches(currentTournament, currentUser),
     [currentTournament, currentUser]
@@ -92,6 +95,25 @@ export const PlayerDashboard: React.FC = () => {
   // way back to it.
   const [payingFee, setPayingFee] = useState(false);
   const [feeError, setFeeError] = useState('');
+  const [paymentPendingConfirmation, setPaymentPendingConfirmation] = useState<string | null>(null);
+  const [onlinePaymentsAvailable, setOnlinePaymentsAvailable] = useState(false);
+  const [gpayProofPendingByEntry, setGpayProofPendingByEntry] = useState<Record<string, boolean | null>>({});
+  const gpayProofPending = userRegistration?.id
+    ? gpayProofPendingByEntry[userRegistration.id] : undefined;
+
+  React.useEffect(() => {
+    paymentService.getConfig()
+      .then(config => setOnlinePaymentsAvailable(config.enabled))
+      .catch(() => setOnlinePaymentsAvailable(false));
+  }, []);
+
+  React.useEffect(() => {
+    if (userRegistration?.id === paymentPendingConfirmation &&
+        userRegistration.paymentStatus !== 'pending') {
+      setPaymentPendingConfirmation(null);
+      setFeeError('');
+    }
+  }, [paymentPendingConfirmation, userRegistration?.id, userRegistration?.paymentStatus]);
 
   const settleEntryFee = async (registrationId: string) => {
     setPayingFee(true);
@@ -102,7 +124,11 @@ export const PlayerDashboard: React.FC = () => {
     } catch (e: any) {
       // A dismissed window is not a failure worth reporting -- they changed
       // their mind and the entry is exactly as it was.
-      if (!(e instanceof PaymentDismissedError || e?.dismissed)) {
+      if (e instanceof PaymentUnconfirmedError || e?.paid) {
+        setPaymentPendingConfirmation(registrationId);
+        setFeeError(e?.message || 'Payment received. Please wait for confirmation; do not pay again.');
+        await refreshTournaments();
+      } else if (!(e instanceof PaymentDismissedError || e?.dismissed)) {
         setFeeError(e?.message || 'The payment could not be completed. Please try again.');
       }
     } finally {
@@ -143,6 +169,7 @@ export const PlayerDashboard: React.FC = () => {
 
   const handleOpenRegistration = (t: Tournament, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    if (t.status !== 'registration_open' || isRegistrationDeadlinePassed(t.registrationEndDate)) return;
     setSelectedTournamentForReg(t);
     setIsRegisterModalOpen(true);
   };
@@ -178,7 +205,7 @@ export const PlayerDashboard: React.FC = () => {
                     Match #{nextMatch.matchNumber} · Board #{nextMatch.boardNumber}
                   </h2>
                   <p className="text-xs sm:text-sm text-emerald-100 mt-0.5">
-                    Opponent: <strong>{opponentOf(nextMatch, currentUser)}</strong> · Scheduled: {nextMatch.scheduledTime}
+                    Opponent: <strong>{opponentOf(nextMatch, currentUser, currentTournament)}</strong> · Scheduled: {nextMatch.scheduledTime}
                   </p>
                 </div>
 
@@ -274,11 +301,11 @@ export const PlayerDashboard: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pt-2">
               {filteredTournaments.map((t) => {
                 const isSelected = t.id === activeTournamentId;
-                const isRegOpen = t.status === 'registration_open';
+                const registrationClosedByDate = isRegistrationDeadlinePassed(t.registrationEndDate, new Date(clockNow));
+                const isRegOpen = t.status === 'registration_open' && !registrationClosedByDate;
                 const isOngoing = t.status === 'ongoing';
                 const isUserRegistered = t.registrations?.some(r => 
                   (currentUser?.id && r.player?.id === currentUser.id) || 
-                  (currentUser?.name && r.player?.name.toLowerCase() === currentUser.name.toLowerCase()) ||
                   (currentUser?.id && r.team?.player1?.id === currentUser.id) ||
                   (currentUser?.id && r.team?.player2?.id === currentUser.id)
                 );
@@ -301,7 +328,9 @@ export const PlayerDashboard: React.FC = () => {
                           isRegOpen ? 'bg-emerald-100 text-emerald-800' :
                           'bg-gray-100 text-gray-700'
                         }`}>
-                          {t.status.replace('_', ' ')}
+                          {registrationClosedByDate && t.status === 'registration_open'
+                            ? 'Registration closed'
+                            : t.status.replace('_', ' ')}
                         </span>
 
                         <span className="text-[10px] font-bold text-gray-500 uppercase">
@@ -352,21 +381,21 @@ export const PlayerDashboard: React.FC = () => {
 
                     {/* Bottom CTA button */}
                     <div className="flex items-center justify-between pt-2 border-t border-gray-100">
-                      {isRegOpen ? (
-                        isUserRegistered ? (
-                          <span className="px-3 py-1.5 bg-emerald-50 text-emerald-800 text-xs font-bold rounded-xl border border-emerald-200 flex items-center gap-1">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                            <span>Registered</span>
-                          </span>
-                        ) : (
-                          <button
-                            onClick={(e) => handleOpenRegistration(t, e)}
-                            className="px-3.5 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
-                          >
-                            <UserCheck className="w-3.5 h-3.5 text-[#D4A72C]" />
-                            <span>Register Now</span>
-                          </button>
-                        )
+                      {isUserRegistered ? (
+                        <span className="px-3 py-1.5 bg-emerald-50 text-emerald-800 text-xs font-bold rounded-xl border border-emerald-200 flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Registered</span>
+                        </span>
+                      ) : isRegOpen ? (
+                        <button
+                          onClick={(e) => handleOpenRegistration(t, e)}
+                          className="px-3.5 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                        >
+                          <UserCheck className="w-3.5 h-3.5 text-[#D4A72C]" />
+                          <span>Register Now</span>
+                        </button>
+                      ) : registrationClosedByDate && t.status === 'registration_open' ? (
+                        <span className="text-xs font-semibold text-gray-500">Registration closed</span>
                       ) : (
                         <span className="text-xs font-semibold text-gray-500">
                           {t.matches.length} Scheduled Matches
@@ -406,7 +435,8 @@ export const PlayerDashboard: React.FC = () => {
                   </h3>
                 </div>
 
-                {currentTournament.status === 'registration_open' && (
+                {(userRegistration || (currentTournament.status === 'registration_open' &&
+                  !isRegistrationDeadlinePassed(currentTournament.registrationEndDate, new Date(clockNow)))) && (
                   userRegistration ? (
                     // The badge used to read "Registered (Approved)" the instant
                     // someone registered, whatever the row actually said -- and a
@@ -423,6 +453,9 @@ export const PlayerDashboard: React.FC = () => {
                       if (userRegistration.paymentStatus === 'pending' && status !== 'rejected') {
                         return (
                           <div className="flex flex-col items-end gap-1 shrink-0">
+                            {onlinePaymentsAvailable && paymentPendingConfirmation !== userRegistration.id &&
+                             currentTournament.status !== 'completed' &&
+                             (!currentTournament.gpayUpiId || gpayProofPending === false) ? (
                             <button
                               onClick={() => settleEntryFee(userRegistration.id)}
                               disabled={payingFee}
@@ -434,9 +467,20 @@ export const PlayerDashboard: React.FC = () => {
                               <span>
                                 {payingFee
                                   ? 'Processing…'
-                                  : `Pay Entry Fee (₹${Number(currentTournament.entryFee || 0).toLocaleString('en-IN')})`}
+                                  : `Pay Entry Fee (₹${((userRegistration.feePaise ?? Number(currentTournament.entryFee || 0) * 100) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })})`}
                               </span>
                             </button>
+                            ) : (
+                              <span className="text-[10px] text-amber-300/90 max-w-[16rem] text-right">
+                                {gpayProofPending === true
+                                  ? 'Your GPay proof is awaiting review. Do not pay again.'
+                                  : paymentPendingConfirmation === userRegistration.id
+                                    ? 'Payment confirmation is pending. Do not pay again.'
+                                    : currentTournament.gpayUpiId && gpayProofPending !== false
+                                      ? 'Checking GPay proof status before opening another payment.'
+                                      : 'Online payment is unavailable. Contact the organiser to settle the entry fee.'}
+                              </span>
+                            )}
                             <span className="text-[10px] text-amber-300/90">
                               Your entry is confirmed once the fee is paid
                             </span>
@@ -474,6 +518,13 @@ export const PlayerDashboard: React.FC = () => {
                   )
                 )}
               </div>
+
+              {userRegistration && currentTournament.gpayUpiId && paymentPendingConfirmation !== userRegistration.id && (
+                <GPayPaymentProof registration={userRegistration} tournament={currentTournament}
+                  onPendingChange={pending => setGpayProofPendingByEntry(current => ({
+                    ...current, [userRegistration.id]: pending,
+                  }))} />
+              )}
 
               <NextMatchCard
 
@@ -541,7 +592,8 @@ export const PlayerDashboard: React.FC = () => {
                         <p className="text-xs text-gray-500 max-w-sm mx-auto mb-4">
                           You are viewing as <strong>{currentUser?.name || 'Player'}</strong>. Register your entry or select matches from the full schedule to follow.
                         </p>
-                        {currentTournament.status === 'registration_open' && (
+                        {currentTournament.status === 'registration_open' &&
+                         !isRegistrationDeadlinePassed(currentTournament.registrationEndDate, new Date(clockNow)) && (
                           <button
                             onClick={() => handleOpenRegistration(currentTournament)}
                             className="px-4 py-2 bg-[#0B5D3B] text-white text-xs font-bold rounded-xl shadow-xs hover:bg-[#08472d]"
@@ -622,7 +674,7 @@ export const PlayerDashboard: React.FC = () => {
                             {(() => {
                               const summary = resultSummary(m);
                               if (!summary) return null;
-                              const outcome = outcomeFor(m, currentUser);
+                              const outcome = outcomeFor(m, currentUser, currentTournament);
                               return (
                                 <div className="flex items-center gap-1.5 text-[11px] pt-2 border-t border-gray-100">
                                   {outcome && (
@@ -737,7 +789,7 @@ export const PlayerDashboard: React.FC = () => {
                         <li>Queen must be covered by a carrom coin on the same or immediate consecutive turn (+{currentTournament.rules.queenPoints} pts).</li>
                         <li>Win awards <strong>{currentTournament.rules.pointsForWin} points</strong>, Draw awards <strong>{currentTournament.rules.pointsForDraw} point</strong>, Loss awards <strong>{currentTournament.rules.pointsForLoss} points</strong>.</li>
                         <li>Strict {currentTournament.rules.restTimeMinutes}-minute rest period is guaranteed between back-to-back player rounds.</li>
-                        <li>Final standings are evaluated deterministically: Points &gt; Board Difference &gt; Net Score Difference.</li>
+                        <li>Final standings use the tournament's published tiebreaker order. The default is match points, then net score difference, then board difference, then head-to-head.</li>
                       </ul>
                     </div>
 

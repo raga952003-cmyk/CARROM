@@ -24,6 +24,13 @@ interface CreateTournamentModalProps {
   onClose: () => void;
 }
 
+const dateAfter = (days: number): string => {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+
 export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   isOpen,
   onClose
@@ -47,20 +54,21 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   const [city, setCity] = useState('');
   const [numberOfBoards, setNumberOfBoards] = useState(4);
   const [entryFee, setEntryFee] = useState(500);
+  const [gpayUpiId, setGpayUpiId] = useState('');
   const [prizePool, setPrizePool] = useState('₹50,000 + Trophies');
 
   // Dates
-  const [regStart, setRegStart] = useState('2026-08-25');
-  const [regEnd, setRegEnd] = useState('2026-09-05');
-  const [tourStart, setTourStart] = useState('2026-09-10');
-  const [tourEnd, setTourEnd] = useState('2026-09-15');
+  const [regStart, setRegStart] = useState(() => dateAfter(0));
+  const [regEnd, setRegEnd] = useState(() => dateAfter(10));
+  const [tourStart, setTourStart] = useState(() => dateAfter(14));
+  const [tourEnd, setTourEnd] = useState(() => dateAfter(18));
 
   // Rules
   const [pointsForWin, setPointsForWin] = useState(2);
   const [pointsForDraw, setPointsForDraw] = useState(1);
   const [pointsForLoss, setPointsForLoss] = useState(0);
-  const [maxBoards, setMaxBoards] = useState(3);
-  const [targetScore, setTargetScore] = useState(29);
+  const [targetScore, setTargetScore] = useState(25);
+  const [rulePreset, setRulePreset] = useState<'senior' | 'other_age' | 'custom'>('senior');
   // 1 = a single league; anything higher splits the league phase into groups.
   const [groupCount, setGroupCount] = useState(1);
   const [qualifiersPerGroup, setQualifiersPerGroup] = useState(2);
@@ -69,7 +77,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   // silently become 8. Offering the real sizes is clearer than rounding one.
   const [knockoutQualifiers, setKnockoutQualifiers] = useState(8);
   const [expectedEntrants, setExpectedEntrants] = useState(16);
-  const [matchDuration, setMatchDuration] = useState(30);
+  const [matchDuration, setMatchDuration] = useState(90);
   const [restTime, setRestTime] = useState(10);
 
   const [activeTab, setActiveTab] = useState<'basic' | 'rules'>('basic');
@@ -88,13 +96,24 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
       alert('Please enter a tournament name.');
       return;
     }
+    if (!regStart || !regEnd || !tourStart || !tourEnd ||
+        regStart > regEnd || regEnd > tourStart || tourStart > tourEnd ||
+        (publishImmediately && regEnd < dateAfter(0))) {
+      setSaveError('Choose dates in order: registration start, registration end, tournament start, then tournament end. Registration must still be open when publishing.');
+      return;
+    }
+    if (entryFee > 0 && gpayUpiId.trim() &&
+        !(/^[6-9][0-9]{9}$/.test(gpayUpiId.trim()) || /^[A-Za-z0-9._-]{2,100}@[A-Za-z0-9.-]{2,100}$/.test(gpayUpiId.trim()))) {
+      setSaveError('Enter a valid GPay UPI ID or 10-digit UPI phone number.');
+      return;
+    }
     setSaving(true);
 
     const rules: TournamentRules = {
       pointsForWin,
       pointsForDraw,
       pointsForLoss,
-      maxBoardsPerMatch: maxBoards,
+      maxBoardsPerMatch: scoring.boardsPerSet,
       targetScore,
       matchDurationMinutes: matchDuration,
       ...scoring,
@@ -102,7 +121,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
       groupCount,
       qualifiersPerGroup,
       knockoutQualifiers,
-      tiebreakerRules: ['points', 'board_difference', 'net_score_difference', 'head_to_head']
+      tiebreakerRules: ['points', 'net_score_difference', 'board_difference', 'head_to_head']
     };
 
     try {
@@ -119,6 +138,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
         city,
         numberOfBoards,
         entryFee,
+        gpayUpiId: entryFee > 0 ? gpayUpiId.trim() || null : null,
         prizePool,
         rules,
         // Always born a draft, whichever button was pressed.
@@ -193,7 +213,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                 : 'border-transparent text-gray-500 hover:text-gray-700'
             }`}
           >
-            2. Carrom Federation Scoring & Rules
+            2. Match & Scoring Rules
           </button>
         </div>
 
@@ -321,7 +341,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                     min={10}
                     max={120}
                     value={matchDuration}
-                    onChange={e => setMatchDuration(parseInt(e.target.value) || 30)}
+                    onChange={e => setMatchDuration(parseInt(e.target.value) || 90)}
                     className="w-full text-xs px-3 py-2 border border-emerald-200 rounded-lg bg-white font-bold text-emerald-900"
                   />
                 </div>
@@ -352,6 +372,17 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                   />
                 </div>
               </div>
+
+              {entryFee > 0 && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3.5">
+                  <label className="block text-xs font-bold text-emerald-950 mb-1">Tournament GPay UPI ID (optional)</label>
+                  <input type="text" value={gpayUpiId} maxLength={100}
+                    onChange={e => setGpayUpiId(e.target.value)}
+                    placeholder="example@upi or 10-digit UPI number"
+                    className="w-full text-xs px-3 py-2 border border-emerald-200 rounded-lg bg-white" />
+                  <p className="mt-1 text-[11px] text-emerald-800">Players can pay this tournament account and upload a receipt. An organiser must verify the money arrived before approving the proof.</p>
+                </div>
+              )}
 
               {/* Dates */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
@@ -414,11 +445,31 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
           ) : (
             <div className="space-y-4">
               
-              {/* Official Carrom Points System */}
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-xs">
+                <div className="font-bold text-emerald-900">Match rules preset</div>
+                <p className="mt-1 text-emerald-800">Senior standard: best of 3 games, each to 25 points or 8 boards. Other age groups may use 21 points or 6 boards. Changes below are custom tournament rules.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" onClick={() => {
+                    setScoring({ ...defaultScoringRules, numberOfSets: 3, boardsPerSet: 8 });
+                    setTargetScore(25); setRulePreset('senior');
+                  }} className={`rounded-lg border px-3 py-1.5 font-semibold ${rulePreset === 'senior' ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white' : 'border-emerald-200 bg-white text-emerald-900'}`}>
+                    Standard senior · 3 × 8 · 25 pts
+                  </button>
+                  <button type="button" onClick={() => {
+                    setScoring({ ...defaultScoringRules, numberOfSets: 3, boardsPerSet: 6 });
+                    setTargetScore(21); setRulePreset('other_age');
+                  }} className={`rounded-lg border px-3 py-1.5 font-semibold ${rulePreset === 'other_age' ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white' : 'border-emerald-200 bg-white text-emerald-900'}`}>
+                    Other age · 3 × 6 · 21 pts
+                  </button>
+                  {rulePreset === 'custom' && <span className="self-center font-semibold text-amber-800">Custom rules selected</span>}
+                </div>
+              </div>
+
+              {/* League standings points are a tournament choice. */}
               <div className="bg-amber-50/70 p-4 rounded-xl border border-amber-200/80">
                 <div className="flex items-center space-x-2 text-amber-950 font-bold text-xs mb-1">
                   <ShieldCheck className="w-4 h-4 text-[#0B5D3B]" />
-                  <span>Official AICF Standard Points Rules</span>
+                  <span>League standings points</span>
                 </div>
                 <p className="text-[11px] text-amber-800 mb-3">
                   Match points are awarded to determine league standings and tiebreaker seeds.
@@ -461,42 +512,22 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                 </div>
               </div>
 
-              {/* Board Configuration */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
+              <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
                   <label className="block text-xs font-bold text-gray-700 mb-1">
-                    Boards per Match
-                  </label>
-                  <select
-                    value={maxBoards}
-                    onChange={e => setMaxBoards(parseInt(e.target.value) || 3)}
-                    className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
-                  >
-                    <option value={1}>1 Board</option>
-                    <option value={3}>Best of 3 Boards</option>
-                    <option value={5}>Best of 5 Boards</option>
-                    <option value={8}>8 Boards (Federation Limit)</option>
-                  </select>
-                </div>
-
-                <div className="p-3 bg-gray-50 rounded-xl border border-gray-200">
-                  <label className="block text-xs font-bold text-gray-700 mb-1">
-                    Target Score Limit
+                    Target points per game
                   </label>
                   <select
                     value={targetScore}
-                    onChange={e => setTargetScore(parseInt(e.target.value) || 29)}
+                    onChange={e => { setTargetScore(parseInt(e.target.value) || 25); setRulePreset('custom'); }}
                     className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
                   >
-                    <option value={29}>29 Points (Standard)</option>
-                    <option value={25}>25 Points</option>
-                    <option value={21}>21 Points</option>
+                    <option value={25}>25 points (senior standard)</option>
+                    <option value={21}>21 points (other age)</option>
+                    <option value={29}>29 points (house rule)</option>
                   </select>
-                </div>
-
               </div>
 
-              <ScoringRulesSettings value={scoring} onChange={setScoring} />
+              <ScoringRulesSettings value={scoring} onChange={next => { setScoring(next); setRulePreset('custom'); }} />
 
               <GroupStageSettings
                 format={format}
@@ -521,8 +552,8 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                 </p>
                 <ol className="list-decimal list-inside text-xs text-gray-700 space-y-1 font-medium bg-white p-3 rounded-lg border border-gray-200">
                   <li>Total Tournament Match Points</li>
-                  <li>Board Wins Difference (Boards Won - Boards Lost)</li>
                   <li>Net Score Difference (Total Points For - Total Points Against)</li>
+                  <li>Board Wins Difference (Boards Won - Boards Lost)</li>
                   <li>Head-to-Head match outcome</li>
                 </ol>
               </div>

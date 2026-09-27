@@ -40,7 +40,7 @@ export interface PaymentRecord {
   amountPaise: number;
   amount: number;          // rupees, for display
   currency: string;
-  status: 'created' | 'paid' | 'failed' | 'refunded';
+  status: 'created' | 'paid' | 'failed' | 'refund_due' | 'refunded';
   signatureVerified: boolean;
   confirmedVia?: 'callback' | 'webhook' | null;
   errorDescription?: string | null;
@@ -87,8 +87,8 @@ export class PaymentUnconfirmedError extends Error {
   readonly paymentId: string;
   constructor(paymentId: string) {
     super(
-      'Your payment went through, but we could not confirm it just now. ' +
-      'Do not pay again — it will be confirmed automatically, or the organisers can confirm it.'
+      'Checkout reported your payment, but your entry is not confirmed yet. ' +
+      'Do not pay again. Contact the organisers so they can review the charge.'
     );
     this.name = 'PaymentUnconfirmedError';
     this.paymentId = paymentId;
@@ -105,8 +105,9 @@ const pause = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
  * Hand Checkout's result to the server, retrying a transport failure.
  *
  * Only transport and 5xx failures are retried. A 4xx is the server's decision
- * -- a bad signature, an amount mismatch, an entry already paid -- and repeating
- * the call cannot change it.
+ * and repeating the call cannot change it. Once Checkout reports success, even
+ * that decision must keep the player from paying again: a duplicate captured
+ * charge is one reason for a 409 here.
  *
  * When every attempt fails, the caller gets PaymentUnconfirmedError rather than
  * the raw network error, because at this point the money HAS moved and the
@@ -124,9 +125,10 @@ async function verifyWithRetry(
     } catch (e: any) {
       lastFailure = e;
       const status = e instanceof ApiError ? e.status : 0;
-      // A decision, not a blip: stop and surface it.
+      // A decision, not a blip: stop retrying, but preserve the fact that
+      // Checkout already reported a charge. The caller must disable repeat pay.
       if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
-        throw e;
+        break;
       }
       if (attempt < VERIFY_ATTEMPTS - 1) {
         await pause(VERIFY_BACKOFF_MS[attempt] ?? 1800);
@@ -218,6 +220,16 @@ export const paymentService = {
   /** Every attempt against one entry, newest first. */
   async listForRegistration(registrationId: string): Promise<PaymentRecord[]> {
     return apiClient.get<PaymentRecord[]>(`/payments/registrations/${registrationId}`);
+  },
+
+  /** Check a completed Razorpay dashboard refund and sync it to the ledger. */
+  async reconcileRefund(paymentId: string): Promise<PaymentRecord> {
+    return apiClient.post<PaymentRecord>(`/payments/${paymentId}/reconcile-refund`, {});
+  },
+
+  /** Record a manual payment refunded outside the app, with its receipt. */
+  async recordManualRefund(paymentId: string, reference: string, reason: string): Promise<PaymentRecord> {
+    return apiClient.post<PaymentRecord>(`/payments/${paymentId}/record-manual-refund`, { reference, reason });
   },
 
   /**

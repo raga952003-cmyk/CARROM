@@ -24,6 +24,10 @@ import { useTournament } from '../../context/TournamentContext';
 import { useNotify } from '../../context/NotificationContext';
 import { ConfirmationModal } from '../common/ConfirmationModal';
 import { ImportParticipantsModal } from './ImportParticipantsModal';
+import { tournamentService } from '../../services/tournamentService';
+import { paymentService, PaymentRecord } from '../../services/paymentService';
+import { PaymentProofReview } from './PaymentProofReview';
+import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
 
 interface RegistrationManagerProps {
   tournament: Tournament;
@@ -48,7 +52,8 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
     allPlayers, 
     allTeams, 
     registerForTournament,
-    createPlayerAccount
+    createPlayerAccount,
+    refreshTournaments
   } = useTournament();
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -59,17 +64,24 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const notify = useNotify();
 
-  // Closing registration is the moment the entry list becomes the thing the
-  // draw is made from. Someone entered after that appears here and nowhere
-  // else — no fixtures, no place in the table — and the only way to give them
-  // any is to regenerate the draw, which deletes every result in it. A draft
-  // tournament has not opened yet, so its list is still being built.
+  // Keep an open admin screen in step with the closing day in India.
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 15_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // A draft can be populated before publication, but the closing date also
+  // limits admin entry, including when this screen stays open overnight.
   const entriesOpen = tournament.status === 'registration_open'
     || tournament.status === 'draft';
-  const canAddParticipants = canManage && entriesOpen;
+  const deadlinePassed = isRegistrationDeadlinePassed(tournament.registrationEndDate, new Date(clockNow));
+  const canAddParticipants = canManage && entriesOpen && !deadlinePassed;
   const addBlockedReason = !canManage
     ? 'Entries belong to whoever runs this tournament.'
-    : `Registration is ${String(tournament.status).replace(/_/g, ' ')}, so no further participants can be entered. Reopen registration to add someone, or add a match for them from the Fixtures tab.`;
+    : deadlinePassed
+      ? `Registration closed at the end of ${tournament.registrationEndDate} (India time). New and existing players cannot be added or imported now.`
+      : `Registration is ${String(tournament.status).replace(/_/g, ' ')}, so no further participants can be entered.`;
   // The entry a reject is being confirmed for; the modal is open while set.
   const [rejectTarget, setRejectTarget] = useState<Registration | null>(null);
   // Which row's approve or reject is in flight, as "<regId>:<action>", and the
@@ -77,8 +89,72 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   // that was pressed. The toast still fires as well.
   const [rowBusy, setRowBusy] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  const [paymentReviewTarget, setPaymentReviewTarget] = useState<Registration | null>(null);
+  const [paymentAttempts, setPaymentAttempts] = useState<PaymentRecord[]>([]);
+  const [paymentReviewLoading, setPaymentReviewLoading] = useState(false);
+  const [paymentReviewBusy, setPaymentReviewBusy] = useState<string | null>(null);
+  const [paymentReviewError, setPaymentReviewError] = useState('');
+  const [paymentReviewRefresh, setPaymentReviewRefresh] = useState(0);
   const [isClosing, setIsClosing] = useState(false);
   const [closeError, setCloseError] = useState('');
+
+  useEffect(() => {
+    if (!paymentReviewTarget) return;
+    let active = true;
+    setPaymentReviewLoading(true);
+    setPaymentAttempts([]);
+    setPaymentReviewError('');
+    paymentService.listForRegistration(paymentReviewTarget.id)
+      .then(attempts => { if (active) setPaymentAttempts(attempts); })
+      .catch(error => {
+        if (active) setPaymentReviewError(error instanceof Error ? error.message : 'Could not load payments.');
+      })
+      .finally(() => { if (active) setPaymentReviewLoading(false); });
+    return () => { active = false; };
+  }, [paymentReviewTarget?.id, paymentReviewRefresh]);
+
+  const reconcileRefund = async (paymentId: string) => {
+    if (paymentReviewBusy) return;
+    setPaymentReviewBusy(paymentId);
+    setPaymentReviewError('');
+    try {
+      await paymentService.reconcileRefund(paymentId);
+      await refreshTournaments();
+      setPaymentReviewRefresh(value => value + 1);
+    } catch (error) {
+      setPaymentReviewError(error instanceof Error ? error.message : 'Could not verify this refund.');
+    } finally {
+      setPaymentReviewBusy(null);
+    }
+  };
+
+  const recordManualRefund = async (paymentId: string) => {
+    if (paymentReviewBusy) return;
+    const reference = window.prompt('Enter the external refund transaction or receipt reference (at least 3 characters)');
+    if (!reference) return;
+    if (reference.trim().length < 3 || reference.trim().length > 120) {
+      setPaymentReviewError('Enter a refund reference between 3 and 120 characters.');
+      return;
+    }
+    const reason = window.prompt('Enter the reason for this refund (at least 5 characters)');
+    if (!reason) return;
+    if (reason.trim().length < 5 || reason.trim().length > 500) {
+      setPaymentReviewError('Enter a refund reason between 5 and 500 characters.');
+      return;
+    }
+    if (!window.confirm('Confirm the money has already been returned outside this app. This action records the refund; it does not send money.')) return;
+    setPaymentReviewBusy(paymentId);
+    setPaymentReviewError('');
+    try {
+      await paymentService.recordManualRefund(paymentId, reference.trim(), reason.trim());
+      await refreshTournaments();
+      setPaymentReviewRefresh(value => value + 1);
+    } catch (error) {
+      setPaymentReviewError(error instanceof Error ? error.message : 'Could not record this refund.');
+    } finally {
+      setPaymentReviewBusy(null);
+    }
+  };
 
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>(allPlayers[0]?.id || '');
   const [selectedTeamId, setSelectedTeamId] = useState<string>(allTeams[0]?.id || '');
@@ -160,6 +236,15 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const handleManualAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     setAddError('');
+    const deadlineNowPassed = isRegistrationDeadlinePassed(tournament.registrationEndDate);
+    if (!canManage || !entriesOpen || deadlineNowPassed) {
+      setAddError(!canManage
+        ? 'You cannot add entries to this tournament.'
+        : deadlineNowPassed
+          ? `Registration closed at the end of ${tournament.registrationEndDate} (India time).`
+          : 'Registration is closed.');
+      return;
+    }
     setIsSubmitting(true);
 
     try {
@@ -266,6 +351,38 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const approve = (reg: Registration) =>
     runRow(reg, 'approve', () => approveRegistration(tournament.id, reg.id), 'Could not approve this entry.');
 
+  const settleAtVenue = (reg: Registration) => {
+    const method = window.prompt('Payment method: cash, upi, or bank_transfer');
+    if (!method) return;
+    if (!['cash', 'upi', 'bank_transfer'].includes(method)) {
+      setRowErrors(prev => ({ ...prev, [reg.id]: 'Choose cash, upi, or bank_transfer.' }));
+      return;
+    }
+    const reference = window.prompt('Receipt or transaction reference (at least 3 characters)');
+    if (!reference) return;
+    if (reference.trim().length < 3 || reference.trim().length > 120) {
+      setRowErrors(prev => ({ ...prev, [reg.id]: 'Enter a payment reference between 3 and 120 characters.' }));
+      return;
+    }
+    runRow(reg, 'approve', async () => {
+      await tournamentService.recordManualPayment(reg.id, method as 'cash' | 'upi' | 'bank_transfer', reference.trim());
+      await refreshTournaments();
+    }, 'Could not record this payment and approve the entry.');
+  };
+
+  const waive = (reg: Registration) => {
+    const reason = window.prompt('Reason for waiving this entry fee (at least 5 characters)');
+    if (!reason) return;
+    if (reason.trim().length < 5 || reason.trim().length > 500) {
+      setRowErrors(prev => ({ ...prev, [reg.id]: 'Enter a waiver reason between 5 and 500 characters.' }));
+      return;
+    }
+    runRow(reg, 'approve', async () => {
+      await tournamentService.waiveRegistrationFee(reg.id, reason.trim());
+      await refreshTournaments();
+    }, 'Could not waive this fee and approve the entry.');
+  };
+
   const reject = () => {
     if (!rejectTarget) return;
     const reg = rejectTarget;
@@ -293,18 +410,29 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   // had happened, which is the one thing a payment column must not do. The
   // registration carries its own status, so that is shown; a row without one
   // shows the fee and makes no claim about whether it was paid.
+  const registrationFee = (reg: Registration) =>
+    typeof reg.feePaise === 'number' ? reg.feePaise / 100 : Number(tournament.entryFee || 0);
+
   const paymentCell = (reg: Registration) => {
-    if (!tournament.entryFee) {
+    const amount = registrationFee(reg);
+    if (!amount) {
       return <span className="text-[11px] font-medium text-gray-600">Free entry</span>;
     }
-    const fee = `₹${tournament.entryFee}`;
+    const fee = `₹${amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
     switch (reg.paymentStatus) {
       case 'paid':
         return (
-          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
-            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-            {fee} · Paid
-          </span>
+          <div className="space-y-1">
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
+              <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+              {fee} · Paid
+            </span>
+            {reg.status === 'rejected' && (
+              <span className="block text-[10px] font-bold text-red-700">
+                Refund decision needed
+              </span>
+            )}
+          </div>
         );
       case 'waived':
         return (
@@ -341,7 +469,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
             </span>
             <span className="text-xs text-gray-500 flex items-center gap-1">
               <Calendar className="w-3.5 h-3.5" />
-              Deadline: {tournament.registrationEndDate}
+              Deadline: {tournament.registrationEndDate} (India time)
             </span>
           </div>
 
@@ -349,7 +477,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
             Participant Registration Management
           </h3>
           <p className="text-xs text-gray-600">
-            Review player applications, verify payment/eligibility, and approve seeded entries.
+            Confirming a payment or waiving a fee also approves the entry. Approve free entries here.
           </p>
         </div>
 
@@ -401,6 +529,8 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
         )}
         </div>
       </div>
+
+      {canManage && <PaymentProofReview tournament={tournament} onChanged={refreshTournaments} />}
 
       {/* Summary Metric Badges */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -549,7 +679,22 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
 
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end space-x-1">
-                          {reg.status !== 'approved' && canManage && (
+                          {canManage && registrationFee(reg) > 0 && (
+                            <button type="button" onClick={() => { setPaymentAttempts([]); setPaymentReviewTarget(reg); }} disabled={!!rowBusy}
+                              className="px-2 py-1 text-[10px] font-semibold text-gray-700 hover:bg-gray-100 rounded disabled:opacity-40"
+                              title="Review payment attempts and refunds">Payments</button>
+                          )}
+                          {canManage && registrationFee(reg) > 0 && reg.paymentStatus === 'pending' && reg.status !== 'rejected' && (
+                            <>
+                              <button type="button" onClick={() => settleAtVenue(reg)} disabled={!!rowBusy}
+                                className="px-2 py-1 text-[10px] font-semibold text-blue-700 hover:bg-blue-50 rounded disabled:opacity-40"
+                                title="Record a payment received at the venue and approve a pending entry">{reg.status === 'approved' ? 'Record payment' : 'Record payment & approve'}</button>
+                              <button type="button" onClick={() => waive(reg)} disabled={!!rowBusy}
+                                className="px-2 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-50 rounded disabled:opacity-40"
+                                title="Waive the entry fee and approve a pending entry">{reg.status === 'approved' ? 'Waive fee' : 'Waive & approve'}</button>
+                            </>
+                          )}
+                          {reg.status !== 'approved' && canManage && registrationFee(reg) <= 0 && (
                             <button
                               onClick={() => approve(reg)}
                               disabled={!!rowBusy}
@@ -560,6 +705,12 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                                 ? <Loader2 className="w-4 h-4 animate-spin" />
                                 : <Check className="w-4 h-4" />}
                             </button>
+                          )}
+                          {canManage && reg.status === 'pending' && registrationFee(reg) > 0
+                            && (reg.paymentStatus === 'paid' || reg.paymentStatus === 'waived') && (
+                            <span className="text-[10px] font-medium text-amber-700" title="The payment is recorded, but this entry still needs to sync with the approval status.">
+                              Entry status needs sync
+                            </span>
                           )}
 
                           {reg.status !== 'rejected' && canManage && (
@@ -607,15 +758,77 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
         isOpen={!!rejectTarget}
         onClose={() => setRejectTarget(null)}
         onConfirm={reject}
-        title="Reject this entry?"
+        title={rejectTarget?.paymentStatus === 'paid' ? 'Reject this paid entry?' : 'Reject this entry?'}
         description={
           `${rejectTarget ? entryName(rejectTarget) : 'This entry'} is marked rejected and left out of the draw.`
           + (rejectTarget?.status === 'approved' ? ' They are approved at the moment, so this withdraws that approval.' : '')
+          + (rejectTarget?.paymentStatus === 'paid'
+            ? ' The payment remains recorded. Rejecting does not issue a refund; review and record a refund decision separately.'
+            : '')
           + ' The entry can be approved again later if that changes.'
         }
         confirmLabel="Reject Entry"
         variant="danger"
       />
+
+      {paymentReviewTarget && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="payment-review-title">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-gray-100">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 id="payment-review-title" className="text-base font-bold text-gray-900">
+                  Payments for {entryName(paymentReviewTarget)}
+                </h3>
+                <p className="mt-1 text-xs text-gray-600">
+                  Issue a Razorpay refund in its dashboard or return a manual payment outside this app first. These actions only verify and record a completed refund.
+                </p>
+              </div>
+              <button type="button" onClick={() => setPaymentReviewTarget(null)} className="p-1 rounded-lg text-gray-500 hover:bg-gray-100" aria-label="Close payment review">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {paymentReviewError && <p role="alert" className="mt-4 text-xs font-medium text-red-700">{paymentReviewError}</p>}
+            <div className="mt-4 max-h-[55vh] overflow-y-auto space-y-3">
+              {paymentReviewLoading ? (
+                <div className="flex items-center gap-2 text-xs text-gray-600"><Loader2 className="w-4 h-4 animate-spin" /> Loading payments…</div>
+              ) : paymentAttempts.length === 0 ? (
+                <p className="text-xs text-gray-600">No payment attempts are recorded for this entry.</p>
+              ) : paymentAttempts.map(payment => {
+                const manual = payment.razorpayOrderId.startsWith('manual-');
+                const canCheckRefund = payment.status === 'paid' || payment.status === 'refund_due';
+                return (
+                  <div key={payment.id} className="rounded-xl border border-gray-200 p-3 text-xs">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-bold text-gray-900">
+                          ₹{payment.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} · {payment.status.replace('_', ' ')}
+                        </div>
+                        <div className="mt-1 text-gray-600">{manual ? 'Manual payment' : 'Razorpay'}{payment.method ? ` · ${payment.method}` : ''}</div>
+                        {payment.razorpayPaymentId && <div className="mt-1 break-all text-gray-500">Payment ID: {payment.razorpayPaymentId}</div>}
+                        {payment.status === 'refund_due' && <div className="mt-1 font-bold text-red-700">Duplicate charge: refund required</div>}
+                      </div>
+                      {canCheckRefund && (manual ? (
+                        <button type="button" onClick={() => recordManualRefund(payment.id)} disabled={!!paymentReviewBusy}
+                          className="shrink-0 rounded-lg bg-amber-100 px-2.5 py-1.5 font-semibold text-amber-900 hover:bg-amber-200 disabled:opacity-50">
+                          {paymentReviewBusy === payment.id ? 'Recording…' : 'Record external refund'}
+                        </button>
+                      ) : payment.razorpayPaymentId ? (
+                        <button type="button" onClick={() => reconcileRefund(payment.id)} disabled={!!paymentReviewBusy}
+                          className="shrink-0 rounded-lg bg-blue-100 px-2.5 py-1.5 font-semibold text-blue-900 hover:bg-blue-200 disabled:opacity-50">
+                          {paymentReviewBusy === payment.id ? 'Checking…' : 'Check Razorpay refund'}
+                        </button>
+                      ) : null)}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-5 flex justify-end">
+              <button type="button" onClick={() => setPaymentReviewTarget(null)} className="rounded-lg px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-100">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add Player / Team Modal */}
       {isAddPlayerModalOpen && (
@@ -629,6 +842,16 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
             </div>
 
             <form onSubmit={handleManualAdd} className="space-y-4 text-xs">
+              {Number(tournament.entryFee || 0) > 0 && (
+                <p className="rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-800">
+                  This entry stays pending until you record its payment or waive the fee with a reason in the registrations table.
+                </p>
+              )}
+              {!canAddParticipants && (
+                <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-amber-800">
+                  {addBlockedReason}
+                </p>
+              )}
               <div>
                 <label className="block font-bold text-gray-700 mb-1">Registration Category</label>
                 <div className="grid grid-cols-2 gap-2">
@@ -929,7 +1152,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || !canAddParticipants}
                   className="px-4 py-2 bg-[#0B5D3B] text-white font-bold rounded-lg shadow-sm hover:bg-[#08472d] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isSubmitting ? 'Registering...' : 'Register Participant'}
@@ -946,6 +1169,8 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
           isOpen={isImportModalOpen}
           onClose={() => setIsImportModalOpen(false)}
           tournament={tournament}
+          canAddParticipants={canAddParticipants}
+          blockedReason={addBlockedReason}
         />
       )}
 

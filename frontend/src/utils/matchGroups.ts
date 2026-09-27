@@ -19,7 +19,7 @@
  * screen can mark a result as not-yet-official without moving it out of the
  * finished list.
  */
-import { Match } from '../types/tournament';
+import { Match, Tournament } from '../types/tournament';
 import { compareMatches } from './matchOrder';
 
 export interface MatchGroups {
@@ -164,17 +164,23 @@ export function resultSummary(
 export function outcomeFor(
   match: Match,
   user: { id?: string; name?: string } | null | undefined,
+  tournament?: Tournament | null,
 ): 'won' | 'lost' | null {
   if (!isFinished(match) || !match.winnerName || !user) return null;
 
-  const name = (user.name || '').trim().toLowerCase();
-  const isMine =
-    (user.id && (match.player1Id === user.id || match.player2Id === user.id)) ||
-    (!!name && ((match.player1Name || '').trim().toLowerCase() === name ||
-                (match.player2Name || '').trim().toLowerCase() === name));
-  if (!isMine) return null;
+  if (!user.id) return null;
+  const teamIds = new Set((tournament?.registrations || [])
+    .filter(r => r.type === 'doubles' && r.team &&
+      (r.team.player1?.id === user.id || r.team.player2?.id === user.id))
+    .map(r => r.team!.id));
+  const side1 = match.player1Id === user.id || teamIds.has(match.player1Id);
+  const side2 = match.player2Id === user.id || teamIds.has(match.player2Id);
+  if (!side1 && !side2) return null;
 
-  const wonById = !!user.id && match.winnerId === user.id;
-  const wonByName = !!name && (match.winnerName || '').trim().toLowerCase() === name;
-  return wonById || wonByName ? 'won' : 'lost';
+  const participantId = side1 ? match.player1Id : match.player2Id;
+  const participantName = side1 ? match.player1Name : match.player2Name;
+  const won = match.winnerId
+    ? match.winnerId === participantId
+    : !!participantName && match.winnerName === participantName;
+  return won ? 'won' : 'lost';
 }

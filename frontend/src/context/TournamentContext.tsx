@@ -75,18 +75,14 @@ interface TournamentContextType {
   
   // Auth Operations
   /**
-   * Register in the given role, and sign in as whatever comes back.
-   *
-   * Registration is open: the role travels with the request and the server
-   * writes it, so the Administrator tab on the sign-up form really does make
-   * an administrator.
+   * Request a player account; the player confirms their email before sign-in.
    */
   signUpUser: (
     email: string,
     password: string,
     role: UserRole,
     metadata: Partial<Player>,
-  ) => Promise<{ success: boolean; error?: string }>;
+  ) => Promise<{ success: boolean; error?: string; message?: string }>;
   signInUser: (email: string, password: string, role: UserRole) => Promise<{ success: boolean; error?: string }>;
   signOutUser: () => Promise<void>;
   
@@ -480,8 +476,11 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
     password: string,
     selectedRole: UserRole,
     metadata: Partial<Player>,
-  ): Promise<{ success: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; error?: string; message?: string }> => {
     try {
+      if (selectedRole !== 'player') {
+        return { success: false, error: 'Organizer accounts require an invitation.' };
+      }
       const response = await authService.signUp({
         email,
         password,
@@ -490,21 +489,9 @@ export const TournamentProvider: React.FC<{ children: ReactNode }> = ({ children
         city: metadata.city,
         phone: metadata.phone,
         rating: metadata.rating || 1500,
-        // The role the form asked for. It used to be taken here and then
-        // dropped on the floor -- the form offered Administrator, the request
-        // never mentioned it, and the new account was signed straight in as a
-        // player with nothing said about it.
-        role: selectedRole === 'admin' ? 'admin' : 'player',
+        role: 'player',
       });
-
-      // Still read back from the server rather than assumed: it is the one
-      // that decides, and a refusal must not leave the app believing
-      // otherwise.
-      setCurrentUserState(toCurrentUser(response.user));
-      setRoleState(response.user.role as UserRole);
-      setIsAuthenticated(true);
-      await refreshData();
-      return { success: true };
+      return { success: true, message: response.message };
     } catch (error: any) {
       return { success: false, error: error.message || 'Signup failed' };
     }

@@ -6,13 +6,7 @@
 import { apiClient } from '../utils/apiClient';
 
 /**
- * Registration, in whichever role the form asked for.
- *
- * `role` is sent from the browser and the server writes it, so registration is
- * OPEN: anybody who can load the sign-up page can create an administrator
- * account. That is deliberate for this deployment. The server still refuses a
- * role that is neither 'player' nor 'admin', so a typo cannot create an
- * account that is not what its owner thinks it is.
+ * Public registration is for players. The server provisions organizers separately.
  */
 export interface SignUpData {
   email: string;
@@ -22,8 +16,12 @@ export interface SignUpData {
   city?: string;
   phone?: string;
   rating?: number;
-  /** 'player' or 'admin'. Defaults to a player when not sent. */
-  role?: 'player' | 'admin';
+  role?: 'player';
+}
+
+export interface SignUpResponse {
+  status: 'confirmation_required';
+  message: string;
 }
 
 export interface LoginData {
@@ -56,14 +54,8 @@ export const authService = {
   /**
    * Sign up a new user
    */
-  async signUp(data: SignUpData): Promise<AuthResponse> {
-    const response = await apiClient.post<AuthResponse>('/auth/signup', data);
-    
-    // Store the whole session, not just the access token, so it can be renewed
-    // before it expires.
-    apiClient.setSession(response);
-    
-    return response;
+  async signUp(data: SignUpData): Promise<SignUpResponse> {
+    return apiClient.post<SignUpResponse>('/auth/signup', data);
   },
 
   /**

@@ -250,15 +250,74 @@ def test_free_tournament_needs_no_payment():
         teardown(h)
 
 
-def test_admin_entry_is_waived():
+def test_pending_gpay_proof_blocks_online_checkout():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        url = "/api/payments/registrations/%s/order" % reg["id"]
+        h.db.seed("payment_proofs", [{
+            "id": "proof-awaiting-review", "registration_id": reg["id"],
+            "status": "pending",
+        }])
+
+        blocked = h.post(url, {}, user_id=player)
+        check("a pending GPay proof blocks Razorpay checkout",
+              blocked.status_code == 409 and "GPay payment proof" in detail(blocked),
+              detail(blocked))
+        check("no Razorpay order is created while GPay proof awaits review",
+              fake.create_calls == 0 and not h.db.rows("payments"))
+
+        h.db.table("payment_proofs").update({"status": "rejected"}).eq(
+            "id", "proof-awaiting-review").execute()
+        allowed = h.post(url, {}, user_id=player)
+        check("a rejected GPay proof permits a new Razorpay order",
+              allowed.status_code == 200 and fake.create_calls == 1,
+              detail(allowed))
+
+        h.db.seed("payment_proofs", [{
+            "id": "proof-awaiting-review-again", "registration_id": reg["id"],
+            "status": "pending",
+        }])
+        blocked_again = h.post(url, {}, user_id=player)
+        check("a pending GPay proof also blocks reusing an open Razorpay order",
+              blocked_again.status_code == 409 and fake.create_calls == 1,
+              detail(blocked_again))
+    finally:
+        teardown(h)
+
+
+def test_admin_entry_requires_settlement():
     h, fake, org, player, tid = setup(entry_fee=500.0)
     try:
         r = h.post("/api/tournaments/%s/registrations" % tid,
                    {"type": "singles", "playerId": player}, user_id=org)
         reg = body(r)
-        check("an organiser's own entry is approved", reg.get("status") == "approved", reg)
-        check("an organiser entering somebody takes the money in person",
-              reg.get("paymentStatus") == "waived", reg)
+        check("an organiser's paid addition awaits settlement",
+              r.status_code == 200 and reg.get("status") == "pending"
+              and reg.get("paymentStatus") == "pending"
+              and reg.get("feePaise") == 50000, reg)
+        check("adding a player does not invent a payment or fee waiver",
+              not h.db.rows("payments") and not any(
+                  a.get("action") == "payment.fee_waived" for a in h.db.rows("audit_logs")),
+              h.db.rows("payments"))
+        paid = h.post("/api/registrations/%s/manual-payment" % reg["id"], {
+            "method": "cash", "reference": "desk-receipt-1",
+        }, user_id=org)
+        check("recording the desk payment also approves the addition",
+              paid.status_code == 200 and body(paid).get("status") == "approved"
+              and body(paid).get("paymentStatus") == "paid", detail(paid))
+    finally:
+        teardown(h)
+
+    h, fake, org, player, tid = setup(entry_fee=0.0)
+    try:
+        free = h.post("/api/tournaments/%s/registrations" % tid,
+                      {"type": "singles", "playerId": player}, user_id=org)
+        reg = body(free)
+        check("an organiser's free addition is admitted without payment",
+              free.status_code == 200 and reg.get("status") == "approved"
+              and reg.get("paymentStatus") == "waived"
+              and reg.get("feePaise") == 0, reg)
     finally:
         teardown(h)
 
@@ -881,8 +940,12 @@ def test_a_second_order_cannot_take_a_second_payment():
         paid = [p for p in h.db.rows("payments") if p.get("status") == "paid"]
         check("only one payment row is ever marked paid", len(paid) == 1, h.db.rows("payments"))
         check("the duplicate is recorded for the organiser to refund",
-              any(a.get("action") == "payment.duplicate_refused" for a in h.db.rows("audit_logs")),
-              [a.get("action") for a in h.db.rows("audit_logs")])
+              any(p.get("status") == "refund_due"
+                  and p.get("razorpay_payment_id") == "pay_second_charge"
+                  for p in h.db.rows("payments"))
+              and any(a.get("action") == "payment.refund_due"
+                      for a in h.db.rows("audit_logs")),
+              h.db.rows("payments"))
     finally:
         teardown(h)
 
@@ -1251,10 +1314,205 @@ def test_a_malformed_signature_is_rejected_not_raised():
 
 
 
+def _paid_online_entry(h, fake, player, tid, payment_id):
+    reg = body(register(h, tid, player))
+    order = body(h.post("/api/payments/registrations/%s/order" % reg["id"], {}, user_id=player))
+    fake.pay(order["orderId"], payment_id)
+    verified = h.post("/api/payments/verify", {
+        "razorpay_order_id": order["orderId"],
+        "razorpay_payment_id": payment_id,
+        "razorpay_signature": sign_callback(order["orderId"], payment_id),
+    }, user_id=player)
+    assert verified.status_code == 200, detail(verified)
+    payment = next(p for p in h.db.rows("payments")
+                   if p.get("razorpay_payment_id") == payment_id)
+    return reg, payment
+
+
+def test_a_full_online_refund_repairs_the_entry():
+    h, fake, org, player, tid = setup()
+    try:
+        reg, payment = _paid_online_entry(h, fake, player, tid, "pay_refunded")
+        url = "/api/payments/%s/reconcile-refund" % payment["id"]
+        denied = h.post(url, {}, user_id=player)
+        check("players cannot reconcile online refunds", denied.status_code == 403, detail(denied))
+        early = h.post(url, {}, user_id=org)
+        check("a payment still held by Razorpay cannot be marked refunded",
+              early.status_code == 409, detail(early))
+
+        fake.payments["pay_refunded"].update({"status": "refunded", "amount_refunded": 100})
+        partial = h.post(url, {}, user_id=org)
+        check("a partial refund leaves the entry paid",
+              partial.status_code == 409
+              and h.db.rows("registrations")[0].get("payment_status") == "paid",
+              detail(partial))
+
+        fake.payments["pay_refunded"]["amount_refunded"] = 50000
+        done = h.post(url, {}, user_id=org)
+        check("a verified full online refund updates the ledger",
+              done.status_code == 200 and body(done).get("status") == "refunded",
+              detail(done))
+        entry = h.db.rows("registrations")[0]
+        check("a pre-draw refunded entry loses approval and paid status",
+              entry.get("payment_status") == "pending" and entry.get("status") == "pending",
+              entry)
+        check("online refund reconciliation is audited",
+              any(a.get("action") == "payment.refund_reconciled"
+                  for a in h.db.rows("audit_logs")),
+              [a.get("action") for a in h.db.rows("audit_logs")])
+        again = h.post(url, {}, user_id=org)
+        check("reconciling a full refund twice is idempotent",
+              again.status_code == 200
+              and len([a for a in h.db.rows("audit_logs")
+                       if a.get("action") == "payment.refund_reconciled"]) == 1,
+              detail(again))
+    finally:
+        teardown(h)
+
+
+def test_a_manual_refund_records_proof_and_repairs_the_entry():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        collected = h.post("/api/registrations/%s/manual-payment" % reg["id"], {
+            "method": "cash", "reference": "cash-receipt-42",
+        }, user_id=org)
+        assert collected.status_code == 200, detail(collected)
+        check("a manually paid entry is approved by the same action",
+              body(collected).get("status") == "approved"
+              and body(collected).get("paymentStatus") == "paid",
+              detail(collected))
+        payment = next(p for p in h.db.rows("payments")
+                       if str(p.get("razorpay_order_id") or "").startswith("manual-"))
+        url = "/api/payments/%s/record-manual-refund" % payment["id"]
+        proof = {"reference": "refund-receipt-9", "reason": "Event cancelled"}
+        denied = h.post(url, proof, user_id=player)
+        check("players cannot record manual refunds", denied.status_code == 403, detail(denied))
+        done = h.post(url, proof, user_id=org)
+        check("an organiser can record a cash refund",
+              done.status_code == 200 and body(done).get("status") == "refunded", detail(done))
+        updated = next(p for p in h.db.rows("payments") if p["id"] == payment["id"])
+        check("manual refund proof stays on the ledger",
+              updated.get("notes", {}).get("refund_reference") == proof["reference"]
+              and updated.get("notes", {}).get("refund_reason") == proof["reason"], updated)
+        entry = h.db.rows("registrations")[0]
+        check("a refunded cash entry returns to pending before draw",
+              entry.get("payment_status") == "pending" and entry.get("status") == "pending", entry)
+        again = h.post(url, proof, user_id=org)
+        check("recording a cash refund twice does not add another ledger event",
+              again.status_code == 200
+              and len([a for a in h.db.rows("audit_logs")
+                       if a.get("action") == "payment.manual_refund_recorded"]) == 1,
+              detail(again))
+    finally:
+        teardown(h)
+
+
+def test_admin_settlement_needs_no_second_approval():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        paid = h.post("/api/registrations/%s/manual-payment" % reg["id"], {
+            "method": "upi", "reference": "UPI-123456789",
+        }, user_id=org)
+        entry = h.db.rows("registrations")[0]
+        check("venue payment approves the entry immediately",
+              paid.status_code == 200 and entry.get("payment_status") == "paid"
+              and entry.get("status") == "approved", detail(paid))
+        check("venue approval has a registration audit",
+              any(a.get("action") == "registration.auto_approved_after_payment"
+                  for a in h.db.rows("audit_logs")))
+    finally:
+        teardown(h)
+
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        waived = h.post("/api/registrations/%s/waive-fee" % reg["id"], {
+            "reason": "Organizer sponsorship",
+        }, user_id=org)
+        entry = h.db.rows("registrations")[0]
+        check("waiving a fee approves the entry immediately",
+              waived.status_code == 200 and entry.get("payment_status") == "waived"
+              and entry.get("status") == "approved", detail(waived))
+    finally:
+        teardown(h)
+
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        h.db.table("registrations").update({"status": "rejected"}).eq("id", reg["id"]).execute()
+        refused = h.post("/api/registrations/%s/manual-payment" % reg["id"], {
+            "method": "cash", "reference": "cash-receipt-43",
+        }, user_id=org)
+        check("payment cannot reinstate a rejected entry",
+              refused.status_code == 409 and not h.db.rows("payments"),
+              detail(refused))
+    finally:
+        teardown(h)
+
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        h.db.table("tournaments").update({"status": "completed"}).eq("id", tid).execute()
+        refused = h.post("/api/registrations/%s/waive-fee" % reg["id"], {
+            "reason": "Late request after event",
+        }, user_id=org)
+        check("finished tournaments cannot auto-approve a fee waiver",
+              refused.status_code == 409
+              and h.db.rows("registrations")[0].get("status") == "pending",
+              detail(refused))
+    finally:
+        teardown(h)
+
+
+def test_a_refund_retry_repairs_a_half_updated_registration():
+    h, fake, org, player, tid = setup()
+    try:
+        reg, payment = _paid_online_entry(h, fake, player, tid, "pay_refund_retry")
+        fake.payments["pay_refund_retry"].update({
+            "status": "refunded", "amount_refunded": 50000,
+        })
+        h.db.table("payments").update({"status": "refunded"}).eq("id", payment["id"]).execute()
+        repaired = h.post("/api/payments/%s/reconcile-refund" % payment["id"], {}, user_id=org)
+        entry = h.db.rows("registrations")[0]
+        check("a retry repairs an entry left paid after its ledger refund",
+              repaired.status_code == 200
+              and entry.get("payment_status") == "pending"
+              and entry.get("status") == "pending",
+              "%s %s" % (detail(repaired), entry))
+        check("retry does not invent a second refund audit",
+              not any(a.get("action") == "payment.refund_reconciled"
+                      for a in h.db.rows("audit_logs")),
+              [a.get("action") for a in h.db.rows("audit_logs")])
+    finally:
+        teardown(h)
+
+
+def test_a_refund_after_draw_is_flagged_for_organiser_action():
+    h, fake, org, player, tid = setup()
+    try:
+        reg, payment = _paid_online_entry(h, fake, player, tid, "pay_after_draw")
+        h.db.table("tournaments").update({"fixtures_generated": True}).eq("id", tid).execute()
+        fake.payments["pay_after_draw"].update({"status": "refunded", "amount_refunded": 50000})
+        done = h.post("/api/payments/%s/reconcile-refund" % payment["id"], {}, user_id=org)
+        entry = h.db.rows("registrations")[0]
+        check("a refund after draw records unpaid status without silently rewriting fixtures",
+              done.status_code == 200 and entry.get("payment_status") == "pending"
+              and entry.get("status") == "approved", "%s %s" % (detail(done), entry))
+        check("the post-draw refund requests organiser action in the audit trail",
+              any(a.get("action") == "registration.refund_after_draw"
+                  for a in h.db.rows("audit_logs")),
+              [a.get("action") for a in h.db.rows("audit_logs")])
+    finally:
+        teardown(h)
+
+
 SUITES = [
     ("pay then confirmed", test_pay_then_confirmed),
     ("free tournament", test_free_tournament_needs_no_payment),
-    ("admin entry is waived", test_admin_entry_is_waived),
+    ("pending GPay proof blocks checkout", test_pending_gpay_proof_blocks_online_checkout),
+    ("admin entry requires settlement", test_admin_entry_requires_settlement),
     ("forged signature", test_forged_signature_is_refused),
     ("amount mismatch", test_amount_mismatch_is_refused),
     ("payment for another order", test_payment_for_another_order_is_refused),
@@ -1290,6 +1548,11 @@ SUITES = [
     ("transient failure is retried", test_a_transient_failure_asks_razorpay_to_retry),
     ("terminal rejection is not retried", test_a_terminal_rejection_is_not_retried),
     ("redelivery repairs a half-settle", test_a_redelivery_repairs_an_unconfirmed_entry),
+    ("online full refund", test_a_full_online_refund_repairs_the_entry),
+    ("manual refund", test_a_manual_refund_records_proof_and_repairs_the_entry),
+    ("admin payment approves entry", test_admin_settlement_needs_no_second_approval),
+    ("refund retry repair", test_a_refund_retry_repairs_a_half_updated_registration),
+    ("post-draw refund audit", test_a_refund_after_draw_is_flagged_for_organiser_action),
 ]
 
 

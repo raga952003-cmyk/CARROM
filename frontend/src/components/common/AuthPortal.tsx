@@ -27,6 +27,7 @@ export const AuthPortal: React.FC = () => {
   const [activeRole, setActiveRole] = useState<'player' | 'admin'>('player');
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
   const [errorMsg, setErrorMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [forgotSent, setForgotSent] = useState(false);
   const [forgotNote, setForgotNote] = useState('');
@@ -51,13 +52,6 @@ export const AuthPortal: React.FC = () => {
           setErrorMsg(res.error || 'Invalid credentials');
         }
       } else {
-        // The chosen tab is the role, and it is sent. There used to be a
-        // security key checked here against a literal in this very file --
-        // which is not a check: the string shipped in the bundle, the
-        // comparison passed on an EMPTY key anyway, and the role it was
-        // guarding was discarded before the request went out, so registering
-        // as an admin produced a player account and signed you into it
-        // without a word.
         const metadata = {
           name,
           phone,
@@ -67,9 +61,8 @@ export const AuthPortal: React.FC = () => {
 
         const res = await signUpUser(email, password, activeRole, metadata);
         if (res.success) {
-          // Signing up signs you in; it always did, and the message telling
-          // people to go and log in was never reachable -- the app had already
-          // moved to their dashboard behind it.
+          setSuccessMsg(res.message || 'Check your email to confirm your account, then sign in.');
+          setAuthMode('signin');
           setPassword('');
         } else {
           setErrorMsg(res.error || 'Failed to create account');
@@ -153,6 +146,7 @@ export const AuthPortal: React.FC = () => {
             <button
               onClick={() => {
                 setActiveRole('admin');
+                setAuthMode('signin');
                 setErrorMsg('');
               }}
               className={`flex-1 py-3 text-xs font-bold flex items-center justify-center gap-1.5 border-b-2 transition-all ${
@@ -199,6 +193,11 @@ export const AuthPortal: React.FC = () => {
               <div className="p-3 bg-red-50 border border-red-200 text-red-800 text-[11px] font-medium rounded-xl flex items-center gap-2">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-600 shrink-0" />
                 <span>{errorMsg}</span>
+              </div>
+            )}
+            {successMsg && (
+              <div role="status" className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px] font-medium rounded-xl">
+                {successMsg}
               </div>
             )}
 
@@ -358,7 +357,7 @@ export const AuthPortal: React.FC = () => {
             )}
 
             {/* Register Toggle Switch */}
-            <div className="text-center text-[11px] text-gray-500 pt-2 border-t border-gray-100 flex items-center justify-between">
+            {activeRole === 'player' ? <div className="text-center text-[11px] text-gray-500 pt-2 border-t border-gray-100 flex items-center justify-between">
               <span>
                 {authMode === 'signin' 
                   ? "Don't have an account?" 
@@ -374,7 +373,7 @@ export const AuthPortal: React.FC = () => {
               >
                 {authMode === 'signin' ? 'Register here' : 'Sign in here'}
               </button>
-            </div>
+            </div> : <p className="text-center text-[11px] text-gray-500 pt-2 border-t border-gray-100">Organizer accounts are available by invitation.</p>}
 
 
 

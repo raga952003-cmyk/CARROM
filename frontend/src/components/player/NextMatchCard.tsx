@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
-import { findMyMatches } from '../../utils/myMatches';
+import { findMyMatches, opponentOf } from '../../utils/myMatches';
+import { groupMatches } from '../../utils/matchGroups';
 import { Clock, MapPin, ChevronRight, CheckCircle2, Radio } from 'lucide-react';
 import { Tournament, Match, Player, Admin } from '../../types/tournament';
 
@@ -24,9 +25,10 @@ export const NextMatchCard: React.FC<NextMatchCardProps> = ({
     [tournament, currentUser]
   );
 
-  const live = mine.find(m => m.status === 'live');
-  const next = live || mine.find(m => !m.resultConfirmed);
-  const played = mine.filter(m => m.resultConfirmed).length;
+  const groups = useMemo(() => groupMatches(mine), [mine]);
+  const onNow = groups.live.length > 0;
+  const next = groups.live[0] || groups.upcoming[0];
+  const played = groups.finished.length;
 
   if (!tournament || mine.length === 0) return null;
 
@@ -44,32 +46,30 @@ export const NextMatchCard: React.FC<NextMatchCardProps> = ({
     );
   }
 
-  const isMe = (id?: string, name?: string) =>
-    id === currentUser?.id || name === currentUser?.name;
-  const opponent = isMe(next.player1Id, next.player1Name) ? next.player2Name : next.player1Name;
+  const opponent = opponentOf(next, currentUser, tournament);
 
   return (
     <button
       type="button"
       onClick={() => onOpenMatch?.(next)}
       className={`w-full text-left rounded-2xl p-4 border-2 transition-colors ${
-        live
+        onNow
           ? 'bg-red-50 border-red-300'
           : 'bg-[#0B5D3B] border-[#0B5D3B] text-white'
       }`}
     >
       <div className={`flex items-center gap-1.5 text-[10px] font-black uppercase tracking-widest ${
-        live ? 'text-red-700' : 'text-[#D4A72C]'
+        onNow ? 'text-red-700' : 'text-[#D4A72C]'
       }`}>
-        {live ? <><Radio className="w-3.5 h-3.5 animate-pulse" /> On now</> : 'Your next match'}
+        {onNow ? <><Radio className="w-3.5 h-3.5 animate-pulse" /> On now</> : 'Your next match'}
       </div>
 
-      <div className={`mt-1.5 text-lg font-bold leading-tight ${live ? 'text-gray-900' : 'text-white'}`}>
+      <div className={`mt-1.5 text-lg font-bold leading-tight ${onNow ? 'text-gray-900' : 'text-white'}`}>
         vs {opponent}
       </div>
 
       <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 mt-2 text-[11px] ${
-        live ? 'text-red-900' : 'text-emerald-100'
+        onNow ? 'text-red-900' : 'text-emerald-100'
       }`}>
         <span className="flex items-center gap-1 font-bold">
           <MapPin className="w-3.5 h-3.5" /> Board {next.boardNumber}
@@ -83,7 +83,7 @@ export const NextMatchCard: React.FC<NextMatchCardProps> = ({
       </div>
 
       <div className={`flex items-center justify-between mt-3 pt-2 border-t text-[11px] ${
-        live ? 'border-red-200 text-red-800' : 'border-emerald-800/60 text-emerald-200'
+        onNow ? 'border-red-200 text-red-800' : 'border-emerald-800/60 text-emerald-200'
       }`}>
         <span>{played} of {mine.length} of your matches played</span>
         <ChevronRight className="w-4 h-4" />

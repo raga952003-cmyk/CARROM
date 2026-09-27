@@ -7,6 +7,7 @@ rather than silently applied.
 """
 from typing import Any, Dict, Optional, Set
 from fastapi import HTTPException
+from datetime import date, datetime, timedelta, timezone
 import logging
 
 logger = logging.getLogger("uvicorn.error")
@@ -147,6 +148,7 @@ def assert_match_scorable(match: Dict) -> None:
 
 
 def assert_tournament_accepts_registrations(tournament: Dict) -> None:
+    assert_registration_deadline_open(tournament)
     status = canonical_tournament_status(tournament.get("status"))
     if status != "registration_open":
         raise HTTPException(
@@ -159,6 +161,29 @@ def assert_tournament_accepts_registrations(tournament: Dict) -> None:
 # event is not happening; `completed` means it already has and a champion is
 # recorded against it.
 TERMINAL_TOURNAMENT_STATES = ("completed", "cancelled")
+
+
+_REGISTRATION_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
+
+
+def registration_calendar_today() -> date:
+    """The calendar date used by registration dates in Indian tournaments."""
+    return datetime.now(_REGISTRATION_TIMEZONE).date()
+
+
+def assert_registration_deadline_open(tournament: Dict) -> None:
+    """A closing date includes its full calendar day, even for admins."""
+    raw_deadline = tournament.get("registration_end_date")
+    try:
+        closing_date = date.fromisoformat(str(raw_deadline)[:10])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Registration closing date is missing or invalid.")
+    if registration_calendar_today() > closing_date:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Registration closed on {closing_date.isoformat()}. "
+                    "Players can no longer be added to this tournament."),
+        )
 
 
 def assert_tournament_not_terminal(tournament: Dict, action: str) -> None:
@@ -206,13 +231,16 @@ def assert_participants_can_be_added(tournament: Dict, force: bool = False) -> N
     every result in it.
 
     Closing registration is the moment the entry list becomes the thing the
-    draw is made from, so that is where this stops. `force` is the organiser
-    saying they know, and is audited by the routes that offer it; the app does
-    not send it, so in the interface the option is simply gone.
+    draw is made from, so that is where this stops. `force` can bypass a
+    manually closed lifecycle state, but the calendar closing date is final
+    for both organisers and players. The app does not send `force`.
     """
-    if force:
-        return
+    # The legacy force option may bypass a manually closed lifecycle state,
+    # but it must never bypass the tournament's registration closing date.
+    assert_registration_deadline_open(tournament)
     status = canonical_tournament_status(tournament.get("status"))
+    if force and status == "registration_closed":
+        return
     if status == "registration_open":
         return
     if status in ("draft", None):

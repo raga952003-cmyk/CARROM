@@ -26,10 +26,17 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
   const [group, setGroup] = useState<MatchGroupKey>('live');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const selectedIdRef = useRef(selectedId);
+  const standingsRequest = useRef(0);
+  selectedIdRef.current = selectedId;
 
   const loadStandings = async (id: string) => {
     if (!id) return;
-    setStandings(await tournamentService.getStandings(id).catch(() => null) as any);
+    const request = ++standingsRequest.current;
+    const result = await tournamentService.getStandings(id).catch(() => null);
+    if (request === standingsRequest.current && selectedIdRef.current === id) {
+      setStandings(result as StandingsBreakdown | null);
+    }
   };
 
   // Whether a load is under way or done, so the subscription's pull on connect
@@ -47,8 +54,15 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
     try {
       const list = await tournamentService.getAllTournaments();
       setTournaments(list);
-      const id = selectedId || tournamentId || list[0]?.id || '';
-      if (id !== selectedId) setSelectedId(id);
+      const id = list.some(t => t.id === selectedIdRef.current)
+        ? selectedIdRef.current
+        : list.some(t => t.id === tournamentId)
+          ? tournamentId!
+          : list[0]?.id || '';
+      if (id !== selectedIdRef.current) {
+        selectedIdRef.current = id;
+        setSelectedId(id);
+      }
       await loadStandings(id);
       setError('');
     } catch (e: any) {
@@ -166,7 +180,7 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
     return <Centered tone="error">{error}</Centered>;
   }
   if (!tournament) {
-    return <Centered>No tournaments have been published yet.</Centered>;
+     return <Centered>{tournaments.length ? 'This tournament is unavailable.' : 'No tournaments have been published yet.'}</Centered>;
   }
 
   return (
@@ -192,7 +206,11 @@ export const SpectatorView: React.FC<SpectatorViewProps> = ({ tournamentId }) =>
           {tournaments.length > 1 && (
             <select
               value={selectedId}
-              onChange={e => { setSelectedId(e.target.value); setLoading(true); }}
+              onChange={e => {
+                selectedIdRef.current = e.target.value;
+                setStandings(null);
+                setSelectedId(e.target.value);
+              }}
               className="mt-3 w-full bg-emerald-950/70 border border-emerald-800 rounded-xl px-3 py-2 text-xs text-white"
             >
               {tournaments.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}

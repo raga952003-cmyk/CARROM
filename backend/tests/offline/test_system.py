@@ -17,6 +17,7 @@ whole journeys and at the input classes a real caller produces:
 import os
 import sys
 import traceback
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -57,19 +58,26 @@ RULES = {
     "pointsForWin": 2,
     "pointsForDraw": 1,
     "pointsForLoss": 0,
+    # This suite drives the historical single-game format. The new creation
+    # default is the official best-of-three target-point preset, tested
+    # separately; spelling these rules out keeps this journey intentional.
+    "numberOfSets": 1,
+    "boardsPerSet": 3,
+    "setWinnerRule": "total_points",
 }
 
 
 def new_tournament_payload(name="System Open", fmt="knockout", **over):
+    today = date.today()
     payload = {
         "name": name,
         "description": "",
         "category": "singles",
         "format": fmt,
-        "registrationStartDate": "2026-01-01",
-        "registrationEndDate": "2026-02-01",
-        "tournamentStartDate": "2026-03-01",
-        "tournamentEndDate": "2026-03-02",
+        "registrationStartDate": today.isoformat(),
+        "registrationEndDate": (today + timedelta(days=30)).isoformat(),
+        "tournamentStartDate": (today + timedelta(days=40)).isoformat(),
+        "tournamentEndDate": (today + timedelta(days=42)).isoformat(),
         "venue": "Hall A",
         "city": "Chennai",
         "numberOfBoards": 4,

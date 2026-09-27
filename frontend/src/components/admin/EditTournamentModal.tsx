@@ -21,6 +21,9 @@ export const EditTournamentModal: React.FC<EditTournamentModalProps> = ({
   const [category, setCategory] = useState<'singles' | 'doubles' | 'both'>(tournament.category);
   const [format, setFormat] = useState<TournamentFormat>(tournament.format);
   const [prizePool, setPrizePool] = useState(tournament.prizePool || '');
+  const [gpayUpiId, setGpayUpiId] = useState(tournament.gpayUpiId || '');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   useEffect(() => {
     setName(tournament.name);
@@ -28,25 +31,40 @@ export const EditTournamentModal: React.FC<EditTournamentModalProps> = ({
     setCategory(tournament.category);
     setFormat(tournament.format);
     setPrizePool(tournament.prizePool || '');
+    setGpayUpiId(tournament.gpayUpiId || '');
+    setSaveError('');
   }, [tournament]);
 
   if (!isOpen) return null;
 
   const handleSave = async () => {
+    if (saving) return;
     if (!name.trim()) {
-      alert('Please enter a tournament name.');
+      setSaveError('Please enter a tournament name.');
       return;
     }
-
-    await updateTournament(tournament.id, {
-      name,
-      description,
-      category,
-      format,
-      prizePool
-    });
-
-    onClose();
+    if (gpayUpiId.trim() &&
+        !(/^[6-9][0-9]{9}$/.test(gpayUpiId.trim()) || /^[A-Za-z0-9._-]{2,100}@[A-Za-z0-9.-]{2,100}$/.test(gpayUpiId.trim()))) {
+      setSaveError('Enter a valid GPay UPI ID or 10-digit UPI phone number.');
+      return;
+    }
+    setSaving(true);
+    setSaveError('');
+    try {
+      await updateTournament(tournament.id, {
+        name,
+        description,
+        category,
+        format,
+        prizePool,
+        gpayUpiId: gpayUpiId.trim() || null
+      });
+      onClose();
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Could not save tournament details. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -126,10 +144,22 @@ export const EditTournamentModal: React.FC<EditTournamentModalProps> = ({
               className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#0B5D3B]"
             />
           </div>
+
+          {tournament.entryFee > 0 && (
+            <div>
+              <label className="block font-bold text-gray-700 mb-1">Tournament GPay UPI ID</label>
+              <input type="text" value={gpayUpiId} maxLength={100}
+                onChange={e => setGpayUpiId(e.target.value)}
+                placeholder="example@upi or 10-digit UPI number"
+                className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#0B5D3B]" />
+              <p className="mt-1 text-[10px] text-gray-600">Players can submit a payment proof for organiser review.</p>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
         <div className="flex justify-end space-x-2 pt-4 mt-4 border-t border-gray-100">
+          {saveError && <span role="alert" className="text-xs text-red-700 self-center">{saveError}</span>}
           <button
             type="button"
             onClick={onClose}
@@ -140,9 +170,10 @@ export const EditTournamentModal: React.FC<EditTournamentModalProps> = ({
           <button
             type="button"
             onClick={handleSave}
+            disabled={saving}
             className="px-4 py-2 text-xs font-bold text-white bg-[#0B5D3B] hover:bg-[#08472d] rounded-lg shadow-sm"
           >
-            Save Details
+            {saving ? 'Saving…' : 'Save Details'}
           </button>
         </div>
 

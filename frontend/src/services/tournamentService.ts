@@ -208,6 +208,14 @@ export const tournamentService = {
     return apiClient.post(`/registrations/${registrationId}/approve`, {});
   },
 
+  async recordManualPayment(registrationId: string, method: 'cash' | 'upi' | 'bank_transfer', reference: string) {
+    return apiClient.post(`/registrations/${registrationId}/manual-payment`, { method, reference });
+  },
+
+  async waiveRegistrationFee(registrationId: string, reason: string) {
+    return apiClient.post(`/registrations/${registrationId}/waive-fee`, { reason });
+  },
+
   /**
    * Reject a pending registration (admin only)
    */
@@ -279,4 +287,3 @@ export const tournamentService = {
     return response.json();
   }
 };
-

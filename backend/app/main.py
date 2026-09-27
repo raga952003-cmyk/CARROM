@@ -12,6 +12,7 @@ from app.routers import (
     notifications,
     imports,
     payments,
+    payment_proofs,
     registrations,
     teams,
     access,
@@ -100,6 +101,7 @@ app.include_router(notifications.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(payments.router, prefix="/api")
+app.include_router(payment_proofs.router, prefix="/api")
 
 @app.get("/")
 async def root():
@@ -126,6 +128,7 @@ _COLUMN_PROBES = (
     ("011_profile_privacy", "public_profiles", "id"),
     ("012_lifecycle", "tournaments", "champion_id"),
     ("015_payments", "payments", "razorpay_order_id"),
+    ("020_gpay_payment_proofs", "payment_proofs", "transaction_reference"),
 )
 
 # Migrations that leave nothing PostgREST can see. Reporting one of these as
@@ -160,6 +163,21 @@ UNPROBEABLE_MIGRATIONS = (
                "-- the double charge and the lost ledger it exists to "
                "prevent. Verify it by reading its RAISE NOTICEs in the SQL "
                "editor."},
+    {"migration": "017_secure_data_api",
+     "reason": "changes the auth trigger, grants and RLS policies. PostgREST "
+               "cannot prove those definitions are installed. Verify the "
+               "migration in the SQL editor."},
+    {"migration": "018_duplicate_charge_ledger",
+     "reason": "changes the payments status constraint without adding a column. "
+               "PostgREST cannot prove the new constraint is installed. "
+               "Verify the migration in the SQL editor."},
+    {"migration": "019_atomic_draw_and_schedule",
+     "reason": "adds write RPCs whose presence cannot be safely tested with a "
+               "read-only health request. Verify the migration in the SQL editor."},
+    {"migration": "021_atomic_match_delete",
+     "reason": "adds match-delete and score-transition write RPCs whose presence cannot be "
+               "safely tested with a read-only health request. Verify the "
+               "migration in the SQL editor."},
 )
 
 
@@ -167,7 +185,7 @@ def _health_payload(pending, rpc_state, idem_state, owner_state,
                     client_ok, admin_ok):
     """The health response, so the cached path returns the same shape."""
     return {
-        "status": "ok" if not pending else "degraded",
+        "status": "ok" if not pending and client_ok and admin_ok else "degraded",
         "pending_migrations": pending,
         "migrations": (
             "all applied" if not pending
@@ -311,6 +329,18 @@ async def health():
             # found nothing, which is exactly what a zero UUID should do.
             if "board_not_found" not in str(e) and "insufficient_privilege" not in str(e):
                 pending.append("007_apply_board_result_sets")
+
+        # The read-only RPC added by 022 checks pg_trigger for the exact,
+        # enabled BEFORE UPDATE function. GPay and desk payment approval must
+        # not silently stay a two-click workflow after deployment.
+        try:
+            ready = supabase_admin.rpc(
+                "registration_auto_approval_ready", {}
+            ).execute().data
+            if ready is not True:
+                pending.append("022_auto_approve_settled_registrations")
+        except Exception:
+            pending.append("022_auto_approve_settled_registrations")
 
     _pending_cache = pending
     _pending_checked_at = time.monotonic()

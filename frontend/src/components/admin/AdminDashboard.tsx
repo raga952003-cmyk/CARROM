@@ -247,10 +247,10 @@ export const AdminDashboard: React.FC = () => {
   const [rulesForm, setRulesForm] = useState({
     pointsForWin: 2,
     pointsForDraw: 1,
-    maxBoardsPerMatch: 3,
-    targetScore: 29,
+    maxBoardsPerMatch: 8,
+    targetScore: 25,
     queenPoints: 3,
-    matchDurationMinutes: 30,
+    matchDurationMinutes: 90,
     restTimeMinutes: 10,
     venue: '',
     numberOfBoards: 8,
@@ -266,10 +266,10 @@ export const AdminDashboard: React.FC = () => {
       setRulesForm({
         pointsForWin: currentTournament.rules.pointsForWin || 2,
         pointsForDraw: currentTournament.rules.pointsForDraw || 1,
-        maxBoardsPerMatch: currentTournament.rules.maxBoardsPerMatch || 3,
-        targetScore: currentTournament.rules.targetScore || 29,
+        maxBoardsPerMatch: currentTournament.rules.maxBoardsPerMatch || 8,
+        targetScore: currentTournament.rules.targetScore || 25,
         queenPoints: currentTournament.rules.queenPoints || 3,
-        matchDurationMinutes: currentTournament.rules.matchDurationMinutes || 30,
+        matchDurationMinutes: currentTournament.rules.matchDurationMinutes || 90,
         restTimeMinutes: currentTournament.rules.restTimeMinutes || 10,
         venue: currentTournament.venue || '',
         numberOfBoards: currentTournament.numberOfBoards || 8,
@@ -321,7 +321,7 @@ export const AdminDashboard: React.FC = () => {
           ...currentTournament.rules,
           pointsForWin: rulesForm.pointsForWin,
           pointsForDraw: rulesForm.pointsForDraw,
-          maxBoardsPerMatch: rulesForm.maxBoardsPerMatch,
+          maxBoardsPerMatch: scoringForm.boardsPerSet,
           targetScore: rulesForm.targetScore,
           queenPoints: rulesForm.queenPoints,
           matchDurationMinutes: rulesForm.matchDurationMinutes,
@@ -891,19 +891,8 @@ export const AdminDashboard: React.FC = () => {
                             )}
                           </div>
                           <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center py-1.5 border-b border-gray-100 gap-1.5 sm:gap-0">
-                            <span>Max Boards per Match:</span>
-                            {isEditingRules ? (
-                              <input
-                                type="number"
-                                min={1}
-                                max={15}
-                                value={rulesForm.maxBoardsPerMatch}
-                                onChange={e => setRulesForm({ ...rulesForm, maxBoardsPerMatch: parseInt(e.target.value) || 3 })}
-                                className="w-full sm:w-24 p-1 border border-gray-200 rounded text-left sm:text-right font-bold focus:border-[#0B5D3B] focus:ring-1 focus:ring-[#0B5D3B]"
-                              />
-                            ) : (
-                              <strong className="text-gray-900">{currentTournament.rules.maxBoardsPerMatch} boards</strong>
-                            )}
+                            <span>Boards per game:</span>
+                            <strong className="text-gray-900">{isEditingRules ? scoringForm.boardsPerSet : (currentTournament.rules.boardsPerSet ?? currentTournament.rules.maxBoardsPerMatch)} boards</strong>
                           </div>
                           <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center py-1.5 border-b border-gray-100 gap-1.5 sm:gap-0">
                             <span>Target Score Cap:</span>
@@ -913,7 +902,7 @@ export const AdminDashboard: React.FC = () => {
                                 min={1}
                                 max={50}
                                 value={rulesForm.targetScore}
-                                onChange={e => setRulesForm({ ...rulesForm, targetScore: parseInt(e.target.value) || 29 })}
+                                onChange={e => setRulesForm({ ...rulesForm, targetScore: parseInt(e.target.value) || 25 })}
                                 className="w-full sm:w-24 p-1 border border-gray-200 rounded text-left sm:text-right font-bold focus:border-[#0B5D3B] focus:ring-1 focus:ring-[#0B5D3B]"
                               />
                             ) : (
@@ -983,7 +972,7 @@ export const AdminDashboard: React.FC = () => {
                                 min={5}
                                 max={180}
                                 value={rulesForm.matchDurationMinutes}
-                                onChange={e => setRulesForm({ ...rulesForm, matchDurationMinutes: parseInt(e.target.value) || 30 })}
+                                onChange={e => setRulesForm({ ...rulesForm, matchDurationMinutes: parseInt(e.target.value) || 90 })}
                                 className="w-full sm:w-24 p-1 border border-gray-200 rounded text-left sm:text-right font-bold focus:border-[#0B5D3B] focus:ring-1 focus:ring-[#0B5D3B]"
                               />
                             ) : (

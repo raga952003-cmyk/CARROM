@@ -161,6 +161,26 @@ def recalculate_match_scores(
 
     return updated_match
 
+def _points_table_tiebreakers(rules: Dict[str, Any]) -> Tuple[Tuple[str, ...], bool]:
+    """Map configured tie-break names to numeric fields, always keeping points first."""
+    configured = _rule(rules, "tiebreakerRules", "tiebreaker_rules", None)
+    names = configured if isinstance(configured, list) else None
+    mapping = {
+        "net_score_difference": "scoreDiff",
+        "score_difference": "scoreDiff",
+        "board_difference": "boardDiff",
+    }
+    ordered = ["points"]
+    for name in names or ["net_score_difference", "board_difference"]:
+        field = mapping.get(name)
+        if field and field not in ordered:
+            ordered.append(field)
+    for field in ("scoreDiff", "boardDiff"):
+        if field not in ordered:
+            ordered.append(field)
+    return tuple(ordered), names is None or "head_to_head" in names
+
+
 def calculate_points_table(
     matches: List[Dict[str, Any]],
     participants: List[Dict[str, Any]],
@@ -268,19 +288,11 @@ def calculate_points_table(
         r["scoreDiff"] = r["scoreFor"] - r["scoreAgainst"]
         r["form"] = r["form"][-5:]  # Keep last 5
 
-    # Points, then matches won, then board difference, then score difference.
-    # Matches won sits second because two players level on points have not
-    # necessarily won the same number of matches — a draw and a win pay
-    # differently — and beating people is the more direct claim.
+    numeric_order, head_to_head_enabled = _points_table_tiebreakers(rules)
+    # Points are always primary. NSD takes the first tie by default; an
+    # explicit tiebreakerRules list can put board difference first.
     def sort_key(r):
-        return (
-            -r["points"],
-            -r["won"],
-            -r["boardDiff"],
-            -r["scoreDiff"],
-            -r["scoreFor"],
-            r["participantName"]
-        )
+        return tuple(-r[field] for field in numeric_order) + (r["participantName"],)
 
     rows.sort(key=sort_key)
 
@@ -299,7 +311,9 @@ def calculate_points_table(
     # scoring a mini-league of only the matches those entrants played against
     # each other. A group that stays level after that keeps the alphabetical
     # order it already had, which at least is stable.
-    _apply_head_to_head(rows, league_matches, standings_map, pts_win, pts_draw, pts_loss)
+    if head_to_head_enabled:
+        _apply_head_to_head(rows, league_matches, standings_map,
+                            pts_win, pts_draw, pts_loss, numeric_order)
 
     # Assign ranks, and mark who goes through. How many that is depends on the
     # draw this table feeds -- two from each group, or as many as the knockout
@@ -332,18 +346,18 @@ def calculate_points_table(
 
 
 def _apply_head_to_head(rows, league_matches, standings_map,
-                        pts_win, pts_draw, pts_loss) -> None:
+                        pts_win, pts_draw, pts_loss, numeric_order) -> None:
     """
     Re-order each run of entrants that every numeric column left level.
 
     Scored as a mini-league over only the matches the tied entrants played
     against one another: the same win/draw/loss values the main table uses,
-    then the board difference and score difference of those matches alone.
+    then the configured score and board differences of those matches alone.
     Anyone the group never played simply scores nothing from it, which is the
     honest answer -- they have no head-to-head to be judged on.
     """
     def numeric_key(r):
-        return (r["points"], r["won"], r["boardDiff"], r["scoreDiff"], r["scoreFor"])
+        return tuple(r[field] for field in numeric_order)
 
     start = 0
     while start < len(rows):
@@ -388,12 +402,9 @@ def _apply_head_to_head(rows, league_matches, standings_map,
 
             rows[start:end] = sorted(
                 rows[start:end],
-                key=lambda r: (
-                    -mini[r["participantId"]]["points"],
-                    -mini[r["participantId"]]["boardDiff"],
-                    -mini[r["participantId"]]["scoreDiff"],
-                    r["participantName"],
-                ),
+                key=lambda r: tuple(
+                    -mini[r["participantId"]][field] for field in numeric_order
+                ) + (r["participantName"],),
             )
 
         start = end
@@ -701,15 +712,34 @@ def summarise_sets(
         members = grouped.get(set_number, [])
         p1 = p2 = 0
         done = 0
-        for b in members:
+        complete = False
+        target = _rule(rules or {}, "targetScore", "target_score",
+                       _field(match, "targetPoints", "target_points", 25))
+        try:
+            target = max(1, int(target))
+        except (TypeError, ValueError):
+            target = 25
+        # Games stop at the target or board limit. A tie at the limit needs
+        # another board, and that board decides only when it breaks the tie.
+        for b in sorted(members, key=lambda row: _field(row, "boardNumber", "board_number", 0)):
             if b.get("status") != "completed":
                 continue
             done += 1
             p1 += _field(b, "player1Score", "player1_score", 0) or 0
             p2 += _field(b, "player2Score", "player2_score", 0) or 0
+            if set_rule == "target_points" and (
+                (done <= per_set and max(p1, p2) >= target and p1 != p2)
+                or (done >= per_set and p1 != p2)
+            ):
+                complete = True
+                break
 
-        expected = len(members) or per_set
-        complete = done > 0 and done >= expected
+        expected = max(len(members), per_set)
+        if set_rule != "target_points":
+            complete = done > 0 and done >= expected
+        needs_extra_board = (set_rule == "target_points" and not complete
+                             and done >= per_set and p1 == p2
+                             and all(b.get("status") == "completed" for b in members))
 
         winner_id = winner_name = None
         if complete:
@@ -738,6 +768,7 @@ def summarise_sets(
             "status": "completed" if complete else ("in_progress" if done else "pending"),
             "boardsCompleted": done,
             "boardsExpected": expected,
+            "needsExtraBoard": needs_extra_board,
             "player1Points": p1,
             "player2Points": p2,
             "winnerId": winner_id,
@@ -762,7 +793,7 @@ def apply_set_results(
     total_sets, _ = set_layout(match, rules)
     set_rule = _rule(rules or {}, "setWinnerRule", "set_winner_rule", "total_points")
 
-    if total_sets <= 1:
+    if total_sets <= 1 and set_rule != "target_points":
         # A best-of-1 is still a set, so the set rule decides it. Only worth
         # re-deciding when the rule is not the points default, or an existing
         # tournament would change behaviour under it.
@@ -839,6 +870,9 @@ def apply_set_results(
         updated["winnerName"] = None
         updated["status"] = match.get("status", "live")
         updated["matchCompletedAt"] = None
-        updated["tieBreakRequired"] = False
+        needs_extra = any(s["needsExtraBoard"] for s in sets)
+        updated["tieBreakRequired"] = needs_extra
+        if needs_extra:
+            updated["tieBreakRule"] = "additional_board"
 
     return updated

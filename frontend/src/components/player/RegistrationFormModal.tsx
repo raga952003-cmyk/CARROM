@@ -14,6 +14,8 @@ import confetti from 'canvas-confetti';
 import { Tournament, Player, Team, Registration } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { paymentService, PaymentDismissedError, PaymentUnconfirmedError } from '../../services/paymentService';
+import { GPayPaymentProof } from './GPayPaymentProof';
+import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
 
 interface RegistrationFormModalProps {
   tournament: Tournament;
@@ -72,6 +74,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   // from paymentError because the correct advice inverts: offering "Pay"
   // here invites a second charge for the same entry.
   const [unconfirmed, setUnconfirmed] = useState(false);
+  const [gpayProofPending, setGpayProofPending] = useState<boolean | null>(false);
   const [errorMsg, setErrorMsg] = useState('');
 
   // Whether this server can take money at all. Null while unknown, so the
@@ -110,6 +113,12 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
    * first attempt was abandoned or refused.
    */
   const startPayment = async (registrationId: string) => {
+    if (gpayProofPending !== false) {
+      setPaymentError(gpayProofPending
+        ? 'Your GPay proof is awaiting review. Do not pay again.'
+        : 'Checking GPay proof status before opening another payment.');
+      return;
+    }
     setIsPaying(true);
     setPaymentError('');
     try {
@@ -126,9 +135,8 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
         // waiting, and the panel already says so.
         setPaymentError('');
       } else if (e instanceof PaymentUnconfirmedError || e?.paid) {
-        // The charge went through; only our confirmation of it did not. The
-        // webhook will settle it, so the one thing this screen must not do is
-        // invite them to pay again.
+        // Checkout reported a charge, but settlement or refund review may
+        // still be needed. Do not invite another payment for this entry.
         setUnconfirmed(true);
         setPaymentError(e?.message || '');
       } else {
@@ -143,6 +151,11 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
+
+    if (isRegistrationDeadlinePassed(tournament.registrationEndDate)) {
+      setErrorMsg(`Registration closed at the end of ${tournament.registrationEndDate} (India time).`);
+      return;
+    }
 
     if (regType === 'doubles' && !partnerName.trim()) {
       setErrorMsg('Enter your partner name to register a doubles team.');
@@ -212,6 +225,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
 
   const isPaid = registration?.paymentStatus === 'paid';
   const isWaived = registration?.paymentStatus === 'waived';
+  const registrationClosed = isRegistrationDeadlinePassed(tournament.registrationEndDate);
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-xs flex items-start sm:items-center justify-center p-2 sm:p-4 animate-in fade-in duration-150">
@@ -247,21 +261,25 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                 <h3 className="font-serif font-bold text-2xl text-gray-900 mt-2">
                   {isPaying
                     ? 'Waiting for payment…'
-                    : unconfirmed ? 'Payment received — confirming' : 'Your entry is saved'}
+                    : unconfirmed ? 'Payment needs review' : 'Your entry is saved'}
                 </h3>
                 <p className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">
                   {isPaying
                     ? 'Complete the payment in the Razorpay window. Do not close this page.'
                     : unconfirmed
-                      ? <>Your payment for <strong>{tournament.name}</strong> went through. We
-                         could not record the confirmation just now, but it completes on its
-                         own — <strong>do not pay again</strong>. Contact the organisers if
-                         your entry still shows as unpaid in a few minutes.</>
+                      ? <>Checkout reported a payment for <strong>{tournament.name}</strong>,
+                         but your entry is not confirmed yet. <strong>Do not pay again.</strong>
+                         Contact the organisers so they can review the charge.</>
                       : <>Your place in <strong>{tournament.name}</strong> is held but not
                          confirmed. It is confirmed the moment the entry fee is paid.</>}
                 </p>
               </div>
             </div>
+
+            {!unconfirmed && registration && tournament.gpayUpiId && (
+              <GPayPaymentProof registration={registration} tournament={tournament}
+                onPendingChange={setGpayProofPending} />
+            )}
 
             {paymentError && !unconfirmed && (
               <div className="p-3 bg-red-50 text-red-800 text-xs font-semibold rounded-xl border border-red-200 flex items-start gap-2">
@@ -276,7 +294,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                 <strong className="text-gray-900">{regType === 'singles' ? playerName : teamName}</strong>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-500">Entry Fee Due:</span>
+                <span className="text-gray-500">Entry Fee:</span>
                 <strong className="text-amber-700">₹{fee.toLocaleString('en-IN')}</strong>
               </div>
             </div>
@@ -290,7 +308,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
               >
                 {unconfirmed ? 'Close' : 'Pay Later'}
               </button>
-              {!unconfirmed && (
+              {!unconfirmed && gpayProofPending === false && (
               <button
                 type="button"
                 onClick={() => registration?.id && startPayment(registration.id)}
@@ -304,6 +322,14 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
               </button>
               )}
             </div>
+
+            {gpayProofPending !== false && !unconfirmed && (
+              <p className="text-xs text-center font-semibold text-amber-800">
+                {gpayProofPending
+                  ? 'Your GPay proof is awaiting review. Do not pay again.'
+                  : 'Checking GPay proof status before opening another payment.'}
+              </p>
+            )}
 
             <p className="text-[10px] text-center text-gray-400">
               You can close this and pay later from your dashboard. Your entry will
@@ -394,6 +420,12 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                 <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0" />
                 <span>{errorMsg}</span>
               </div>
+            )}
+
+            {registrationClosed && (
+              <p className="p-3 bg-amber-50 text-amber-900 text-xs font-semibold rounded-xl border border-amber-200">
+                Registration closed at the end of {tournament.registrationEndDate} (India time).
+              </p>
             )}
 
             {/* Category Toggle (if tournament supports both) */}
@@ -589,7 +621,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
 
               <button
                 type="submit"
-                disabled={isSubmitting}
+                disabled={isSubmitting || registrationClosed}
                 className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSubmitting

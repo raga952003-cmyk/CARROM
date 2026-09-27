@@ -25,6 +25,8 @@ so this is the only way to reach those branches offline.
 import os
 import sys
 import traceback
+import json
+from datetime import date, datetime, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -32,6 +34,7 @@ sys.path.insert(0, HERE)
 from harness import Harness                       # noqa: E402
 from fakedb import PostgrestError                 # noqa: E402
 import app.routers.tournaments as tournaments_router   # noqa: E402
+import app.services.state_machine as state_machine       # noqa: E402
 
 RESULTS = {}
 
@@ -78,11 +81,14 @@ VERBS = (
 
 
 def tournament_payload(fmt):
+    today = date.today()
     return {
         "name": "Lifecycle %s" % fmt, "description": "", "category": "singles",
         "format": fmt,
-        "registrationStartDate": "2026-01-01", "registrationEndDate": "2026-02-01",
-        "tournamentStartDate": "2026-03-01", "tournamentEndDate": "2026-03-02",
+        "registrationStartDate": today.isoformat(),
+        "registrationEndDate": (today + timedelta(days=10)).isoformat(),
+        "tournamentStartDate": (today + timedelta(days=20)).isoformat(),
+        "tournamentEndDate": (today + timedelta(days=22)).isoformat(),
         "venue": "Hall A", "city": "Chennai",
         "numberOfBoards": 4, "entryFee": 0,
         "rules": dict(RULES), "status": "draft",
@@ -870,7 +876,8 @@ def test_the_closed_registration_message_offers_only_what_works():
     )
     for status, expected in cases:
         try:
-            assert_participants_can_be_added({"status": status})
+            assert_participants_can_be_added({"status": status,
+                                              "registration_end_date": (date.today() + timedelta(days=10)).isoformat()})
             check("entries are refused once the tournament is %s" % status, False,
                   "%s was allowed" % status)
         except Exception as e:
@@ -883,11 +890,48 @@ def test_the_closed_registration_message_offers_only_what_works():
     # And the states that still accept entries are untouched.
     for status in ("registration_open", "draft"):
         try:
-            assert_participants_can_be_added({"status": status})
+            assert_participants_can_be_added({"status": status,
+                                               "registration_end_date": (date.today() + timedelta(days=10)).isoformat()})
             check("a %s tournament still accepts entries" % status, True)
         except Exception as e:
             check("a %s tournament still accepts entries" % status, False,
                   str(getattr(e, "detail", e))[:120])
+
+    # The legacy force switch can reopen a desk closed by hand. It must not
+    # enter a new player after the draw has started, even before the date cutoff.
+    for status in ("registration_closed", "fixture_generation", "fixture_published",
+                   "in_progress", "completed", "cancelled"):
+        try:
+            assert_participants_can_be_added({
+                "status": status,
+                "registration_end_date": (date.today() + timedelta(days=10)).isoformat(),
+            }, force=True)
+            allowed = True
+        except Exception as exc:
+            allowed = False
+            refusal = exc
+        check("force is limited to a manually closed registration desk: %s" % status,
+              allowed if status == "registration_closed" else
+              (not allowed and getattr(refusal, "status_code", None) == 409))
+
+    h = Harness()
+    admin = h.make_user("Forced Entry Owner", "admin")
+    entrant = h.make_user("Late Draw Entrant")
+    tid = h.seed_tournament(owner_id=admin, status="fixture_published")
+    path = "/api/tournaments/%s/registrations?force=true" % tid
+    response = h.post(path, {"type": "singles", "playerId": entrant}, user_id=admin)
+    check("forced HTTP entry cannot change a published draw",
+          response.status_code == 409, detail(response))
+    before = len(h.db.rows("profiles")), len(h.db.rows("registrations"))
+    imported = h.client.post("/api/imports/confirm", data={
+        "tournamentId": tid,
+        "players_json": json.dumps([{"name": "Sheet Entrant"}]),
+        "force": "true",
+    }, headers=h.auth(admin))
+    check("forced sheet import cannot change a published draw",
+          imported.status_code == 409, detail(imported))
+    check("refused sheet import creates no profile or registration",
+          before == (len(h.db.rows("profiles")), len(h.db.rows("registrations"))))
 
 
 def test_reopening_the_decider_reopens_the_tournament():
@@ -1057,7 +1101,104 @@ def test_the_player_directory_will_not_touch_an_admin_account():
     check("a player can still be deleted", r.status_code == 200, detail(r))
 
 
+def test_registration_deadline_is_inclusive_and_cannot_be_forced():
+    """One India-calendar closing day covers player, desk, and import paths."""
+    h = Harness()
+    admin = h.make_user("Deadline Owner", "admin")
+    existing = h.make_user("Existing Entrant")
+    public = h.make_user("Public Entrant")
+    after = h.make_user("After Entrant")
+    tid = h.seed_tournament(
+        owner_id=admin, status="registration_open", category="singles",
+        registration_end_date="2026-09-25")
+    original_today = state_machine.registration_calendar_today
+    try:
+        state_machine.registration_calendar_today = lambda: date(2026, 9, 25)
+        path = "/api/tournaments/%s/registrations" % tid
+        existing_result = h.post(path, {"type": "singles", "playerId": existing},
+                                 user_id=admin)
+        check("admin can enter an existing player on the closing day",
+              existing_result.status_code == 200, detail(existing_result))
+        new_player = h.post("/api/players", {"name": "New Entrant",
+                "email": "new.deadline@carrom.example.com", "rating": 1500}, user_id=admin)
+        if check("admin can create a new player on the closing day",
+                 new_player.status_code == 200, detail(new_player)):
+            new_result = h.post(path, {"type": "singles",
+                                       "playerId": body(new_player)["id"]}, user_id=admin)
+            check("admin can enter a new player on the closing day",
+                  new_result.status_code == 200, detail(new_result))
+        public_result = h.post(path, {"type": "singles", "playerId": public},
+                               user_id=public)
+        check("a player can self-register on the closing day",
+              public_result.status_code == 200, detail(public_result))
+
+        state_machine.registration_calendar_today = lambda: date(2026, 9, 26)
+        before_regs = len(h.db.rows("registrations"))
+        for label, who, suffix, entrant in (
+            ("admin existing", admin, "", after),
+            ("admin forced", admin, "?force=true", after),
+        ):
+            refused = h.post(path + suffix,
+                             {"type": "singles", "playerId": entrant}, user_id=who)
+            check(label + " is refused after the closing day",
+                  refused.status_code == 409 and "closed on 2026-09-25" in detail(refused),
+                  "%s %s" % (refused.status_code, detail(refused)))
+
+        late_new = h.post("/api/players", {"name": "Late New",
+                "email": "late.new@carrom.example.com", "rating": 1500}, user_id=admin)
+        if check("new profile creation stays separate from tournament entry",
+                 late_new.status_code == 200, detail(late_new)):
+            refused = h.post(path, {"type": "singles",
+                                    "playerId": body(late_new)["id"]}, user_id=admin)
+            check("admin cannot enter a newly created player after the deadline",
+                  refused.status_code == 409, detail(refused))
+        refused = h.post(path, {"type": "singles", "playerId": after}, user_id=after)
+        check("public self-registration closes the day after the deadline",
+              refused.status_code == 409, detail(refused))
+        check("refused registrations insert no rows",
+              len(h.db.rows("registrations")) == before_regs,
+              len(h.db.rows("registrations")))
+
+        profiles_before = len(h.db.rows("profiles"))
+        import_result = h.client.post("/api/imports/confirm", data={
+            "tournamentId": tid,
+            "players_json": json.dumps([{"name": "Late Sheet",
+                    "email": "late.sheet@carrom.example.com"}]),
+            "force": "true",
+        }, headers=h.auth(admin))
+        check("forced bulk import cannot pass the closing date",
+              import_result.status_code == 409 and "closed on 2026-09-25" in detail(import_result),
+              "%s %s" % (import_result.status_code, detail(import_result)))
+        check("refused bulk import creates no players or entries",
+              len(h.db.rows("profiles")) == profiles_before
+              and len(h.db.rows("registrations")) == before_regs)
+    finally:
+        state_machine.registration_calendar_today = original_today
+
+
+def test_india_midnight_sets_registration_day():
+    """18:30 UTC is midnight in India, when the closing day ends."""
+    real_datetime = state_machine.datetime
+    try:
+        for utc_stamp, expected in (
+            ("2026-09-25T18:29:59+00:00", date(2026, 9, 25)),
+            ("2026-09-25T18:30:00+00:00", date(2026, 9, 26)),
+        ):
+            class FrozenDateTime:
+                @staticmethod
+                def now(tz):
+                    return datetime.fromisoformat(utc_stamp).astimezone(tz)
+            state_machine.datetime = FrozenDateTime
+            check("registration date changes at India midnight",
+                  state_machine.registration_calendar_today() == expected,
+                  "%s -> %s" % (utc_stamp, state_machine.registration_calendar_today()))
+    finally:
+        state_machine.datetime = real_datetime
+
+
 SUITES = [
+    ("registration closing date", test_registration_deadline_is_inclusive_and_cannot_be_forced),
+    ("India midnight boundary", test_india_midnight_sets_registration_day),
     ("full lifecycle", test_full_lifecycle),
     ("start from closed registration with a draw", test_start_from_closed_registration_with_a_draw),
     ("round robin champion", test_round_robin_champion),

@@ -79,9 +79,16 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const notify = useNotify();
 
   const [viewMode, setViewMode] = useState<'rounds' | 'boards'>('rounds');
-  // A one-minute turnaround is a real option: on a small draw the boards
-  // are free again as soon as the previous pair stand up.
-  const [restMinutes, setRestMinutes] = useState(1);
+  // Publication checks the tournament's configured minimum rest between
+  // appearances. Keep the scheduler's choices at or above that same minimum.
+  const configuredRest = Number(tournament.rules.restTimeMinutes);
+  const minimumRest = Number.isFinite(configuredRest) && configuredRest >= 0
+    ? Math.ceil(configuredRest) : 10;
+  const [restMinutes, setRestMinutes] = useState(minimumRest);
+  useEffect(() => setRestMinutes(minimumRest), [tournament.id, minimumRest]);
+  const restChoices = Array.from(new Set([minimumRest, 1, 2, 5, 10, 15, 20, 30, 45, 60]))
+    .filter(minutes => minutes >= minimumRest)
+    .sort((left, right) => left - right);
   // How many league finishers the knockout takes. Powers of two only: any
   // other size gives the top seeds byes, which the server refuses.
   const [knockoutSlots, setKnockoutSlots] = useState(8);
@@ -140,6 +147,11 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const runRemoveMatch = async () => {
     const victim = pendingRemoval;
     if (!victim) return;
+    if (allMatches.some(match => match.nextMatchId === victim.id)) {
+      setActionError('Remove the feeder matches first, or redraw the knockout bracket.');
+      setPendingRemoval(null);
+      return;
+    }
     const ok = await runAction('remove',
       () => removeMatch(tournament.id, victim.id, matchHasPlay(victim)),
       'Could not remove the fixture.');
@@ -173,6 +185,13 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const canManage = role === 'admin' && (access ? access.canManage : false);
 
   const allMatches = tournament.matches || [];
+  const feederCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const match of allMatches) {
+      if (match.nextMatchId) counts.set(match.nextMatchId, (counts.get(match.nextMatchId) || 0) + 1);
+    }
+    return counts;
+  }, [allMatches]);
 
   // Everything below is derived from the draw, and the draw only changes when
   // the server says so — but this component re-renders on every keystroke in
@@ -320,18 +339,15 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
             <>
               {/* Rest buffer slider/selector */}
               <div className="flex items-center bg-gray-50 px-2.5 py-1.5 rounded-xl border border-gray-200 text-xs">
-                <span className="text-gray-500 mr-2 font-medium">Rest Buffer:</span>
+                <span className="text-gray-500 mr-2 font-medium">Rest Buffer (min {minimumRest}):</span>
                 <select
                   value={restMinutes}
                   onChange={e => setRestMinutes(parseInt(e.target.value))}
                   className="bg-transparent font-bold text-gray-800 focus:outline-hidden"
                 >
-                  <option value={1}>1 min</option>
-                  <option value={2}>2 mins</option>
-                  <option value={5}>5 mins</option>
-                  <option value={10}>10 mins</option>
-                  <option value={15}>15 mins</option>
-                  <option value={20}>20 mins</option>
+                  {restChoices.map(minutes => (
+                    <option key={minutes} value={minutes}>{minutes} min{minutes === 1 ? '' : 's'}</option>
+                  ))}
                 </select>
               </div>
 
@@ -684,6 +700,7 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
             {displayedMatches.map((match) => {
               const isLive = match.status === 'live';
               const isCompleted = match.status === 'completed';
+              const feederCount = feederCounts.get(match.id) || 0;
 
               return (
                 <div
@@ -698,7 +715,7 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                   }`}
                 >
                   {/* Match Header Info */}
-                  <div className="flex items-center justify-between text-xs pb-2.5 mb-2.5 border-b border-gray-100">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs pb-2.5 mb-2.5 border-b border-gray-100">
                     <div className="flex items-center space-x-1.5 font-bold text-gray-800">
                       <span className="text-[#0B5D3B]">Match #{match.matchNumber}</span>
                       <span className="text-gray-300">·</span>
@@ -727,24 +744,29 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                           disabled={!!busy}
                           aria-label={`Edit match ${match.matchNumber}`}
                           title="Edit this fixture — players, round, board, date and time"
-                          className="p-1 rounded-md text-gray-300 hover:text-[#0B5D3B] hover:bg-emerald-50 transition-colors disabled:opacity-40"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-emerald-200 bg-emerald-50 text-[#0B5D3B] hover:bg-emerald-100 transition-colors disabled:opacity-40"
                         >
-                          <Pencil className="w-3.5 h-3.5" />
+                          <Pencil className="w-3.5 h-3.5" /> Edit
                         </button>
                       )}
 
                       {canManage && (
                         <button
                           onClick={e => { e.stopPropagation(); setPendingRemoval(match); }}
-                          disabled={!!busy}
+                          disabled={!!busy || feederCount > 0}
                           aria-label={`Remove match ${match.matchNumber}`}
-                          title={matchHasPlay(match)
+                          title={feederCount > 0
+                            ? `Remove ${feederCount} feeder match${feederCount === 1 ? '' : 'es'} first, or redraw the knockout bracket`
+                            : matchHasPlay(match)
                             ? 'Remove this fixture — it has play recorded on it'
                             : 'Remove this fixture'}
-                          className="p-1 rounded-md text-gray-300 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition-colors disabled:opacity-40"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3.5 h-3.5" /> Remove
                         </button>
+                      )}
+                      {canManage && feederCount > 0 && (
+                        <span className="text-[10px] text-amber-800">Remove feeders first</span>
                       )}
                     </div>
                   </div>
@@ -889,6 +911,20 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                           </div>
                         )}
                       </div>
+                      {canManage && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <button type="button" onClick={e => { e.stopPropagation(); setEditing(m); }} disabled={!!busy}
+                            className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[10px] font-bold text-[#0B5D3B] hover:bg-emerald-100 disabled:opacity-40">
+                            <Pencil className="w-3 h-3" /> Edit
+                          </button>
+                          <button type="button" onClick={e => { e.stopPropagation(); setPendingRemoval(m); }} disabled={!!busy || !!feederCounts.get(m.id)}
+                            title={feederCounts.get(m.id) ? 'Remove feeder matches first, or redraw the knockout bracket' : 'Remove fixture'}
+                            className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1 text-[10px] font-bold text-red-700 hover:bg-red-100 disabled:opacity-40">
+                            <Trash2 className="w-3 h-3" /> Remove
+                          </button>
+                          {!!feederCounts.get(m.id) && <span className="text-[10px] text-amber-800">Remove feeders first</span>}
+                        </div>
+                      )}
                     </div>
                   ))
                 )}

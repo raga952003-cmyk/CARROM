@@ -11,6 +11,7 @@ ever constructed against a real project.
 """
 import os
 import sys
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -103,10 +104,15 @@ class Harness:
 
     # -- fixtures ----------------------------------------------------------
     def seed_tournament(self, owner_id, name="Test Open", **over):
+        today = date.today()
         row = {
             "id": "11111111-1111-1111-1111-111111111111",
             "name": name, "owner_id": owner_id, "status": "in_progress",
             "format": "knockout", "type": "singles", "max_boards": 8,
+            "registration_start_date": today.isoformat(),
+            "registration_end_date": (today + timedelta(days=10)).isoformat(),
+            "tournament_start_date": (today + timedelta(days=20)).isoformat(),
+            "tournament_end_date": (today + timedelta(days=22)).isoformat(),
             "target_points": 29, "rules": {"scoringMode": "remaining_coins",
                                            "queenPoints": 3, "coinsPerSide": 9},
         }

@@ -22,6 +22,7 @@ import os
 import sys
 import traceback
 import uuid
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -57,6 +58,8 @@ RULES = {
     "scoringMode": "remaining_coins", "queenPoints": 3, "coinsPerSide": 9,
     "targetScore": 29, "pointsForWin": 2, "pointsForDraw": 1, "pointsForLoss": 0,
     "maxBoardsPerMatch": 3,
+    "numberOfSets": 1, "boardsPerSet": 3,
+    "setWinnerRule": "total_points",
 }
 
 # What an umpire records on one board; enough to count as play.
@@ -66,11 +69,14 @@ SCORE = {"p1Score": 0, "p2Score": 0, "setNumber": 1, "boardWinner": "player1",
 
 
 def tournament_payload(fmt, boards):
+    today = date.today()
     return {
         "name": "Fixture Routes %s" % fmt, "description": "", "category": "singles",
         "format": fmt,
-        "registrationStartDate": "2026-01-01", "registrationEndDate": "2026-02-01",
-        "tournamentStartDate": "2026-03-01", "tournamentEndDate": "2026-03-02",
+        "registrationStartDate": today.isoformat(),
+        "registrationEndDate": (today + timedelta(days=30)).isoformat(),
+        "tournamentStartDate": (today + timedelta(days=40)).isoformat(),
+        "tournamentEndDate": (today + timedelta(days=42)).isoformat(),
         "venue": "Hall A", "city": "Chennai",
         "numberOfBoards": boards, "entryFee": 0,
         "rules": dict(RULES), "status": "draft",
@@ -359,6 +365,170 @@ def test_import_confirm_autogenerate():
               "matches=%d" % len(matches_of(h, thin)))
 
 
+def test_paid_import_waits_for_settlement():
+    h = Harness()
+    admin = h.make_user("Paid Import Organiser", "admin")
+    payload = tournament_payload("round_robin", boards=2)
+    payload["entryFee"] = 500
+    created = h.post("/api/tournaments", payload, user_id=admin)
+    if not check("a paid tournament can be created for import checks",
+                 created.status_code == 200, detail(created)):
+        return
+    tid = body(created)["id"]
+    entries = [{"name": "Paid Import %d" % i,
+                "email": "paid.import%d@carrom.example.com" % i,
+                "type": "singles"} for i in range(3)]
+    imported = confirm_import(h, admin, tid, entries, auto_generate=True)
+    result = body(imported)
+    check("a paid import creates entries awaiting settlement",
+          imported.status_code == 200 and result.get("imported") == 3, result)
+    regs = [r for r in h.db.rows("registrations") if r["tournament_id"] == tid]
+    check("imported paid entries keep their fee and stay out of the draw",
+          len(regs) == 3 and all(r.get("status") == "pending"
+                                 and r.get("payment_status") == "pending"
+                                 and r.get("fee_paise") == 50000 for r in regs), regs)
+    check("autoGenerate explains why the paid entrants cannot be drawn",
+          result.get("fixturesGenerated") is False
+          and "payment" in str(result.get("fixtureError")).lower()
+          and "waiver" in str(result.get("message")).lower()
+          and not matches_of(h, tid), result)
+
+    # Simulate two legacy rows created as approved before their fees were
+    # settled. A new draw must not trust that approval flag alone.
+    for reg in regs[:2]:
+        h.db.table("registrations").update({"status": "approved"}).eq(
+            "id", reg["id"]).execute()
+    premature = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    check("a legacy approved-but-unpaid entry blocks a new draw",
+          premature.status_code == 409
+          and "unpaid fees" in detail(premature).lower()
+          and not matches_of(h, tid), detail(premature))
+
+    for i, reg in enumerate(regs):
+        paid = h.post("/api/registrations/%s/manual-payment" % reg["id"], {
+            "method": "cash", "reference": "import-receipt-%d" % i,
+        }, user_id=admin)
+        check("recorded import payment approves its entry",
+              paid.status_code == 200 and body(paid).get("status") == "approved",
+              detail(paid))
+    draw = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    check("the organiser can draw paid imported entrants after settlement",
+          draw.status_code == 200 and len(matches_of(h, tid)) == 3,
+          "%s %s" % (draw.status_code, detail(draw)))
+
+
+def test_import_does_not_enter_a_player_twice():
+    h = Harness()
+    admin = h.make_user("Import Owner", "admin")
+    payload = tournament_payload("round_robin", 2)
+    payload["category"] = "both"
+    created = h.post("/api/tournaments", payload, user_id=admin)
+    if not check("a mixed tournament is created for import checks",
+                 created.status_code == 200, detail(created)):
+        return
+    tid = body(created)["id"]
+
+    # Both positions in a doubles team occupy the player's one place. The
+    # later rows must be skipped even though the registration's player_id is
+    # NULL for a team.
+    sheet = [
+        {"name": "Alice Import", "email": "alice.import@carrom.example.com",
+         "partnerName": "Bob Import", "partnerEmail": "bob.import@carrom.example.com",
+         "type": "doubles"},
+        {"name": "Bob Import", "email": "bob.import@carrom.example.com",
+         "partnerName": "Cara Import", "partnerEmail": "cara.import@carrom.example.com",
+         "type": "doubles"},
+        {"name": "Alice Import", "email": "alice.import@carrom.example.com",
+         "type": "singles"},
+        {"name": "Dana Import", "email": "dana.import@carrom.example.com",
+         "type": "singles"},
+        {"name": "Dana Import", "email": "dana.import@carrom.example.com",
+         "type": "singles"},
+    ]
+    response = confirm_import(h, admin, tid, sheet)
+    result = body(response)
+    check("import keeps only one entry per person within the sheet",
+          response.status_code == 200 and result.get("imported") == 2
+          and result.get("doublesImported") == 1 and result.get("singlesImported") == 1,
+          result)
+    check("each duplicate row names the player already entered",
+          result.get("status") == "partial" and len(result.get("skipped", [])) == 3
+          and any("Bob Import" in reason for reason in result["skipped"])
+          and any("Alice Import" in reason for reason in result["skipped"])
+          and any("Dana Import" in reason for reason in result["skipped"]), result)
+    check("rejected doubles rows do not leave an unused partner account",
+          not any(p.get("name") == "Cara Import" for p in h.db.rows("profiles")))
+    regs = [r for r in h.db.rows("registrations") if r["tournament_id"] == tid]
+    check("the sheet creates just two registrations", len(regs) == 2, regs)
+
+    # A prior pending team and an approved single also reserve their members.
+    eve = h.make_user("Eve Existing")
+    finn = h.make_user("Finn Existing")
+    gina = h.make_user("Gina Existing")
+    h.db.seed("teams", [{"id": str(uuid.uuid4()), "name": "Eve & Finn",
+                         "player1_id": eve, "player2_id": finn}])
+    team_id = h.db.rows("teams")[-1]["id"]
+    h.db.seed("registrations", [
+        {"id": str(uuid.uuid4()), "tournament_id": tid, "type": "doubles",
+         "team_id": team_id, "status": "pending"},
+        {"id": str(uuid.uuid4()), "tournament_id": tid, "type": "singles",
+         "player_id": gina, "status": "approved"},
+    ])
+    response = confirm_import(h, admin, tid, [
+        {"name": "Finn Existing", "email": "finn.existing@carrom.example.com",
+         "type": "singles"},
+        {"name": "Hana New", "email": "hana.new@carrom.example.com",
+         "partnerName": "Gina Existing", "partnerEmail": "gina.existing@carrom.example.com",
+         "type": "doubles"},
+        {"name": "Ira New", "email": "ira.new@carrom.example.com",
+         "type": "singles"},
+    ])
+    result = body(response)
+    check("import respects members of existing pending teams and singles",
+          response.status_code == 200 and result.get("imported") == 1
+          and result.get("singlesImported") == 1 and len(result.get("skipped", [])) == 2,
+          result)
+    check("existing-entry skips identify the conflicting person",
+          any("Finn Existing" in reason for reason in result.get("skipped", []))
+          and any("Gina Existing" in reason for reason in result.get("skipped", [])), result)
+    check("a row skipped for its existing partner creates no primary account",
+          not any(p.get("name") == "Hana New" for p in h.db.rows("profiles")))
+
+
+def test_singles_registration_cannot_repeat_doubles_member():
+    h = Harness()
+    admin = h.make_user("Cross Route Owner", "admin")
+    alice = h.make_user("Cross Route Alice")
+    bob = h.make_user("Cross Route Bob")
+    payload = tournament_payload("round_robin", 2)
+    payload["category"] = "both"
+    created = h.post("/api/tournaments", payload, user_id=admin)
+    if not check("a mixed tournament is created for cross-route entry checks",
+                 created.status_code == 200, detail(created)):
+        return
+    tid = body(created)["id"]
+
+    doubles = h.post("/api/tournaments/%s/registrations" % tid, {
+        "type": "doubles", "playerId": alice, "partnerId": bob,
+    }, user_id=admin)
+    if not check("the first doubles entry is registered", doubles.status_code == 200,
+                 "%s %s" % (doubles.status_code, detail(doubles))):
+        return
+
+    singles = h.post("/api/tournaments/%s/registrations" % tid, {
+        "type": "singles", "playerId": alice,
+    }, user_id=admin)
+    check("a doubles member cannot enter singles in the same tournament",
+          singles.status_code == 409,
+          "%s %s" % (singles.status_code, detail(singles)))
+    check("the refusal identifies the conflicting player",
+          "Cross Route Alice" in detail(singles), detail(singles))
+    registrations = [r for r in h.db.rows("registrations") if r["tournament_id"] == tid]
+    check("a refused singles entry leaves only the existing team registration",
+          len(registrations) == 1 and registrations[0].get("type") == "doubles",
+          registrations)
+
+
 # ---------------------------------------------------------------------------
 # Who may draw, and who may import
 # ---------------------------------------------------------------------------
@@ -520,7 +690,7 @@ def test_played_fixture_is_protected():
     check("a fixture with play on it is not deleted by accident", r.status_code == 409,
           "%s %s" % (r.status_code, detail(r)))
     check("the refusal says what would be lost",
-          "board" in detail(r).lower() and "correction history" in detail(r).lower(),
+          "play" in detail(r).lower() or "result" in detail(r).lower(),
           detail(r))
     check("the refused fixture is still there",
           any(m["id"] == victim["id"] for m in matches_of(h, tid)))
@@ -598,8 +768,8 @@ def test_deleting_a_bracket_match_keeps_the_bracket_honest():
     r = h.delete("/api/matches/%s" % target["id"], user_id=admin)
     check("a match other matches advance into is not deleted by accident",
           r.status_code == 409, "%s %s" % (r.status_code, detail(r)))
-    check("the refusal says how many would be orphaned",
-          str(len(feeders)) in detail(r), detail(r))
+    check("the refusal tells the organiser to remove feeders first",
+          "feeder" in detail(r).lower(), detail(r))
     check("the refused bracket match survives",
           any(m["id"] == target["id"] for m in matches_of(h, tid)))
     check("its feeders keep their links",
@@ -608,20 +778,18 @@ def test_deleting_a_bracket_match_keeps_the_bracket_honest():
           [m.get("next_match_id") for m in matches_of(h, tid)
            if m["id"] in {f["id"] for f in feeders}])
 
-    # Forced, it goes -- and the feeders are reported, not quietly broken.
+    # Force cannot orphan feeder matches either. Remove the feeders first.
     r = h.delete("/api/matches/%s?force=true" % target["id"], user_id=admin)
-    if not check("force deletes a match others feed", r.status_code == 200, detail(r)):
-        return
-    check("the orphaned feeders are named back to the caller",
-          sorted(f["matchNumber"] for f in body(r).get("orphanedFeeders") or [])
-          == sorted(f["match_number"] for f in feeders), body(r).get("orphanedFeeders"))
-    check("the feeders survive the deletion of the round above them",
-          all(any(m["id"] == f["id"] for m in matches_of(h, tid)) for f in feeders))
-    check("the feeders' links are cleared rather than left dangling",
-          all(m.get("next_match_id") is None for m in matches_of(h, tid)
-              if m["id"] in {f["id"] for f in feeders}),
-          [m.get("next_match_id") for m in matches_of(h, tid)
-           if m["id"] in {f["id"] for f in feeders}])
+    check("force cannot orphan matches that feed the next round",
+          r.status_code == 409 and all(f["id"] in match_ids(h, tid) for f in feeders),
+          detail(r))
+    for feeder in feeders:
+        removed = h.delete("/api/matches/%s" % feeder["id"], user_id=admin)
+        check("a feeder can be removed before its destination", removed.status_code == 200,
+              detail(removed))
+    r = h.delete("/api/matches/%s" % target["id"], user_id=admin)
+    check("a later-round match can be removed after its feeders", r.status_code == 200,
+          detail(r))
 
     # A first-round match that has already sent its winner up: deleting it must
     # put that slot back to waiting, not leave a finalist with no semi-final.
@@ -763,9 +931,10 @@ def test_rescheduling_a_fixture():
         return
     h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
     m = matches_of(h, tid)[0]
+    rescheduled_date = (date.today() + timedelta(days=41)).isoformat()
 
     r = h.put("/api/matches/%s" % m["id"],
-              {"boardNumber": 3, "scheduledDate": "2026-04-02",
+              {"boardNumber": 3, "scheduledDate": rescheduled_date,
                "scheduledTime": "4:30 PM", "roundName": "Rescheduled Round"},
               user_id=admin)
     if not check("a fixture can be rescheduled", r.status_code == 200,
@@ -780,7 +949,7 @@ def test_rescheduling_a_fixture():
 
     after = next(x for x in matches_of(h, tid) if x["id"] == m["id"])
     check("the board is moved", after["board_number"] == 3, after["board_number"])
-    check("the date is moved", after["scheduled_date"] == "2026-04-02", after["scheduled_date"])
+    check("the date is moved", after["scheduled_date"] == rescheduled_date, after["scheduled_date"])
     check("the time is moved", after["scheduled_time"] == "4:30 PM", after["scheduled_time"])
     check("the round is renamed", after["round_name"] == "Rescheduled Round", after["round_name"])
     check("rescheduling does not touch the pairing",
@@ -936,12 +1105,13 @@ def test_a_clash_is_reported_not_refused():
         return
     h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
     a, b = matches_of(h, tid)[0], matches_of(h, tid)[1]
+    clash_date = (date.today() + timedelta(days=41)).isoformat()
 
     h.put("/api/matches/%s" % a["id"],
-          {"boardNumber": 2, "scheduledDate": "2026-04-03", "scheduledTime": "10:00 AM"},
+          {"boardNumber": 2, "scheduledDate": clash_date, "scheduledTime": "10:00 AM"},
           user_id=admin)
     r = h.put("/api/matches/%s" % b["id"],
-              {"boardNumber": 2, "scheduledDate": "2026-04-03", "scheduledTime": "10:00 AM"},
+              {"boardNumber": 2, "scheduledDate": clash_date, "scheduledTime": "10:00 AM"},
               user_id=admin)
     if not check("a clashing move is allowed", r.status_code == 200,
                  "%s %s" % (r.status_code, detail(r))):
@@ -1124,6 +1294,9 @@ def test_bulk_import_closes_with_it():
 SUITES = [
     ("draw, replay and redraw through /fixtures", test_generate_draws_replays_and_redraws),
     ("import with autoGenerate", test_import_confirm_autogenerate),
+    ("paid import waits for settlement", test_paid_import_waits_for_settlement),
+    ("import admits each person only once", test_import_does_not_enter_a_player_twice),
+    ("singles cannot repeat a doubles member", test_singles_registration_cannot_repeat_doubles_member),
     ("access boundaries", test_access_boundaries),
     ("remove an unplayed fixture", test_unplayed_fixture_deletes_cleanly),
     ("removal guards played fixtures", test_played_fixture_is_protected),

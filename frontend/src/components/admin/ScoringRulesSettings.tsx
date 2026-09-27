@@ -8,7 +8,7 @@ export interface ScoringRules {
   /** Boards inside one set. */
   boardsPerSet: number;
   coinValue: number;
-  setWinnerRule: 'total_points' | 'board_wins';
+  setWinnerRule: 'target_points' | 'total_points' | 'board_wins';
   boardEntryMode: 'simple' | 'detailed';
   coinsPerSide: number;
   queenPoints: number;
@@ -19,10 +19,10 @@ export interface ScoringRules {
 
 export const defaultScoringRules: ScoringRules = {
   scoringMode: 'remaining_coins',
-  numberOfSets: 1,
+  numberOfSets: 3,
   boardsPerSet: 8,
   coinValue: 1,
-  setWinnerRule: 'total_points',
+  setWinnerRule: 'target_points',
   boardEntryMode: 'simple',
   coinsPerSide: 9,
   queenPoints: 3,
@@ -86,7 +86,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             onChange={e => set({ boardsPerSet: parseInt(e.target.value) || 8 })}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
-            {[4, 6, 8, 10].map(n => <option key={n} value={n}>{n} boards</option>)}
+            {[4, 6, 8].map(n => <option key={n} value={n}>{n} boards</option>)}
           </select>
         </div>
 
@@ -131,7 +131,8 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             onChange={e => set({ setWinnerRule: e.target.value as ScoringRules['setWinnerRule'] })}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
-            <option value="total_points">Most points across the set</option>
+            <option value="target_points">First to the target points, or leader after the board limit</option>
+            <option value="total_points">Most points across all scheduled boards (house rule)</option>
             <option value="board_wins">Most boards won in the set</option>
           </select>
           <p className="text-[10px] text-gray-500 mt-1">
@@ -200,7 +201,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
 
         <div className="sm:col-span-2">
           <label className="block text-[11px] font-bold text-gray-700 mb-1">
-            If the match is tied after every board
+            {value.setWinnerRule === 'target_points' ? 'If a game is tied at its board limit' : 'If the match is tied after every board'}
           </label>
           <select
             value={value.tieBreak}
@@ -221,10 +222,8 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <div>
             {value.numberOfSets > 1 && (
               <div className="mb-1.5 font-semibold">
-                {value.numberOfSets} sets of {value.boardsPerSet} boards is{' '}
-                <strong>{value.numberOfSets * value.boardsPerSet} boards</strong>. A set is won on the
-                points scored inside it and the match on sets, so a player can score fewer points
-                overall and still win.
+                Best of {value.numberOfSets} games, with up to {value.boardsPerSet} regular boards per game.
+                {value.setWinnerRule === 'target_points' && ' A game can finish earlier at the target score; a tied game gets a deciding board.'}
               </div>
             )}
             {remaining ? (
@@ -232,9 +231,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
                 A board where the winner clears their coins, the loser has <strong>4</strong> left and the
                 queen is covered scores <strong>{example.total}</strong> to the winner
                 ({example.base} coins + {value.queenPoints} queen) and <strong>0</strong> to the loser.
-                {value.scoringMode === 'remaining_coins' && (
-                  <> Every board is played out — a match is not decided early on board wins.</>
-                )}
+                {value.setWinnerRule === 'target_points' && ' The game stops at the target score or board limit.'}
               </>
             ) : (
               <>

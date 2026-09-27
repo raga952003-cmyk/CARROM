@@ -23,6 +23,7 @@ not actually checked. That gap belongs to the live suites.
 import os
 import sys
 import traceback
+from datetime import date, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -486,13 +487,7 @@ def test_multi_set_boards_survive_the_list():
 
 def test_reschedule_preserves_results():
     """
-    Rescheduling moves matches; it does not un-play them.
-
-    The schedule is offered while a tournament is in progress -- the fixture
-    screen has a Reschedule button -- and it reads every match row, runs the
-    engine, then writes back. It used to write back the WHOLE rows it had read,
-    so anything recorded on a match in between was reverted to the snapshot:
-    a confirmed result lost its score and went live again, silently.
+    A result recorded during Auto-Schedule prevents that schedule from writing.
     """
     h = Harness()
     admin = h.make_user("Schedule Organiser", "admin")
@@ -500,16 +495,8 @@ def test_reschedule_preserves_results():
                           tournament_start_date="2026-09-10")
     match_id = h.seed_match(t, h.make_user("Sched P1"), h.make_user("Sched P2"),
                             boards=1, id="44444444-4444-4444-4444-444444444444",
-                            round_name="Final", round_index=1, board_number=1)
-
-    scored = h.post("/api/matches/%s/boards/1/submit" % match_id,
-                    {"p1Score": 0, "p2Score": 0, "setNumber": 1,
-                     "boardWinner": "player1", "coinsRemainingWith": "player2",
-                     "coinsRemaining": 5, "auditReason": "played"},
-                    user_id=admin)
-    if not check("the board is scored before rescheduling",
-                 scored.status_code == 200, detail(scored)):
-        return
+                            round_name="Final", round_index=1, board_number=1,
+                            status="scheduled")
     # The window is between the read at the top of the request and the write at
     # the bottom, so the result has to land while the schedule is being
     # computed. That is exactly what happens at a venue -- rescheduling 190
@@ -521,17 +508,30 @@ def test_reschedule_preserves_results():
 
     def engine_then_a_result(*args, **kwargs):
         out = real_engine(*args, **kwargs)
+        during["start"] = h.post("/api/matches/%s/start" % match_id, {}, user_id=admin)
+        during["score"] = h.post("/api/matches/%s/boards/1/submit" % match_id,
+                                 {"p1Score": 0, "p2Score": 0, "setNumber": 1,
+                                  "boardWinner": "player1", "coinsRemainingWith": "player2",
+                                  "coinsRemaining": 5, "auditReason": "played"},
+                                 user_id=admin)
         during["confirm"] = h.post("/api/matches/%s/confirm" % match_id, {},
                                    user_id=admin)
         return out
 
     tournaments_router.generate_conflict_free_schedule = engine_then_a_result
     try:
-        r = h.post("/api/tournaments/%s/schedule?restMinutes=5" % t, {}, user_id=admin)
+        r = h.post("/api/tournaments/%s/schedule?restMinutes=10" % t, {}, user_id=admin)
     finally:
         tournaments_router.generate_conflict_free_schedule = real_engine
 
-    check("the schedule is generated", r.status_code == 200, detail(r))
+    check("a result recorded during scheduling stops the schedule write",
+          r.status_code == 409, detail(r))
+    check("the match started while the schedule was being built",
+          during.get("start") is not None and during["start"].status_code == 200,
+          detail(during["start"]) if during.get("start") else "not attempted")
+    check("the board was scored while the schedule was being built",
+          during.get("score") is not None and during["score"].status_code == 200,
+          detail(during["score"]) if during.get("score") else "not attempted")
     check("the result was confirmed while the schedule was being built",
           during.get("confirm") is not None and during["confirm"].status_code == 200,
           detail(during["confirm"]) if during.get("confirm") else "not attempted")
@@ -546,8 +546,41 @@ def test_reschedule_preserves_results():
           after.get("player1_total_points"))
     check("rescheduling does not put a finished match back to scheduled",
           after.get("status") != "scheduled", after.get("status"))
-    check("rescheduling still assigns a time",
-          bool(after.get("scheduled_date")), after.get("scheduled_date"))
+    check("a stale schedule never moves the completed match",
+          not after.get("scheduled_date"), after.get("scheduled_date"))
+
+
+def test_schedule_respects_rest_and_tournament_end():
+    h = Harness()
+    admin = h.make_user("Schedule Owner", "admin")
+    event_day = (date.today() + timedelta(days=20)).isoformat()
+    tid = h.seed_tournament(
+        admin, status="registration_closed", number_of_boards=1,
+        tournament_start_date=event_day, tournament_end_date=event_day,
+        rules={"matchDurationMinutes": 480, "restTimeMinutes": 10},
+    )
+    players = [h.make_user("Schedule Player %d" % n) for n in range(4)]
+    for number in (1, 2):
+        h.db.seed("matches", [{
+            "id": "33333333-3333-3333-3333-%012d" % number,
+            "tournament_id": tid, "match_number": number,
+            "player1_id": players[(number - 1) * 2],
+            "player2_id": players[(number - 1) * 2 + 1],
+            "stage": "league", "round_index": 1,
+            "board_number": 1, "status": "scheduled",
+        }])
+
+    path = "/api/tournaments/%s/schedule" % tid
+    short_rest = h.post(path + "?restMinutes=1", {}, user_id=admin)
+    check("Auto-Schedule rejects rest below tournament rules",
+          short_rest.status_code == 422 and "at least 10" in detail(short_rest),
+          detail(short_rest))
+    overflow = h.post(path, {}, user_id=admin)
+    check("Auto-Schedule rejects matches past the tournament end",
+          overflow.status_code == 409 and "do not fit" in detail(overflow),
+          detail(overflow))
+    check("rejected schedule writes no match times",
+          all(not m.get("scheduled_date") for m in h.db.rows("matches")))
 
 
 # ---------------------------------------------------------------------------
@@ -566,12 +599,15 @@ def test_create_then_publish():
     """
     h = Harness()
     admin = h.make_user("Create Organiser", "admin")
+    today = date.today()
 
     created = h.post("/api/tournaments", {
         "name": "Publish Me", "format": "knockout", "type": "singles",
         "status": "draft",
-        "registrationStartDate": "2026-08-01", "registrationEndDate": "2026-08-20",
-        "tournamentStartDate": "2026-09-10", "tournamentEndDate": "2026-09-12",
+        "registrationStartDate": today.isoformat(),
+        "registrationEndDate": (today + timedelta(days=10)).isoformat(),
+        "tournamentStartDate": (today + timedelta(days=20)).isoformat(),
+        "tournamentEndDate": (today + timedelta(days=22)).isoformat(),
         "venue": "City Sports Arena", "city": "Chennai", "rules": {},
     }, user_id=admin)
     if not check("a tournament can be created", created.status_code in (200, 201),
@@ -600,17 +636,8 @@ def test_create_then_publish():
 
 def test_registration_roles():
     """
-    What you register as is what you are afterwards.
-
-    Registering as an administrator used to produce a PLAYER account and sign
-    you straight into it without a word: the form offered the role, checked a
-    key against a literal in its own bundle (which also passed when the field
-    was empty), and then dropped the role before sending. The server hard-coded
-    'player', so the two halves never met.
-
-    Registration is open in this deployment -- the role comes from the form and
-    the server writes it -- so this is also the test that says so out loud.
-    Anyone who can reach /auth/signup can create an admin.
+    Public signup creates a player awaiting email confirmation. Organizer
+    accounts require trusted provisioning and cannot be self-assigned.
     """
     h = Harness()
 
@@ -619,53 +646,47 @@ def test_registration_roles():
         "name": "Plain Player", "city": "Chennai",
     })
     check("registering without naming a role succeeds", plain.status_code == 200, detail(plain))
-    check("and creates a player by default",
-          body(plain).get("user", {}).get("role") == "player",
-          body(plain).get("user", {}).get("role"))
+    check("signup requires email confirmation and returns no session",
+          body(plain).get("status") == "confirmation_required"
+          and "access_token" not in body(plain), body(plain))
+    row = next((pr for pr in h.db.tables["profiles"]
+                if pr.get("email") == "plain.player@example.com"), None)
+    check("the trusted trigger creates a player profile",
+          (row or {}).get("role") == "player", row)
+
+    before_confirm = h.client.post("/api/auth/login", json={
+        "email": "plain.player@example.com", "password": "secret123",
+        "role": "player"})
+    check("unconfirmed players cannot sign in",
+          before_confirm.status_code != 200, detail(before_confirm))
+    h.db.auth.confirm_email("plain.player@example.com")
+    signed_in = h.client.post("/api/auth/login", json={
+        "email": "plain.player@example.com", "password": "secret123",
+        "role": "player"})
+    check("a confirmed player can sign in",
+          signed_in.status_code == 200 and bool(body(signed_in).get("access_token")),
+          detail(signed_in))
 
     admin = h.client.post("/api/auth/signup", json={
         "email": "real.admin@example.com", "password": "secret123",
         "name": "Real Admin", "city": "Chennai", "role": "admin",
     })
-    check("registering as an administrator succeeds", admin.status_code == 200, detail(admin))
-    check("and creates an administrator",
-          body(admin).get("user", {}).get("role") == "admin",
-          body(admin).get("user", {}).get("role"))
+    check("public administrator signup is refused",
+          admin.status_code == 403 and "invitation" in detail(admin).lower(),
+          detail(admin))
+    check("a refused administrator signup creates no user",
+          not any(u["email"] == "real.admin@example.com" for u in h.db.auth_users),
+          h.db.auth_users)
 
-    # The session handed back is that administrator, not a player. This is the
-    # exact symptom that was reported: registering as an admin logged you in
-    # as a player.
-    token = body(admin).get("access_token")
-    me = h.client.get("/api/auth/me", headers={"Authorization": "Bearer %s" % token})
-    check("the session registration hands back is the administrator's",
-          body(me).get("role") == "admin", body(me).get("role"))
-
-    # And the profiles row agrees, which is what every later authorisation
-    # reads -- a session saying admin over a row saying player would be
-    # refused at every door, including the sign-in that would put it right.
-    row = next((pr for pr in h.db.tables["profiles"]
-                if pr.get("email") == "real.admin@example.com"), None)
-    check("and the stored profile says administrator too",
-          (row or {}).get("role") == "admin", row)
-
-    again = h.client.post("/api/auth/login", json={
-        "email": "real.admin@example.com", "password": "secret123",
-        "role": "admin"})
-    check("the account can sign in as an administrator afterwards",
-          again.status_code == 200, detail(again))
-
-    # A role that is neither is refused rather than quietly made a player.
     bogus = h.client.post("/api/auth/signup", json={
         "email": "bogus.role@example.com", "password": "secret123",
         "name": "Bogus Role", "role": "superuser",
     })
-    check("a role that is not player or admin is refused",
-          bogus.status_code == 422, "%s %s" % (bogus.status_code, detail(bogus)))
+    check("unknown public signup roles are refused",
+          bogus.status_code == 403, "%s %s" % (bogus.status_code, detail(bogus)))
     check("and creates no account at all",
-          h.client.post("/api/auth/login", json={
-              "email": "bogus.role@example.com", "password": "secret123",
-              "role": "player"}).status_code != 200,
-          "an account survived a refused registration")
+          not any(u["email"] == "bogus.role@example.com" for u in h.db.auth_users),
+          h.db.auth_users)
 
 
 def test_signin_role_must_match():
@@ -681,9 +702,13 @@ def test_signin_role_must_match():
     h.client.post("/api/auth/signup", json={
         "email": "role.player@example.com", "password": "secret123",
         "name": "Role Player"})
-    h.client.post("/api/auth/signup", json={
+    h.db.auth.confirm_email("role.player@example.com")
+    h.db.auth.admin.create_user({
         "email": "role.admin@example.com", "password": "secret123",
-        "name": "Role Admin", "role": "admin"})
+        "user_metadata": {"name": "Role Admin"},
+        "app_metadata": {"role": "admin"},
+        "email_confirm": True,
+    })
 
     cases = [
         ("role.player@example.com", "player", 200, "a player signs in as a player"),
@@ -720,6 +745,7 @@ def test_me_follows_the_profile():
         "email": "promote.me@example.com", "password": "secret123",
         "name": "Promote Me", "club": "Deccan Club", "city": "Chennai",
         "phone": "9876543210"})
+    h.db.auth.confirm_email("promote.me@example.com")
     session = h.client.post("/api/auth/login", json={
         "email": "promote.me@example.com", "password": "secret123",
         "role": "player"})
@@ -1156,6 +1182,7 @@ SUITES = [
     ("tie-break needs a tie", test_the_tie_break_ruling_needs_an_actual_tie),
     ("multi-set boards survive the list", test_multi_set_boards_survive_the_list),
     ("rescheduling preserves results", test_reschedule_preserves_results),
+    ("schedule fits event dates and rest", test_schedule_respects_rest_and_tournament_end),
     ("create then publish", test_create_then_publish),
     ("registration roles", test_registration_roles),
     ("sign-in role must match", test_signin_role_must_match),

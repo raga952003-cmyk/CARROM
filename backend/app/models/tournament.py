@@ -1,7 +1,19 @@
-from pydantic import BaseModel, Field, AliasGenerator
+from pydantic import BaseModel, Field, AliasGenerator, model_validator, field_validator
 from pydantic.alias_generators import to_camel
 from typing import Optional, List, Any
 from datetime import date
+import re
+
+
+def _valid_gpay_destination(value: Optional[str]) -> Optional[str]:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    if re.fullmatch(r"[6-9][0-9]{9}", cleaned) or re.fullmatch(
+        r"[A-Za-z0-9._-]{2,100}@[A-Za-z0-9.-]{2,100}", cleaned
+    ):
+        return cleaned
+    raise ValueError("Enter a 10-digit Indian GPay number or a valid UPI ID.")
 
 class BaseCamelModel(BaseModel):
     model_config = {
@@ -14,12 +26,12 @@ class TournamentRulesSchema(BaseCamelModel):
     points_for_win: int = 2
     points_for_draw: int = 1
     points_for_loss: int = 0
-    max_boards_per_match: int = 3
-    target_score: int = 29
+    max_boards_per_match: int = Field(default=8, ge=1, le=8)
+    target_score: int = Field(default=25, ge=1, le=50)
     queen_points: int = 3
-    match_duration_minutes: int = 30
+    match_duration_minutes: int = Field(default=90, ge=1, le=480)
     rest_time_minutes: int = 10
-    tiebreaker_rules: List[str] = ["points", "board_difference", "net_score_difference", "head_to_head"]
+    tiebreaker_rules: List[str] = ["points", "net_score_difference", "board_difference", "head_to_head"]
     # Group stage (spec 68). groupCount > 1 splits the league phase into
     # balanced groups; undeclared fields are dropped by the model, so these
     # have to exist here for the setting to survive tournament creation.
@@ -38,16 +50,22 @@ class TournamentRulesSchema(BaseCamelModel):
     tie_break: Optional[str] = None
     # Carromite format: a match is N sets of M boards, won on sets rather than
     # on total points. 1 set keeps the original flat-board behaviour.
-    number_of_sets: Optional[int] = None
-    boards_per_set: Optional[int] = None
+    number_of_sets: Optional[int] = Field(default=3, ge=1, le=5)
+    boards_per_set: Optional[int] = Field(default=None, ge=1, le=8)
     # What one coin is worth, and how a set is decided. Both belong in the
     # rules rather than the arithmetic: associations differ, and a set won
     # on boards can go to the other player than a set won on points.
     coin_value: Optional[int] = None
-    set_winner_rule: Optional[str] = None   # total_points | board_wins
+    set_winner_rule: Optional[str] = "target_points"   # target_points | total_points | board_wins
     # What the scorer is asked for on a board: 'simple' is who finished
     # and the coins left; 'detailed' adds the queen and penalties.
     board_entry_mode: Optional[str] = None
+
+    @model_validator(mode="after")
+    def align_board_limit(self):
+        if self.boards_per_set is None:
+            self.boards_per_set = self.max_boards_per_match
+        return self
 
 class PosterConfigSchema(BaseCamelModel):
     theme_style: str = "emerald_gold"
@@ -70,10 +88,23 @@ class TournamentCreateSchema(BaseCamelModel):
     city: str
     number_of_boards: int = 4
     entry_fee: float = 0.0
+    gpay_upi_id: Optional[str] = Field(default=None, max_length=100)
     prize_pool: Optional[str] = ""
     rules: TournamentRulesSchema
     poster_config: Optional[PosterConfigSchema] = None
     status: Optional[str] = "draft"
+
+    @field_validator("gpay_upi_id")
+    @classmethod
+    def valid_gpay_destination(cls, value):
+        return _valid_gpay_destination(value)
+
+    @model_validator(mode="after")
+    def check_dates(self):
+        if not (self.registration_start_date <= self.registration_end_date
+                <= self.tournament_start_date <= self.tournament_end_date):
+            raise ValueError("Tournament dates must follow registration start, registration end, tournament start, tournament end.")
+        return self
 
 class TournamentUpdateSchema(BaseCamelModel):
     name: Optional[str] = None
@@ -88,12 +119,18 @@ class TournamentUpdateSchema(BaseCamelModel):
     city: Optional[str] = None
     number_of_boards: Optional[int] = None
     entry_fee: Optional[float] = None
+    gpay_upi_id: Optional[str] = Field(default=None, max_length=100)
     prize_pool: Optional[str] = None
     rules: Optional[TournamentRulesSchema] = None
     poster_config: Optional[PosterConfigSchema] = None
     status: Optional[str] = None
     schedule_published: Optional[bool] = None
     fixtures_generated: Optional[bool] = None
+
+    @field_validator("gpay_upi_id")
+    @classmethod
+    def valid_gpay_destination(cls, value):
+        return _valid_gpay_destination(value)
 
 class RegistrationCreateSchema(BaseCamelModel):
     type: str  # "singles" or "doubles"

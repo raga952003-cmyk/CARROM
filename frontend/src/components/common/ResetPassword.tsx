@@ -5,18 +5,14 @@ import { apiClient } from '../../utils/apiClient';
 /**
  * Where a reset link lands.
  *
- * Supabase puts the recovery token in the URL FRAGMENT, not the query string —
- * `#access_token=...&type=recovery` — so it never reaches a server, which is
- * the point. Normally the browser's own Supabase client would pick it up and
- * call updateUser. This deployment has no such client (the VITE_SUPABASE_*
- * variables are not set in the build), so the token is read here and handed to
- * the API, which verifies it and makes the change with the service role.
+ * The email template links here with a one-time recovery token hash. The API
+ * verifies and consumes that proof before changing the password.
  *
  * Rendered outside the tournament provider: someone locked out has no session,
  * and this page must not need one.
  */
 export const ResetPassword: React.FC = () => {
-  const [token, setToken] = useState<string | null>(null);
+  const [tokenHash, setTokenHash] = useState<string | null>(null);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
@@ -24,18 +20,13 @@ export const ResetPassword: React.FC = () => {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    // The fragment carries both the route and the token:
-    //   #/reset-password#access_token=...   or   #access_token=...&type=recovery
+    // The recovery email carries a one-time token hash on this public route.
     const raw = window.location.hash || '';
-    const afterHash = raw.replace(/^#/, '');
-    const query = afterHash.includes('access_token=')
-      ? afterHash.slice(afterHash.indexOf('access_token='))
-      : '';
-    const found = new URLSearchParams(query).get('access_token');
+    const query = raw.includes('?') ? raw.slice(raw.indexOf('?') + 1) : '';
+    const found = new URLSearchParams(query).get('token_hash') ||
+      new URLSearchParams(window.location.search).get('token_hash');
     if (found) {
-      setToken(found);
-      // Take it out of the address bar: a recovery token in browser history or
-      // a shared screenshot is a way into the account.
+      setTokenHash(found);
       window.history.replaceState(null, '', window.location.pathname + '#/reset-password');
     } else {
       setError('This link is missing its token. Ask for a new reset email.');
@@ -49,7 +40,7 @@ export const ResetPassword: React.FC = () => {
     setError('');
     try {
       await apiClient.post('/auth/reset-password', {
-        accessToken: token, newPassword: password,
+        tokenHash, newPassword: password,
       });
       setDone(true);
     } catch (e: any) {
@@ -94,13 +85,13 @@ export const ResetPassword: React.FC = () => {
               <div>
                 <label className="block text-xs font-bold text-gray-700 mb-1.5">New password</label>
                 <input className={field} type="password" value={password}
-                       disabled={!token || busy}
+                       disabled={!tokenHash || busy}
                        onChange={e => setPassword(e.target.value)} />
               </div>
               <div>
                 <label className="block text-xs font-bold text-gray-700 mb-1.5">Confirm password</label>
                 <input className={field} type="password" value={confirm}
-                       disabled={!token || busy}
+                       disabled={!tokenHash || busy}
                        onChange={e => setConfirm(e.target.value)} />
               </div>
 
@@ -113,7 +104,7 @@ export const ResetPassword: React.FC = () => {
 
               <button
                 onClick={submit}
-                disabled={!token || busy || !password || password !== confirm}
+                 disabled={!tokenHash || busy || !password || password !== confirm}
                 className="w-full px-4 py-2.5 text-sm font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white rounded-xl shadow-md flex items-center justify-center gap-1.5 disabled:opacity-40"
               >
                 {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}

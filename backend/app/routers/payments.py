@@ -33,6 +33,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from app.database import get_admin_db
 from app.models.payment import PaymentVerifySchema
@@ -41,12 +42,17 @@ from app.services.access_control import require_tournament_access
 from app.services.audit_service import record_audit
 from app.services.notification_service import fan_out_notification
 from app.services.razorpay_client import RazorpayError
-from app.utils.security import get_user_profile
+from app.utils.security import get_user_profile, verify_admin
 from app.utils.serializers import serialize_payment, serialize_registration
 
 logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+
+
+class ManualRefundRecord(BaseModel):
+    reference: str = Field(min_length=3, max_length=120)
+    reason: str = Field(min_length=5, max_length=500)
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +352,19 @@ async def create_payment_order(registration_id: str, profile=Depends(get_user_pr
             detail=f"This entry cannot be paid for because {blocked}.",
         )
 
+    # A player may already have sent the fee to the tournament's GPay account.
+    # Until that proof is reviewed, opening (or reopening) Razorpay checkout
+    # risks collecting the same entry fee a second time.
+    pending_proof = admin_db.table("payment_proofs").select("id").eq(
+        "registration_id", registration_id
+    ).eq("status", "pending").limit(1).execute().data or []
+    if pending_proof:
+        raise HTTPException(
+            status_code=409,
+            detail="A GPay payment proof is awaiting review for this entry. "
+                   "Do not pay again; contact the organiser if the proof was submitted in error.",
+        )
+
     # An attempt that already succeeded, found before another order is minted.
     # _settle_payment refuses a second settlement anyway, but refusing here is
     # what stops the player reaching a checkout screen at all.
@@ -493,7 +512,7 @@ async def _settle_payment(admin_db, payment: Dict[str, Any], razorpay_payment_id
     # a non-'paid' row, settle it again, and re-approve an entry that has been
     # refunded. The player would be in the draw having been given their money
     # back.
-    if payment.get("status") == "refunded":
+    if payment.get("status") in ("refunded", "refund_due"):
         logger.info(
             f"Ignoring a settlement for payment row {payment.get('id')}: "
             "it is already recorded as refunded."
@@ -528,26 +547,6 @@ async def _settle_payment(admin_db, payment: Dict[str, Any], razorpay_payment_id
         row for row in siblings
         if row.get("status") == "paid" and str(row.get("id")) != str(payment.get("id"))
     ]
-    if already:
-        logger.error(
-            "Registration %s is already paid by payment %s; refusing to settle %s as well.",
-            payment["registration_id"], already[0].get("razorpay_payment_id"),
-            razorpay_payment_id,
-        )
-        record_audit(
-            admin_db, actor=actor, action="payment.duplicate_refused",
-            entity_type="payment", entity_id=str(payment.get("id")),
-            new_state={"registration_id": payment["registration_id"],
-                       "already_paid_by": already[0].get("razorpay_payment_id"),
-                       "refused_payment_id": razorpay_payment_id},
-        )
-        raise HTTPException(
-            status_code=409,
-            detail="This entry has already been paid for. If you have been "
-                   "charged twice, contact the organisers for a refund -- "
-                   "do not pay again.",
-        )
-
     # What Razorpay says this payment actually is. The signature proved who
     # sent the message; this proves what the message is about.
     try:
@@ -652,17 +651,66 @@ async def _settle_payment(admin_db, payment: Dict[str, Any], razorpay_payment_id
                    "Please contact the organisers.",
         )
 
-    from datetime import datetime, timezone
-    settled = admin_db.table("payments").update({
-        "razorpay_payment_id": razorpay_payment_id,
-        "status": "paid",
-        "signature_verified": True,
-        "confirmed_via": via,
-        "method": remote.get("method"),
-        "paid_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", payment["id"]).execute()
+    def record_duplicate_capture(paid_sibling: Dict[str, Any]) -> None:
+        """Keep a captured second charge visible even when the DB won a race."""
+        from datetime import datetime, timezone
+        flagged = admin_db.table("payments").update({
+            "razorpay_payment_id": razorpay_payment_id,
+            "status": "refund_due",
+            "method": remote.get("method"),
+            "paid_at": datetime.now(timezone.utc).isoformat(),
+            "signature_verified": True,
+            "error_description": "Duplicate captured charge; refund required.",
+        }).eq("id", payment["id"]).in_("status", ["created", "failed"]).execute().data
+        if not flagged:
+            raise HTTPException(status_code=503, detail="Could not record a duplicate charge; retrying safely.")
+        record_audit(
+            admin_db, actor=actor, action="payment.refund_due",
+            entity_type="payment", entity_id=str(payment["id"]),
+            new_state={"registration_id": payment["registration_id"],
+                       "paid_by": paid_sibling.get("razorpay_payment_id"),
+                       "duplicate_payment_id": razorpay_payment_id},
+        )
+        raise HTTPException(status_code=409, detail="A duplicate charge was recorded for refund. Contact the organisers; do not pay again.")
 
-    payment = settled.data[0] if settled.data else dict(payment, status="paid")
+    if already:
+        record_duplicate_capture(already[0])
+
+    from datetime import datetime, timezone
+    try:
+        settled = admin_db.table("payments").update({
+            "razorpay_payment_id": razorpay_payment_id,
+            "status": "paid",
+            "signature_verified": True,
+            "confirmed_via": via,
+            "method": remote.get("method"),
+            "paid_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", payment["id"]).in_("status", ["created", "failed"]).execute()
+    except Exception as exc:
+        # Migration 016 enforces one paid ledger row per registration. Two
+        # concurrent captures can both pass the earlier SELECT, then one loses
+        # at this index. Record the losing *captured* charge for refund now,
+        # rather than leaving it marked merely as an unpaid order until a
+        # webhook happens to be redelivered.
+        if "uniq_payments_one_paid_per_registration" not in str(exc):
+            raise
+        current_siblings = _payments_for(admin_db, payment["registration_id"], strict=True)
+        paid = next((row for row in current_siblings
+                     if row.get("status") == "paid" and str(row.get("id")) != str(payment["id"])), None)
+        if not paid:
+            raise HTTPException(status_code=503, detail="Payment settlement changed; retrying safely.")
+        record_duplicate_capture(paid)
+
+    if not settled.data:
+        current = admin_db.table("payments").select("*").eq("id", payment["id"]).execute().data or []
+        if current and current[0].get("status") == "paid":
+            _confirm_registration(admin_db, current[0], actor=actor, via=via)
+            return current[0]
+        if current and current[0].get("status") == "refunded":
+            return current[0]
+        raise HTTPException(status_code=503, detail="Payment state changed while settling; retrying safely.")
+
+    payment = settled.data[0]
 
     _confirm_registration(admin_db, payment, actor=actor, via=via)
     return payment
@@ -710,7 +758,7 @@ def _record_failure(admin_db, payment: Dict[str, Any], description: str,
         admin_db.table("payments").update({
             "status": "failed",
             "error_description": (description or "")[:500],
-        }).eq("id", payment["id"]).execute()
+        }).eq("id", payment["id"]).in_("status", ["created", "failed"]).execute()
     except Exception as e:
         logger.warning(f"Could not record payment failure for {payment.get('id')}: {str(e)}")
 
@@ -953,6 +1001,99 @@ async def razorpay_webhook(request: Request):
 # ---------------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------------
+
+def _repair_refunded_registration(db, payment: Dict[str, Any], admin) -> None:
+    remaining = db.table("payments").select("id").eq(
+        "registration_id", payment["registration_id"]).eq("status", "paid").execute().data or []
+    if remaining:
+        return
+    registration = _load_registration(db, payment["registration_id"])
+    if registration.get("payment_status") != "paid":
+        return
+    tournament_rows = db.table("tournaments").select("fixtures_generated, status").eq(
+        "id", registration["tournament_id"]).execute().data or []
+    tournament = tournament_rows[0] if tournament_rows else {}
+    before_draw = not tournament.get("fixtures_generated") and tournament.get("status") in (
+        "draft", "registration_open", "registration_closed", "fixture_generation"
+    )
+    patch = {"payment_status": "pending"}
+    if before_draw and registration.get("status") == "approved":
+        patch["status"] = "pending"
+    changed = db.table("registrations").update(patch).eq(
+        "id", payment["registration_id"]).eq("payment_status", "paid").execute().data or []
+    if not changed:
+        raise HTTPException(status_code=503, detail="Refund recorded, but entry status needs retry.")
+    record_audit(db, actor=admin, action="registration.payment_refunded",
+                 entity_type="registration", entity_id=payment["registration_id"],
+                 previous_state=registration, new_state=changed[0])
+    if registration.get("status") == "approved" and not before_draw:
+        record_audit(db, actor=admin, action="registration.refund_after_draw",
+                     entity_type="registration", entity_id=payment["registration_id"],
+                     previous_state=registration, new_state=changed[0])
+
+
+@router.post("/{payment_id}/record-manual-refund")
+async def record_manual_refund(payment_id: str, body: ManualRefundRecord, admin=Depends(verify_admin)):
+    """Record a refund already handed to a payer outside Razorpay."""
+    db = get_admin_db()
+    rows = db.table("payments").select("*").eq("id", payment_id).execute().data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Payment not found.")
+    payment = rows[0]
+    require_tournament_access(db, payment["tournament_id"], admin, "payment.manual_refund")
+    if not str(payment.get("razorpay_order_id") or "").startswith("manual-"):
+        raise HTTPException(status_code=409, detail="Use Razorpay reconciliation for online refunds.")
+    if payment.get("status") not in ("paid", "refunded"):
+        raise HTTPException(status_code=409, detail="This payment is not recorded as collected.")
+    if payment.get("status") == "paid":
+        notes = dict(payment.get("notes") or {})
+        notes.update({"refund_reference": body.reference, "refund_reason": body.reason,
+                      "refunded_by": admin.get("id")})
+        changed = db.table("payments").update({"status": "refunded", "notes": notes}).eq(
+            "id", payment_id).eq("status", "paid").execute().data or []
+        if not changed:
+            raise HTTPException(status_code=503, detail="Payment changed during refund recording; retry.")
+        record_audit(db, actor=admin, action="payment.manual_refund_recorded",
+                     entity_type="payment", entity_id=payment_id,
+                     previous_state=payment, new_state=changed[0])
+        payment = changed[0]
+    _repair_refunded_registration(db, payment, admin)
+    return serialize_payment(payment)
+
+@router.post("/{payment_id}/reconcile-refund")
+async def reconcile_refund(payment_id: str, admin=Depends(verify_admin)):
+    """Verify a full dashboard refund against Razorpay and repair the ledger."""
+    db = get_admin_db()
+    rows = db.table("payments").select("*").eq("id", payment_id).execute().data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Payment not found.")
+    payment = rows[0]
+    require_tournament_access(db, payment["tournament_id"], admin, "payment.reconcile")
+    provider_id = payment.get("razorpay_payment_id")
+    if not provider_id:
+        raise HTTPException(status_code=409, detail="This is not a Razorpay payment.")
+    try:
+        remote = await razorpay_client.fetch_payment(provider_id)
+    except RazorpayError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    expected = int(payment.get("amount_paise") or 0)
+    if remote.get("id") != provider_id or remote.get("order_id") != payment.get("razorpay_order_id") or int(remote.get("amount") or 0) != expected:
+        raise HTTPException(status_code=409, detail="Provider payment does not match this ledger entry.")
+    if remote.get("status") != "refunded" or int(remote.get("amount_refunded") or 0) < expected:
+        raise HTTPException(status_code=409, detail="Razorpay does not show a completed full refund for this payment.")
+    if payment.get("status") not in ("paid", "refund_due", "refunded"):
+        raise HTTPException(status_code=409, detail="This payment has no captured charge to reconcile.")
+    if payment.get("status") != "refunded":
+        updated = db.table("payments").update({"status": "refunded"}).eq(
+            "id", payment_id).in_("status", ["paid", "refund_due"]).execute().data or []
+        if not updated:
+            raise HTTPException(status_code=503, detail="Payment changed during reconciliation; retry.")
+        record_audit(db, actor=admin, action="payment.refund_reconciled",
+                     entity_type="payment", entity_id=payment_id,
+                     previous_state=payment, new_state=updated[0])
+        payment = updated[0]
+    _repair_refunded_registration(db, payment, admin)
+    return serialize_payment(payment)
 
 @router.get("/registrations/{registration_id}")
 async def list_registration_payments(registration_id: str, profile=Depends(get_user_profile)):

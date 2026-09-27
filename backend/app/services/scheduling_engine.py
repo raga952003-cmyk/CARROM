@@ -43,10 +43,23 @@ def generate_conflict_free_schedule(
         round_idx = m.get("roundIndex", 0)
         return (stage_weight, round_idx)
 
-    sorted_matches = sorted(updated_matches, key=get_sort_key)
-    current_slot_offset = 0
+    remaining = sorted(updated_matches, key=get_sort_key)
+    parents_by_next: Dict[str, List[str]] = {}
+    for item in updated_matches:
+        if item.get("nextMatchId"):
+            parents_by_next.setdefault(str(item["nextMatchId"]), []).append(str(item["id"]))
+    scheduled_finish: Dict[str, int] = {}
+    sorted_matches: List[Dict[str, Any]] = []
 
-    for match in sorted_matches:
+    while remaining:
+        ready = next((item for item in remaining
+                      if all(parent in scheduled_finish
+                             for parent in parents_by_next.get(str(item["id"]), []))), None)
+        if ready is None:
+            raise ValueError("The knockout bracket contains a cycle or an unresolved feeder match.")
+        remaining.remove(ready)
+        match = ready
+        sorted_matches.append(match)
         # For a doubles match player1Id is a *team* id, so scheduling on it
         # alone would happily put the same person on two boards at once when
         # they are entered in both categories. participantIds carries the
@@ -56,8 +69,10 @@ def generate_conflict_free_schedule(
             people = [pid for pid in (match.get("player1Id"), match.get("player2Id"))
                       if pid and pid != "TBD"]
 
+        feeder_finish = [scheduled_finish[parent] + rest_time_minutes
+                         for parent in parents_by_next.get(str(match["id"]), [])]
         match_earliest = max(
-            [current_slot_offset] + [participant_next_available.get(pid, 0) for pid in people]
+            [0] + feeder_finish + [participant_next_available.get(pid, 0) for pid in people]
         )
 
         # Find a board that is free at or before match_earliest, or find the board that frees up earliest
@@ -87,5 +102,6 @@ def generate_conflict_free_schedule(
         board_next_available[chosen_board] = next_available_time_for_board
         for pid in people:
             participant_next_available[pid] = next_available_time_for_players
+        scheduled_finish[str(match["id"])] = finish_time
 
     return sorted_matches

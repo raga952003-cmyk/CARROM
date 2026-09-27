@@ -159,10 +159,9 @@ class ApiClient {
     window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail }));
   }
 
-  private getHeaders(): HeadersInit {
-    const headers: HeadersInit = {
-      'Content-Type': 'application/json',
-    };
+  private getHeaders(multipart = false): HeadersInit {
+    const headers: Record<string, string> = {};
+    if (!multipart) headers['Content-Type'] = 'application/json';
 
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
@@ -178,14 +177,15 @@ class ApiClient {
     isRetry: boolean = false
   ): Promise<T> {
     const url = `${this.baseURL}${endpoint}`;
+    const multipart = typeof FormData !== 'undefined' && data instanceof FormData;
 
     const options: RequestInit = {
       method,
-      headers: this.getHeaders(),
+      headers: this.getHeaders(multipart),
     };
 
     if (data && (method === 'POST' || method === 'PUT' || method === 'PATCH')) {
-      options.body = JSON.stringify(data);
+      options.body = multipart ? data : JSON.stringify(data);
     }
 
     try {
