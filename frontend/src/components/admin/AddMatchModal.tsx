@@ -87,12 +87,30 @@ export const AddMatchModal: React.FC<AddMatchModalProps> = ({ tournament, onClos
   const [customRound, setCustomRound] = useState('');
   const [p1, setP1] = useState('');
   const [p2, setP2] = useState('');
+  const [selectedGroup, setSelectedGroup] = useState('');
+  const [scheduledDate, setScheduledDate] = useState('');
+  const [scheduledTime, setScheduledTime] = useState('');
+  const [boardNumber, setBoardNumber] = useState(1);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   const round = ROUNDS[roundIndex];
   const one = entrants.find(e => e.id === p1);
   const two = entrants.find(e => e.id === p2);
+  const groupMatches = (tournament.matches || []).filter(m => m.stage === 'league'
+    && (!one || m.type === one.type)
+    && !!m.bracketPosition?.group);
+  const groups = Array.from(new Set(groupMatches.map(m =>
+    m.bracketPosition?.group || ''))).filter(Boolean).sort();
+  const p1Groups = new Set(groupMatches.filter(m => m.player1Id === p1 || m.player2Id === p1)
+    .map(m => m.bracketPosition?.group || ''));
+  const p2Groups = new Set(groupMatches.filter(m => m.player1Id === p2 || m.player2Id === p2)
+    .map(m => m.bracketPosition?.group || ''));
+  const assignedGroups = new Set([...p1Groups, ...p2Groups]);
+  const group = selectedGroup || (assignedGroups.size === 1 ? [...assignedGroups][0] : '');
+  const groupedLeague = roundIndex === 0 && (groups.length > 0
+    || ['group_stage', 'group_knockout'].includes(tournament.format)
+    || Number(tournament.rules.groupCount || 1) > 1);
 
   // The server refuses these too; catching them here saves a round trip and
   // explains the problem next to the control that caused it.
@@ -101,6 +119,14 @@ export const AddMatchModal: React.FC<AddMatchModalProps> = ({ tournament, onClos
     : p1 === p2 ? 'A player cannot be fixtured against themselves.'
     : one && two && one.type !== two.type
       ? 'A singles player cannot be fixtured against a doubles team.'
+      : groupedLeague && assignedGroups.size > 1
+        ? 'These entrants belong to different groups.'
+      : groupedLeague && !groups.length
+        ? 'Generate the group draw before adding a league match.'
+      : groupedLeague && (!group || !groups.includes(group) || (assignedGroups.size === 1 && !assignedGroups.has(group)))
+        ? 'Choose the existing group for this league match.'
+      : tournament.scheduledPublished && (!scheduledDate || !scheduledTime || !boardNumber)
+        ? 'Set the date, time and board for this published schedule.'
       : '';
 
   const save = async () => {
@@ -113,6 +139,8 @@ export const AddMatchModal: React.FC<AddMatchModalProps> = ({ tournament, onClos
         roundName: customRound.trim() || round.label,
         player1Id: p1,
         player2Id: p2,
+        ...(groupedLeague ? { group } : {}),
+        ...(scheduledDate && scheduledTime ? { scheduledDate, scheduledTime, boardNumber } : {}),
       });
       onAdded();
       onClose();
@@ -184,6 +212,39 @@ export const AddMatchModal: React.FC<AddMatchModalProps> = ({ tournament, onClos
                 <span className="hidden sm:block text-[11px] font-bold text-gray-400 pb-2 text-center">vs</span>
                 <EntrantPicker label="Player 2" value={p2} onChange={setP2} exclude={p1} entrants={entrants} />
               </div>
+
+              {groupedLeague && groups.length > 0 && (
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Group for standings</label>
+                  <select value={group} onChange={e => setSelectedGroup(e.target.value)}
+                    className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white">
+                    <option value="">Choose a group</option>
+                    {groups.map(label => <option key={label} value={label}>{label}</option>)}
+                  </select>
+                  <p className="text-[11px] text-gray-500 mt-1">Players already in a group must stay in that group.</p>
+                </div>
+              )}
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Date{tournament.scheduledPublished ? ' *' : ''}</label>
+                  <input type="date" value={scheduledDate} onChange={e => setScheduledDate(e.target.value)}
+                    min={tournament.tournamentStartDate} max={tournament.tournamentEndDate}
+                    className="w-full text-xs px-2 py-2 border border-gray-200 rounded-lg" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Time{tournament.scheduledPublished ? ' *' : ''}</label>
+                  <input type="time" value={scheduledTime} onChange={e => setScheduledTime(e.target.value)}
+                    className="w-full text-xs px-2 py-2 border border-gray-200 rounded-lg" />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-700 mb-1">Board{tournament.scheduledPublished ? ' *' : ''}</label>
+                  <input type="number" min={1} max={tournament.numberOfBoards} value={boardNumber}
+                    onChange={e => setBoardNumber(Number(e.target.value))}
+                    className="w-full text-xs px-2 py-2 border border-gray-200 rounded-lg" />
+                </div>
+              </div>
+              {tournament.scheduledPublished && <p className="text-[11px] text-amber-800">This match must fit the published schedule without a board or player conflict.</p>}
 
               {/* The fixture as it will read on the schedule. */}
               <div className="p-3 rounded-xl bg-gray-50 border border-gray-200 text-center">

@@ -2,7 +2,7 @@ import React from 'react';
 import { Calculator, Info } from 'lucide-react';
 
 export interface ScoringRules {
-  scoringMode: 'classic' | 'remaining_coins';
+  scoringMode: 'classic' | 'remaining_coins' | 'official_icf';
   /** Sets per match. 1 is a flat list of boards, as before. */
   numberOfSets: number;
   /** Boards inside one set. */
@@ -18,12 +18,12 @@ export interface ScoringRules {
 }
 
 export const defaultScoringRules: ScoringRules = {
-  scoringMode: 'remaining_coins',
+  scoringMode: 'official_icf',
   numberOfSets: 3,
   boardsPerSet: 8,
   coinValue: 1,
   setWinnerRule: 'target_points',
-  boardEntryMode: 'simple',
+  boardEntryMode: 'detailed',
   coinsPerSide: 9,
   queenPoints: 3,
   queenMustBeCovered: true,
@@ -46,7 +46,8 @@ interface ScoringRulesSettingsProps {
  */
 export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ value, onChange }) => {
   const set = (patch: Partial<ScoringRules>) => onChange({ ...value, ...patch });
-  const remaining = value.scoringMode === 'remaining_coins';
+  const official = value.scoringMode === 'official_icf';
+  const remaining = value.scoringMode === 'remaining_coins' || official;
 
   // A worked board: the winner pocketed everything, the loser has 4 left.
   const example = remaining
@@ -71,6 +72,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <select
             value={value.numberOfSets}
             onChange={e => set({ numberOfSets: parseInt(e.target.value) || 1 })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
             <option value={1}>1 set (a single run of boards)</option>
@@ -84,6 +86,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <select
             value={value.boardsPerSet}
             onChange={e => set({ boardsPerSet: parseInt(e.target.value) || 8 })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
             {[4, 6, 8].map(n => <option key={n} value={n}>{n} boards</option>)}
@@ -94,11 +97,17 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <label className="block text-[11px] font-bold text-gray-700 mb-1">Scoring model</label>
           <select
             value={value.scoringMode}
-            onChange={e => set({ scoringMode: e.target.value as ScoringRules['scoringMode'] })}
+            onChange={e => {
+              const scoringMode = e.target.value as ScoringRules['scoringMode'];
+              set(scoringMode === 'official_icf'
+                ? { ...defaultScoringRules }
+                : { scoringMode });
+            }}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
+            <option value="official_icf">Federation scoring (25/8 or 21/6)</option>
             <option value="remaining_coins">
-              Winner scores the opponent&apos;s remaining coins (tournament carrom)
+              Custom winner-only scoring using remaining coins
             </option>
             <option value="classic">Each player scores the coins they pocketed</option>
           </select>
@@ -111,14 +120,14 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <select
             value={value.boardEntryMode}
             onChange={e => set({ boardEntryMode: e.target.value as ScoringRules['boardEntryMode'] })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
             <option value="simple">Who finished, and coins left on the board</option>
             <option value="detailed">Also the queen and penalties</option>
           </select>
           <p className="text-[10px] text-gray-500 mt-1">
-            Simple is two taps a board. Choose the longer sheet only if this
-            tournament actually scores a queen bonus or penalties.
+            Federation scoring requires the detailed sheet so the queen and penalties are recorded.
           </p>
         </div>
 
@@ -129,6 +138,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <select
             value={value.setWinnerRule}
             onChange={e => set({ setWinnerRule: e.target.value as ScoringRules['setWinnerRule'] })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
             <option value="target_points">First to the target points, or leader after the board limit</option>
@@ -147,6 +157,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             min={1}
             value={value.coinValue}
             onChange={e => set({ coinValue: Math.max(1, parseInt(e.target.value) || 1) })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           />
         </div>
@@ -158,6 +169,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             min={1}
             value={value.coinsPerSide}
             onChange={e => set({ coinsPerSide: Math.max(1, parseInt(e.target.value) || 9) })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           />
         </div>
@@ -169,6 +181,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             min={0}
             value={value.queenPoints}
             onChange={e => set({ queenPoints: Math.max(0, parseInt(e.target.value) || 0) })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           />
         </div>
@@ -178,6 +191,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <select
             value={value.queenMustBeCovered ? 'must' : 'counts'}
             onChange={e => set({ queenMustBeCovered: e.target.value === 'must' })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
             <option value="must">Scores nothing, returns to the board</option>
@@ -192,6 +206,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <select
             value={value.queenAwardTo}
             onChange={e => set({ queenAwardTo: e.target.value as ScoringRules['queenAwardTo'] })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
             <option value="coverer">The bonus goes to whoever covered it</option>
@@ -206,6 +221,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
           <select
             value={value.tieBreak}
             onChange={e => set({ tieBreak: e.target.value as ScoringRules['tieBreak'] })}
+            disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
             <option value="additional_board">Play an additional board</option>
@@ -231,6 +247,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
                 A board where the winner clears their coins, the loser has <strong>4</strong> left and the
                 queen is covered scores <strong>{example.total}</strong> to the winner
                 ({example.base} coins + {value.queenPoints} queen) and <strong>0</strong> to the loser.
+                {official && ' In the 25-point game, the queen adds points only while the winner entered the board on 21 or fewer points; the 21-point variant credits it throughout. The board is capped at 12 points.'}
                 {value.setWinnerRule === 'target_points' && ' The game stops at the target score or board limit.'}
               </>
             ) : (

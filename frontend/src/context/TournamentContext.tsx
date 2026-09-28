@@ -134,6 +134,7 @@ interface TournamentContextType {
     roundName: string;
     player1Id: string;
     player2Id: string;
+    group?: string;
     boardNumber?: number;
     scheduledDate?: string;
     scheduledTime?: string;

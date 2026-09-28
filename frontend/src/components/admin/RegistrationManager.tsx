@@ -364,6 +364,17 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
       setRowErrors(prev => ({ ...prev, [reg.id]: 'Enter a payment reference between 3 and 120 characters.' }));
       return;
     }
+    if (method !== 'cash') {
+      const normalized = reference.replace(/[^A-Za-z0-9]/g, '');
+      if (normalized.length < 6 || normalized.length > 80) {
+        setRowErrors(prev => ({ ...prev, [reg.id]: 'Enter a bank or UPI transaction reference with 6 to 80 letters or digits.' }));
+        return;
+      }
+    }
+    const amount = registrationFee(reg);
+    if (!window.confirm(
+      `Confirm ₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} was received from ${entryName(reg)} by ${method.replace('_', ' ')} (reference: ${reference.trim()}). This will approve the entry immediately.`,
+    )) return;
     runRow(reg, 'approve', async () => {
       await tournamentService.recordManualPayment(reg.id, method as 'cash' | 'upi' | 'bank_transfer', reference.trim());
       await refreshTournaments();

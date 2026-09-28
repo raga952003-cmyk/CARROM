@@ -1,5 +1,5 @@
-"""One schedule check shared by the public preview and both publish routes."""
-from datetime import datetime, timedelta
+"""One schedule check shared by schedule previews, fixture edits and publication."""
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 
@@ -20,12 +20,18 @@ def detect_schedule_conflicts(
     team_members: Optional[Dict[str, List[str]]] = None,
     duration_minutes: int = 30,
     rest_minutes: int = 10,
+    *,
+    tournament_start_date: Optional[str] = None,
+    tournament_end_date: Optional[str] = None,
+    number_of_boards: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     team_members = team_members or {}
     conflicts: List[Dict[str, Any]] = []
     active = [m for m in matches if m.get("status") != "cancelled"]
     by_id = {str(m["id"]): m for m in active if m.get("id")}
     scheduled = []
+    first_day = date.fromisoformat(str(tournament_start_date)[:10]) if tournament_start_date else None
+    last_day = date.fromisoformat(str(tournament_end_date)[:10]) if tournament_end_date else None
 
     for match in active:
         start = _start(match)
@@ -36,9 +42,30 @@ def detect_schedule_conflicts(
                 "detail": f"Match {match.get('match_number')} needs a valid date, time and board.",
             })
             continue
+        if number_of_boards is not None and not 1 <= int(board) <= number_of_boards:
+            conflicts.append({
+                "type": "board_out_of_range", "matchNumbers": [match.get("match_number")],
+                "detail": f"Match {match.get('match_number')} uses board {board}; this venue has boards 1 to {number_of_boards}.",
+            })
+        if ((first_day and start.date() < first_day)
+                or (last_day and start + timedelta(minutes=duration_minutes)
+                    > datetime.combine(last_day + timedelta(days=1), datetime.min.time()))):
+            conflicts.append({
+                "type": "outside_tournament_dates", "matchNumbers": [match.get("match_number")],
+                "detail": f"Match {match.get('match_number')} does not fit within the tournament dates.",
+            })
         sides = [match.get("player1_id"), match.get("player2_id")]
-        people = {str(person) for side in sides if side
-                  for person in team_members.get(side, [side]) if person}
+        people = set()
+        for side in sides:
+            if not side:
+                continue
+            if match.get("type") == "doubles" and not team_members.get(side):
+                conflicts.append({
+                    "type": "unknown_team_members", "matchNumbers": [match.get("match_number")],
+                    "detail": f"Match {match.get('match_number')} has a doubles team with no player membership on record.",
+                })
+                continue
+            people.update(str(person) for person in team_members.get(side, [side]) if person)
         scheduled.append((match, start, start + timedelta(minutes=duration_minutes), people))
 
     for index, (left, left_start, left_end, left_people) in enumerate(scheduled):

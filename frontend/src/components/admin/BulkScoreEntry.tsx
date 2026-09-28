@@ -39,11 +39,13 @@ export const BulkScoreEntry: React.FC<BulkScoreEntryProps> = ({ tournament, isOp
   const pending = useMemo(() => {
     if (!isOpen) return [];
     return (tournament.matches || [])
-      .filter(m => !m.resultConfirmed && m.player1Id && m.player2Id)
+      .filter(m => tournament.rules.scoringMode === 'classic'
+        && m.maxBoards === 1 && (m.numberOfSets ?? 1) === 1
+        && !m.resultConfirmed && m.player1Id && m.player2Id)
       .filter(m => category === 'all' || m.type === category)
       .sort((a, b) => a.matchNumber - b.matchNumber)
       .slice(0, 60);
-  }, [tournament.matches, category, isOpen]);
+  }, [tournament.matches, tournament.rules.scoringMode, category, isOpen]);
 
   if (!isOpen) return null;
 
@@ -60,9 +62,10 @@ export const BulkScoreEntry: React.FC<BulkScoreEntryProps> = ({ tournament, isOp
 
   // Indexed access rather than Object.values: the latter loses Row and
   // widens every element to unknown under this tsconfig.
+  const eligibleIds = new Set(pending.map(match => match.id));
   const filled: Row[] = Object.keys(rows)
     .map(key => rows[key])
-    .filter(r => r.p1.trim() !== '' && r.p2.trim() !== '');
+    .filter(r => eligibleIds.has(r.match.id) && r.p1.trim() !== '' && r.p2.trim() !== '');
 
   const submit = async () => {
     setBusy(true);

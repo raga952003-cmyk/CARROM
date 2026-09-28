@@ -116,8 +116,8 @@ def create(h, admin, fmt="knockout", entrants=4, draw=False):
     """
     A draft tournament with `entrants` approved singles players, through the
     API. Entries made by an admin are approved on the spot, so no approval
-    step is needed. The draw is generated when asked for -- while the
-    tournament is still a draft, which is a path the organiser really takes.
+    step is needed. A requested draw follows open and close registration,
+    producing the final entry list used by the bracket.
     """
     r = h.post("/api/tournaments", tournament_payload(fmt), user_id=admin)
     if not check("a tournament can be created for the lifecycle", r.status_code == 200,
@@ -142,6 +142,12 @@ def create(h, admin, fmt="knockout", entrants=4, draw=False):
             return None, []
 
     if draw:
+        opened = verb(h, tid, "open-registration", {}, admin)
+        closed = verb(h, tid, "close-registration", {}, admin)
+        if not check("the pool is closed before drawing",
+                     opened.status_code == 200 and closed.status_code == 200,
+                     "open=%s close=%s" % (detail(opened), detail(closed))):
+            return None, []
         rf = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
         if not check("the draw can be generated", rf.status_code == 200,
                      "%s %s" % (rf.status_code, detail(rf))):
@@ -178,13 +184,10 @@ def play_everything(h, admin, tid):
 
 
 def run_to_in_progress(h, admin, tid):
-    """draft (with a draw) -> registration_open -> registration_closed -> in_progress."""
-    for name in ("open-registration", "close-registration", "start"):
-        r = verb(h, tid, name, {}, admin)
-        if not check("the tournament can be walked to in_progress", r.status_code == 200,
-                     "%s -> %s %s" % (name, r.status_code, detail(r))):
-            return False
-    return True
+    """Start after the closed-entry draw has been published."""
+    r = verb(h, tid, "start", {}, admin)
+    return check("the tournament can be walked to in_progress", r.status_code == 200,
+                 "start -> %s %s" % (r.status_code, detail(r)))
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +260,21 @@ def test_full_lifecycle():
     if not tid:
         return
 
+    draft_draw = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    check("a draft tournament cannot generate its draw",
+          draft_draw.status_code == 409 and "Close registration" in detail(draft_draw),
+          "%s %s" % (draft_draw.status_code, detail(draft_draw)))
+    draft_match = h.post("/api/tournaments/%s/matches" % tid, {
+        "stage": "knockout", "player1Id": players[0], "player2Id": players[1],
+    }, user_id=admin)
+    check("an approved pair cannot be fixtured while the tournament is draft",
+          draft_match.status_code == 409 and "Close registration" in detail(draft_match),
+          "%s %s" % (draft_match.status_code, detail(draft_match)))
+    check("draft fixture refusals write no matches, boards, or publication flag",
+          not [m for m in h.db.rows("matches") if m.get("tournament_id") == tid]
+          and not h.db.rows("boards")
+          and not row_of(h, tid).get("fixtures_generated"), row_of(h, tid))
+
     r = verb(h, tid, "open-registration", {}, admin)
     check("a draft can be opened for registration",
           r.status_code == 200 and body(r).get("status") == "registration_open",
@@ -272,6 +290,33 @@ def test_full_lifecycle():
     r = verb(h, tid, "start", {}, admin)
     check("a tournament cannot be started while registration is open",
           r.status_code == 409, "%s %s" % (r.status_code, detail(r)))
+
+    # An approved pool alone is not a final pool. Neither draw route may write
+    # matches, boards, or a published flag while the desk remains open.
+    early_draw = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
+    check("an open tournament cannot generate its draw",
+          early_draw.status_code == 409 and "Close registration" in detail(early_draw),
+          "%s %s" % (early_draw.status_code, detail(early_draw)))
+    check("the refused draw writes no match, board, or fixture flag",
+          not [m for m in h.db.rows("matches") if m.get("tournament_id") == tid]
+          and not h.db.rows("boards")
+          and not row_of(h, tid).get("fixtures_generated"), row_of(h, tid))
+    early_match = h.post("/api/tournaments/%s/matches" % tid, {
+        "stage": "knockout", "player1Id": players[0], "player2Id": players[1],
+    }, user_id=admin)
+    check("an approved pair cannot be fixtured before entry closes",
+          early_match.status_code == 409 and "Close registration" in detail(early_match),
+          "%s %s" % (early_match.status_code, detail(early_match)))
+    check("the refused manual fixture writes no match or board",
+          not [m for m in h.db.rows("matches") if m.get("tournament_id") == tid]
+          and not h.db.rows("boards"))
+    outsider = h.make_user("Unapproved entrant")
+    unapproved = h.post("/api/tournaments/%s/matches" % tid, {
+        "stage": "knockout", "player1Id": players[0], "player2Id": outsider,
+    }, user_id=admin)
+    check("an unapproved manual entrant still receives a validation error",
+          unapproved.status_code == 422 and "approved entrant" in detail(unapproved),
+          "%s %s" % (unapproved.status_code, detail(unapproved)))
 
     r = verb(h, tid, "close-registration", {}, admin)
     check("registration can be closed",
@@ -372,7 +417,7 @@ def test_full_lifecycle():
 
 
 # ---------------------------------------------------------------------------
-# A draw made while still a draft: registration_closed -> in_progress directly
+# A draw made after closing registration: fixture_published -> in_progress
 # ---------------------------------------------------------------------------
 
 def test_start_from_closed_registration_with_a_draw():
@@ -381,10 +426,10 @@ def test_start_from_closed_registration_with_a_draw():
     tid, _players = create(h, admin, "knockout", entrants=4, draw=True)
     if not tid:
         return
-    check("a draw made on a draft leaves it a draft", status_of(h, tid) == "draft",
+    check("a closed-entry draw is published", status_of(h, tid) == "fixture_published",
           status_of(h, tid))
     if run_to_in_progress(h, admin, tid):
-        check("a closed registration with a draw can go straight to in_progress",
+        check("a published draw can proceed to in_progress",
               status_of(h, tid) == "in_progress", status_of(h, tid))
 
 
@@ -465,7 +510,7 @@ def test_walkovers_and_cancelled_matches_are_settled():
 def test_cancel():
     h = Harness()
     admin = h.make_user("Organiser", "admin")
-    tid, players = create(h, admin, "knockout", entrants=4, draw=True)
+    tid, players = create(h, admin, "knockout", entrants=4, draw=False)
     if not tid:
         return
 
@@ -618,7 +663,7 @@ def test_illegal_transitions():
 
 
 # ---------------------------------------------------------------------------
-# PUT /tournaments/{id} still accepts a status, through set_tournament_status
+# PUT /tournaments/{id} cannot bypass lifecycle verbs
 # ---------------------------------------------------------------------------
 
 def test_put_status_compatibility():
@@ -627,12 +672,12 @@ def test_put_status_compatibility():
     tid = h.seed_tournament(owner_id=admin, status="draft")
 
     r = h.put("/api/tournaments/%s" % tid, {"status": "registration_open"}, user_id=admin)
-    check("PUT with a legal status still moves the tournament",
-          r.status_code == 200 and status_of(h, tid) == "registration_open",
+    check("PUT cannot open registration without the lifecycle verb",
+          r.status_code == 409 and status_of(h, tid) == "draft",
           "%s %s now=%s" % (r.status_code, detail(r), status_of(h, tid)))
     audits = [a for a in h.db.rows("audit_logs") if a.get("action") == "tournament.update"]
-    check("a PUT status change is audited as a changed field",
-          audits and "status" in ((audits[-1].get("request_context") or {}).get("changed_fields") or []),
+    check("refused PUT writes no tournament update audit",
+          not audits,
           audits[-1].get("request_context") if audits else None)
 
     r = h.put("/api/tournaments/%s" % tid, {"status": "completed"}, user_id=admin)
@@ -640,9 +685,14 @@ def test_put_status_compatibility():
           "%s %s" % (r.status_code, detail(r)))
 
     r = h.put("/api/tournaments/%s" % tid,
-              {"name": "Renamed", "status": "registration_open"}, user_id=admin)
-    check("PUT that re-asserts the current status is a plain update",
-          r.status_code == 200 and row_of(h, tid).get("name") == "Renamed",
+              {"name": "Renamed", "status": "draft"}, user_id=admin)
+    check("PUT cannot slip a name edit through beside a status change",
+          r.status_code == 409 and row_of(h, tid).get("name") != "Renamed",
+          "%s %s" % (r.status_code, detail(r)))
+
+    r = verb(h, tid, "open-registration", {}, admin)
+    check("the dedicated action still opens registration",
+          r.status_code == 200 and status_of(h, tid) == "registration_open",
           "%s %s" % (r.status_code, detail(r)))
 
     # The original schema's CHECK: in_progress is refused, ongoing is written.
@@ -652,12 +702,11 @@ def test_put_status_compatibility():
     without_migration_012(h2, legacy_check=True)
     try:
         r = h2.put("/api/tournaments/%s" % tid2, {"status": "in_progress"}, user_id=admin2)
-        check("on an un-migrated database PUT writes the legacy synonym instead of failing",
-              r.status_code == 200 and status_of(h2, tid2) == "ongoing",
+        check("on an un-migrated database PUT cannot bypass the start action",
+              r.status_code == 409 and status_of(h2, tid2) == "fixture_published",
               "%s %s now=%s" % (r.status_code, detail(r), status_of(h2, tid2)))
-        check("the response reports the status actually stored",
-              body(r).get("status") == "ongoing" if r.status_code == 200 else False,
-              body(r).get("status") if isinstance(body(r), dict) else body(r))
+        check("rejected PUT does not report a stored status",
+              r.status_code == 409, detail(r))
     finally:
         restore_probe()
 
@@ -845,7 +894,14 @@ def test_a_live_tournament_is_still_fully_editable():
     r = h.post("/api/tournaments/%s/matches" % tid,
                {"stage": "league", "roundName": "Extra",
                 "player1Id": players[0], "player2Id": players[1]}, user_id=admin)
-    check("a running tournament can still take a late fixture", r.status_code == 200,
+    check("a published schedule requires timing for a late fixture", r.status_code == 422,
+          "%s %s" % (r.status_code, detail(r)))
+    r = h.post("/api/tournaments/%s/matches" % tid,
+               {"stage": "league", "roundName": "Extra",
+                "player1Id": players[0], "player2Id": players[1],
+                "scheduledDate": (date.today() + timedelta(days=21)).isoformat(),
+                "scheduledTime": "09:00", "boardNumber": 1}, user_id=admin)
+    check("a running tournament can still take a scheduled late fixture", r.status_code == 200,
           "%s %s" % (r.status_code, detail(r)))
 
     ms = [m for m in h.db.rows("matches")
@@ -1043,12 +1099,16 @@ def test_put_cannot_write_a_terminal_state_behind_its_verb():
     check("the tournament is not stranded: /complete still explains why",
           r.status_code == 409 and "still need a result" in detail(r), detail(r))
 
-    # The reversible states stay writable, which older builds rely on.
+    # The dedicated verb is the supported route even for a reversible move.
     h2 = Harness()
     a2 = h2.make_user("Owner2", "admin")
     t2 = h2.seed_tournament(owner_id=a2, status="draft")
     r = h2.put("/api/tournaments/%s" % t2, {"status": "registration_open"}, user_id=a2)
-    check("PUT still moves a tournament between reversible states",
+    check("PUT cannot bypass the open-registration verb",
+          r.status_code == 409 and canonical(row_of(h2, t2).get("status")) == "draft",
+          "%s now=%s" % (r.status_code, row_of(h2, t2).get("status")))
+    r = h2.post("/api/tournaments/%s/open-registration" % t2, {}, user_id=a2)
+    check("open-registration verb still moves the tournament",
           r.status_code == 200 and canonical(row_of(h2, t2).get("status")) == "registration_open",
           "%s now=%s" % (r.status_code, row_of(h2, t2).get("status")))
 

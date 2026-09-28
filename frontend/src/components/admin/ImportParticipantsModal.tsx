@@ -6,12 +6,9 @@ import {
   Check, 
   AlertCircle, 
   FileText, 
-  Trash2,
-  Calendar,
-  Grid,
   Users
 } from 'lucide-react';
-import { Tournament, Player } from '../../types/tournament';
+import { Tournament } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { tournamentService } from '../../services/tournamentService';
 import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
@@ -48,26 +45,13 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
   canAddParticipants,
   blockedReason,
 }) => {
-  const { 
-    createPlayerAccount, 
-    registerForTournament, 
-    generateFixturesForTournament, 
-    generateScheduleForTournament,
-    publishScheduleForTournament,
-    allPlayers,
-    refreshData 
-  } = useTournament();
+  const { refreshData } = useTournament();
 
   const [rawText, setRawText] = useState('');
   const [fileObj, setFileObj] = useState<File | null>(null);
   const [fileName, setFileName] = useState('');
   const [parsedPlayers, setParsedPlayers] = useState<ParsedPlayer[]>([]);
   const [loading, setLoading] = useState(false);
-  // Off by default, and deliberately so: the server refuses to redraw over
-  // recorded results, but even where it would succeed, adding a late entrant
-  // should not silently rebuild the draw and re-announce the schedule to
-  // everybody. The organiser asks for it.
-  const [autoSchedule, setAutoSchedule] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [step, setStep] = useState<'input' | 'preview'>('input');
@@ -196,7 +180,7 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
     }
   };
 
-  const handleImportAndSchedule = async () => {
+  const handleImport = async () => {
     if (!canAddParticipants || isRegistrationDeadlinePassed(tournament.registrationEndDate)) {
       setErrorMsg(importBlockedReason);
       return;
@@ -211,12 +195,12 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
     setErrorMsg('');
 
     try {
-      // Use backend bulk import confirmation transaction (accounts creation + registrations + fixtures + scheduling + publish)
+      // Import entries while registration is open. Draw from the final entry
+      // list only after registration closes and all entries are reviewed.
       const response: any = await tournamentService.confirmImport(
-        tournament.id, selectedPlayers, autoSchedule && !hasEntryFee);
+        tournament.id, selectedPlayers, false);
       setSuccessMsg(response.message || 'Successfully registered the players.');
-      // The import created players, teams, entries and possibly a whole draw,
-      // none of which the screen behind this modal knows about yet.
+      // Refresh the imported players, teams and entries behind the modal.
       await refreshData();
       // A partial import must not look like a clean one.
       if (response.skipped && response.skipped.length > 0) {
@@ -237,7 +221,7 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
       }, 3000);
 
     } catch (err: any) {
-      setErrorMsg(err.message || 'Import or scheduling failed.');
+      setErrorMsg(err.message || 'Import failed.');
     } finally {
       setLoading(false);
     }
@@ -277,10 +261,10 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
           </span>
           <h3 className="font-serif font-bold text-lg text-gray-900 mt-1 flex items-center gap-1.5">
             <Sparkles className="w-5 h-5 text-[#D4A72C]" />
-            <span>AI Player Import & Auto-Scheduler</span>
+            <span>Player Import</span>
           </h3>
           <p className="text-xs text-gray-500">
-            Upload CSV/Spreadsheets or copy-paste a player list to register competitors.
+            Upload a CSV or paste a player list to register competitors. Close registration after reviewing entries, then generate fixtures from Fixtures & Schedule.
           </p>
           {hasEntryFee && (
             <p className="mt-2 rounded-lg border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800">
@@ -314,7 +298,7 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
             <div className="flex flex-col items-center justify-center py-16 space-y-3">
               <div className="w-10 h-10 border-4 border-[#0B5D3B] border-t-transparent rounded-full animate-spin" />
               <p className="text-xs font-bold text-gray-700">
-                {step === 'input' ? 'AI Analyzing & Extracting Player Details...' : 'Registering entries & generating schedules...'}
+                {step === 'input' ? 'Analyzing player details...' : 'Registering entries...'}
               </p>
               <p className="text-[10px] text-gray-400">Please do not close this modal</p>
             </div>
@@ -476,23 +460,13 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
             </button>
           ) : (
             <div className="flex items-center gap-3">
-              <label className={`flex items-center gap-1.5 text-xs font-semibold ${hasEntryFee ? 'text-gray-400' : 'text-gray-700 cursor-pointer'}`}>
-                <input
-                  type="checkbox"
-                  checked={autoSchedule && !hasEntryFee}
-                  onChange={e => setAutoSchedule(e.target.checked)}
-                  disabled={loading || hasEntryFee}
-                  className="accent-[#0B5D3B]"
-                />
-                <span>Draw and publish the schedule too</span>
-              </label>
               <button
-                onClick={handleImportAndSchedule}
+                onClick={handleImport}
                 disabled={loading || !canImport}
                 className="px-5 py-2.5 bg-[#D4A72C] hover:bg-[#c29623] text-[#0B5D3B] text-xs font-black rounded-xl shadow-md flex items-center gap-1.5 disabled:opacity-50"
               >
-                <Calendar className="w-4 h-4 text-[#0B5D3B]" />
-                <span>{autoSchedule && !hasEntryFee ? 'Confirm Import & Auto-Schedule' : 'Confirm Import'}</span>
+                <Users className="w-4 h-4 text-[#0B5D3B]" />
+                <span>Confirm Import</span>
               </button>
             </div>
           )}

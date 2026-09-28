@@ -5,10 +5,9 @@ from app.services.access_control import require_tournament_access
 from app.utils.serializers import serialize_registration
 from app.services.notification_service import fan_out_notification
 from app.services.audit_service import record_audit
+from app.config import settings
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
-from uuid import uuid4
-from datetime import datetime, timezone
 import re
 
 router = APIRouter(prefix="/registrations", tags=["registrations"])
@@ -85,6 +84,17 @@ def _require_settleable_entry(db, registration: Dict[str, Any]) -> None:
         raise HTTPException(status_code=409, detail="This tournament no longer accepts entry payments.")
 
 
+def _require_no_pending_payment_proof(db, registration_id: str) -> None:
+    """A claimed GPay transfer must be reviewed before desk settlement or waiver."""
+    proof = db.table("payment_proofs").select("id").eq(
+        "registration_id", registration_id).eq("status", "pending").limit(1).execute().data or []
+    if proof:
+        raise HTTPException(
+            status_code=409,
+            detail="A GPay proof is awaiting review. Verify or reject it before recording another payment or waiving the fee.",
+        )
+
+
 @router.post("/{id}/approve")
 async def approve_registration(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
@@ -117,60 +127,35 @@ async def approve_registration(id: str, admin = Depends(verify_admin)):
 async def record_manual_payment(id: str, body: ManualPayment, admin=Depends(verify_admin)):
     db = get_admin_db()
     _authorise_registration(db, id, admin)
-    rows = db.table("registrations").select("*").eq("id", id).execute().data
-    registration = rows[0]
-    _require_settleable_entry(db, registration)
-    if registration.get("payment_status") != "pending":
-        raise HTTPException(status_code=409, detail="This entry is already settled.")
-    fee = registration.get("fee_paise")
-    if fee is None:
-        tournament = db.table("tournaments").select("entry_fee").eq("id", registration["tournament_id"]).execute().data
-        fee = round(float(tournament[0].get("entry_fee") or 0) * 100) if tournament else 0
-    fee = int(fee)
-    if fee <= 0:
-        raise HTTPException(status_code=409, detail="This entry has no fee to collect.")
     reference = body.reference.strip()
     if body.method in ("upi", "bank_transfer"):
         reference = re.sub(r"[^A-Za-z0-9]", "", reference).upper()
         if not 6 <= len(reference) <= 80:
             raise HTTPException(status_code=422, detail="Enter a 6 to 80 character bank or UPI transaction reference.")
-        # A proof remains reserved after rejection: reusing the same transaction
-        # on a different entry must not become a second payment.
-        claimed = db.table("payment_proofs").select("id").eq(
-            "transaction_reference", reference).limit(1).execute().data or []
-        if claimed:
-            raise HTTPException(status_code=409, detail="This transaction reference was already submitted as payment proof.")
-    existing = db.table("payments").select("id, razorpay_order_id").eq("registration_id", id).eq("status", "paid").execute().data
-    if existing:
-        # A previous attempt can have committed the ledger row before its
-        # registration update failed. Repair that state without a new charge.
-        repaired = db.table("registrations").update({
-            "payment_status": "paid", "status": "approved",
-        }).eq(
-            "id", id).eq("payment_status", "pending").execute().data
-        if not repaired:
-            raise HTTPException(status_code=409, detail="A payment is already recorded for this entry. Reload it.")
-        record_audit(db, actor=admin, action="payment.registration_reconciled",
-                     entity_type="registration", entity_id=id, previous_state=registration,
-                     new_state=repaired[0])
-        return serialize_registration(repaired[0], include_contact=True)
-    payment = db.table("payments").insert({
-        "registration_id": id, "tournament_id": registration["tournament_id"],
-        "razorpay_order_id": f"manual-{uuid4()}", "amount_paise": fee,
-        "status": "paid", "method": body.method, "paid_at": datetime.now(timezone.utc).isoformat(),
-        "notes": {"reference": reference, "recorded_by": admin.get("id")},
-    }).execute().data[0]
-    updated = db.table("registrations").update({
-        "payment_status": "paid", "status": "approved",
-    }).eq("id", id).eq("payment_status", "pending").execute().data
-    if not updated:
-        raise HTTPException(status_code=503, detail="Payment was recorded, but the entry needs reconciliation before approval.")
-    record_audit(db, actor=admin, action="payment.manual_recorded", entity_type="payment",
-                 entity_id=payment["id"], new_state=payment)
-    record_audit(db, actor=admin, action="registration.auto_approved_after_payment",
-                 entity_type="registration", entity_id=id,
-                 previous_state=registration, new_state=updated[0])
-    return serialize_registration(updated[0], include_contact=True)
+    # The RPC locks the entry and writes payment, approval and audit together.
+    # It also checks existing payments, proof claims and references inside that
+    # same transaction, including if two organisers submit concurrently.
+    try:
+        result = db.rpc("record_manual_entry_payment", {
+            "p_registration_id": id,
+            "p_actor_id": admin["id"],
+            "p_method": body.method,
+            "p_reference": reference,
+            "p_allow_any_admin": not settings.ENFORCE_TOURNAMENT_OWNERSHIP,
+        }).execute().data
+    except Exception as exc:
+        message = str(exc)
+        code = str(getattr(exc, "code", "") or "")
+        if code == "PGRST202" or "Could not find the function" in message:
+            raise HTTPException(status_code=503, detail="Atomic desk payment is not installed. Apply migration 023 before collecting entry fees.") from exc
+        if code in ("P0001", "23505") or "duplicate" in message.lower():
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise HTTPException(status_code=503, detail="Could not record payment safely. Reload the entry and retry.") from exc
+    if isinstance(result, list):
+        result = result[0] if result else None
+    if not isinstance(result, dict) or not result.get("registration"):
+        raise HTTPException(status_code=503, detail="Payment result was incomplete. Reload the entry before retrying.")
+    return serialize_registration(result["registration"], include_contact=True)
 
 
 @router.post("/{id}/waive-fee")
@@ -181,6 +166,7 @@ async def waive_fee(id: str, body: FeeWaiver, admin=Depends(verify_admin)):
     _require_settleable_entry(db, before)
     if before.get("payment_status") != "pending":
         raise HTTPException(status_code=409, detail="This entry is already settled.")
+    _require_no_pending_payment_proof(db, id)
     paid = db.table("payments").select("id").eq("registration_id", id).eq("status", "paid").execute().data
     if paid:
         raise HTTPException(status_code=409, detail="A payment is already recorded for this entry.")

@@ -2,11 +2,11 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 
 def format_time_slot(base_date_str: str, minutes_from_start: int):
+    # The display helper stays forgiving for callers showing a preview;
+    # generate_conflict_free_schedule validates the date before writing one.
     try:
-        # Try standard YYYY-MM-DD
-        base_date = datetime.strptime(base_date_str, "%Y-%m-%d")
-    except Exception:
-        # Fallback
+        base_date = datetime.strptime(str(base_date_str)[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
         base_date = datetime.now()
     
     # Start at 09:00 AM
@@ -26,10 +26,13 @@ def generate_conflict_free_schedule(
     match_duration_minutes: int = 30,
     rest_time_minutes: int = 10
 ) -> List[Dict[str, Any]]:
+    if number_of_boards < 1 or match_duration_minutes < 1 or rest_time_minutes < 0:
+        raise ValueError("Scheduling requires at least one board, a positive match duration and non-negative rest.")
+    datetime.strptime(str(start_date)[:10], "%Y-%m-%d")
     if not matches:
         return []
 
-    board_count = max(1, number_of_boards)
+    board_count = number_of_boards
     # Track participant availability: participant_id -> next available minute timestamp
     participant_next_available: Dict[str, int] = {}
     # Track board availability: board_index (1..N) -> next available minute timestamp

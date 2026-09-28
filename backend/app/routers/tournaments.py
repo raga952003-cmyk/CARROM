@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from app.database import get_db, get_admin_db
 from app.models.tournament import (
-    TournamentCreateSchema, TournamentUpdateSchema, RegistrationCreateSchema, ManualMatchSchema,
+    TournamentCreateSchema, TournamentUpdateSchema, TournamentRulesSchema,
+    RegistrationCreateSchema, ManualMatchSchema,
     TournamentCancelSchema,
 )
 from app.utils.security import get_user_profile, verify_admin, get_optional_profile
@@ -20,6 +21,7 @@ from app.services.fixture_engine import (
 )
 from app.services.scheduling_engine import generate_conflict_free_schedule
 from app.services.schedule_validation import detect_schedule_conflicts
+from app.services.qualification import knockout_qualifiers_assigned
 from app.services.notification_service import fan_out_notification
 from app.services.audit_service import record_audit
 from app.services.access_control import (
@@ -33,6 +35,7 @@ from app.services.state_machine import (
     canonical_tournament_status,
     assert_tournament_accepts_registrations,
     assert_participants_can_be_added,
+    assert_entry_list_not_drawn,
     registration_calendar_today,
     assert_tournament_not_terminal,
     set_tournament_status,
@@ -719,6 +722,7 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
     admin_db = get_admin_db()
     try:
         before = require_tournament_access(admin_db, id, admin, "tournament.update")
+        assert_tournament_not_terminal(before, "edit tournament settings")
 
         update_dict = {}
         # Iterate over non-None values to build patch
@@ -737,6 +741,19 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
             elif key == "fixturesGenerated": update_dict["fixtures_generated"] = val
             else:
                 update_dict[key] = val
+
+        # Lifecycle and draw flags describe completed actions, not editable
+        # settings. Writing their booleans/labels directly bypasses the draw,
+        # payment, notification, and completion checks in the dedicated verbs.
+        forbidden = {"status", "schedule_published", "fixtures_generated"} & set(update_dict)
+        if forbidden:
+            raise HTTPException(
+                status_code=409,
+                detail=("Use POST /tournaments/{id}/open-registration, /close-registration, "
+                        "/start, /complete, or /cancel for lifecycle changes, and "
+                        "/publish-schedule for the schedule. These states cannot be "
+                        "set through Edit Tournament."),
+            )
         
         # `rules` is one JSONB column, so writing it whole means an edit that
         # sets a single setting deletes every other one. The Rules tab sends
@@ -745,74 +762,47 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
         if "rules" in update_dict and isinstance(update_dict["rules"], dict):
             merged = dict(before.get("rules") or {})
             merged.update({k: v for k, v in update_dict["rules"].items() if v is not None})
+            if merged.get("scoringMode") == "official_icf":
+                # A partial edit still has to leave an official ruleset valid.
+                TournamentRulesSchema.model_validate(merged)
             update_dict["rules"] = merged
         if any(key in update_dict for key in _TOURNAMENT_DATE_FIELDS):
             _validate_tournament_dates({**before, **update_dict})
 
-        # Reject illegal lifecycle moves before touching the database (spec 75)
-        status_target = update_dict.pop("status", None)
-        if status_target is not None:
-            # The two terminal states belong to their verbs, and only to them.
-            #
-            # validate_tournament_transition below checks the EDGE is legal;
-            # it knows nothing about the verb's preconditions or its side
-            # effects. in_progress -> completed is a perfectly legal edge, so
-            # PUT {"status": "completed"} sailed through on a tournament with
-            # six unplayed matches -- while POST /complete refused the same
-            # move with "6 match(es) still need a result". The result was a
-            # tournament stored 'completed' with no champion, no completed_at,
-            # nobody notified, and /complete answering "already completed"
-            # for good. Same for cancelled: no reason on the record and no
-            # participant told.
-            #
-            # Every other status stays writable here. Older builds drive the
-            # lifecycle buttons through this route, and the reversible states
-            # carry no precondition worth protecting -- the compatibility
-            # suite pins draft -> registration_open and the legacy
-            # in_progress synonym, and both still work.
-            if canonical_tournament_status(status_target) in ("completed", "cancelled"):
-                verb = ("complete" if canonical_tournament_status(status_target) == "completed"
-                        else "cancel")
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"Use POST /tournaments/{{id}}/{verb} to "
-                        f"{verb} a tournament. Setting the status directly skips the "
-                        "checks that go with it -- that every match has a result, or "
-                        "that a reason was given -- and the state cannot be undone."
-                    ),
-                )
-            validate_tournament_transition(before.get("status"), status_target)
+        if "category" in update_dict and update_dict["category"] != before.get("category"):
+            registrations = admin_db.table("registrations").select("id").eq(
+                "tournament_id", id).limit(1).execute().data or []
+            if registrations:
+                raise HTTPException(status_code=409, detail="Category cannot change after players have entered this tournament.")
+
+        scoring_keys = {
+            "scoringMode", "numberOfSets", "boardsPerSet", "maxBoardsPerMatch",
+            "targetScore", "queenPoints", "coinsPerSide", "queenMustBeCovered",
+            "queenAwardTo", "coinValue", "setWinnerRule", "boardEntryMode",
+            "tieBreak", "pointsForWin", "pointsForDraw", "pointsForLoss",
+            "tiebreakerRules", "groupCount", "qualifiersPerGroup", "knockoutQualifiers",
+        }
+        # Only fields supplied by this request should lock the draw; defaults
+        # filled by the rules model are not an edit to historical scoring.
+        supplied_rule_keys = set(data.rules.model_dump(by_alias=True, exclude_unset=True)) if data.rules else set()
+        structural_change = any(k in update_dict for k in ("format", "number_of_boards")) \
+            or bool(supplied_rule_keys & scoring_keys)
+        date_change = any(k in update_dict for k in ("tournament_start_date", "tournament_end_date"))
+        schedule_rule_change = bool(supplied_rule_keys & {"matchDurationMinutes", "restTimeMinutes"})
+        if structural_change or date_change or schedule_rule_change:
+            has_matches = admin_db.table("matches").select("id").eq(
+                "tournament_id", id).limit(1).execute().data or []
+            if has_matches and structural_change:
+                raise HTTPException(status_code=409, detail="Scoring rules, format, and venue board count cannot change after fixtures exist.")
+            if has_matches and before.get("schedule_published") and (date_change or schedule_rule_change):
+                raise HTTPException(status_code=409, detail="Tournament dates, match duration, and rest time cannot change after the schedule is published.")
+
         changed_fields = set(update_dict.keys())
 
         if update_dict:
             res = admin_db.table("tournaments").update(update_dict).eq("id", id).execute()
             if not res.data:
                 raise HTTPException(status_code=404, detail="Tournament not found")
-
-        # A status is still accepted here for compatibility -- the lifecycle
-        # buttons used this route for a long time and older builds still do --
-        # but it goes through set_tournament_status rather than the raw update
-        # above, so a database that predates migration 002 gets the legacy
-        # synonym ('ongoing' for in_progress) instead of the organiser getting
-        # a 400. The dedicated verbs (/start, /complete, ...) are the route
-        # that also checks fixtures exist and records a champion.
-        if status_target is not None and (
-            canonical_tournament_status(status_target)
-            != canonical_tournament_status(before.get("status"))
-        ):
-            written = set_tournament_status(
-                admin_db, id, canonical_tournament_status(status_target)
-            )
-            if written is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        f"This database does not accept the tournament status "
-                        f"'{status_target}'. Apply {LIFECYCLE_MIGRATION} and try again."
-                    ),
-                )
-            changed_fields.add("status")
 
         rows = admin_db.table("tournaments").select("*").eq("id", id).execute().data or []
         if not rows:
@@ -880,6 +870,7 @@ async def register_for_tournament(
         tournament = admin_db.table("tournaments").select("*").eq("id", id).execute().data
         if not tournament:
             raise HTTPException(status_code=404, detail="Tournament not found.")
+        assert_entry_list_not_drawn(admin_db, tournament[0])
         # A player may only enter while the desk is open. An organiser gets a
         # little more room -- a draft tournament is still being built -- but
         # not unlimited room: once registration closes the entry list is what
@@ -1119,6 +1110,17 @@ async def generate_fixtures(id: str, force: bool = Query(False,
     try:
         t = require_tournament_access(admin_db, id, admin, "tournament.fixtures")
         assert_tournament_not_terminal(t, "be drawn again")
+        lifecycle = canonical_tournament_status(t.get("status"))
+        if lifecycle in (None, "draft", "registration_open"):
+            raise HTTPException(status_code=409, detail=(
+                "Close registration before generating fixtures. The draw must use "
+                "a final entry list so later registrations are not left without matches."
+            ))
+        if lifecycle not in ("registration_closed", "fixture_generation",
+                             "fixture_published", "in_progress"):
+            raise HTTPException(status_code=422, detail=(
+                f"Tournament has an unrecognised state '{lifecycle}' and cannot be drawn."
+            ))
 
         # Load approved registrations
         reg_res = admin_db.table("registrations").select("*, player:profiles(*), team:teams(*)").eq("tournament_id", id).eq("status", "approved").execute()
@@ -1140,6 +1142,17 @@ async def generate_fixtures(id: str, force: bool = Query(False,
                         "entry/entries still have unpaid fees. Record each "
                         "payment or explicitly waive the fee, then retry."),
             )
+        # Every pending entry needs a decision before the list becomes a draw.
+        # A payment or proof approval after this point would auto-approve the
+        # entrant without giving them any fixture.
+        pending_entries = admin_db.table("registrations").select("id").eq(
+            "tournament_id", id
+        ).eq("status", "pending").limit(1).execute().data or []
+        if pending_entries:
+            raise HTTPException(status_code=409, detail=(
+                "Resolve every pending registration before generating fixtures. "
+                "Collect or waive the fee, approve a free entry, or reject the entry."
+            ))
         if len(regs) < 2:
             raise HTTPException(status_code=400, detail="Cannot generate fixtures with fewer than 2 approved participants.")
 
@@ -1149,10 +1162,24 @@ async def generate_fixtures(id: str, force: bool = Query(False,
         # a single player was fixtured against a two-person team.
         pools: Dict[str, List[Dict[str, Any]]] = {"singles": [], "doubles": []}
         for r in regs:
-            if r["type"] == "singles" and r.get("player"):
+            if r.get("type") == "singles" and (r.get("player") or {}).get("id"):
                 pools["singles"].append(r["player"])
-            elif r["type"] == "doubles" and r.get("team"):
+            elif r.get("type") == "doubles" and (r.get("team") or {}).get("id"):
                 pools["doubles"].append(r["team"])
+            else:
+                raise HTTPException(status_code=409, detail=(
+                    "An approved registration has no valid singles player or "
+                    "doubles team. Repair or reject that entry before drawing "
+                    "fixtures."
+                ))
+
+        for category, pool in pools.items():
+            if len(pool) == 1:
+                raise HTTPException(status_code=409, detail=(
+                    f"The {category} category has only one approved entrant. "
+                    "Add another eligible entrant or remove that entry before "
+                    "drawing the whole tournament."
+                ))
 
         max_boards = t.get("rules", {}).get("maxBoardsPerMatch", 8)
         number_of_sets = int(t.get("rules", {}).get("numberOfSets") or 1)
@@ -1233,10 +1260,6 @@ async def generate_fixtures(id: str, force: bool = Query(False,
         for category in ("singles", "doubles"):
             pool = pools[category]
             if len(pool) < 2:
-                if len(pool) == 1:
-                    logger.warning(
-                        f"Tournament {id}: only one {category} entrant, no {category} fixtures drawn."
-                    )
                 continue
             drawn = build(pool, category[0])
             for m in drawn:
@@ -1393,15 +1416,34 @@ async def generate_fixtures(id: str, force: bool = Query(False,
             for m in matches if m.get("nextMatchId") in id_map
         ]
         try:
-            written = admin_db.rpc("replace_tournament_fixtures", {
+            written = admin_db.rpc("replace_tournament_fixtures_checked", {
                 "p_tournament_id": id, "p_matches": match_rows,
                 "p_boards": board_rows, "p_links": links, "p_force": force,
+                "p_tournament_snapshot": {
+                    "status": t.get("status"),
+                    "fixtures_generated": t.get("fixtures_generated"),
+                    "format": t.get("format"), "category": t.get("category"),
+                    "rules": t.get("rules"),
+                    "number_of_boards": t.get("number_of_boards"),
+                },
+                "p_approved_roster": [{
+                    "id": r["id"], "type": r["type"],
+                    "player_id": r.get("player_id"), "team_id": r.get("team_id"),
+                    "payment_status": r.get("payment_status"),
+                    "fee_paise": r.get("fee_paise"),
+                } for r in sorted(regs, key=lambda r: r["id"])],
             }).execute().data
         except Exception as e:
             if "PGRST202" in str(e) or "could not find the function" in str(e).lower():
-                raise HTTPException(status_code=503, detail="Fixture generation needs database migration 019.") from e
-            if any(marker in str(e).lower() for marker in ("play", "concurrent", "23503", "409")):
-                raise HTTPException(status_code=409, detail="The draw changed or contains results. Reload before trying again.")
+                raise HTTPException(status_code=503, detail="Fixture generation needs database migration 027.") from e
+            if any(marker in str(e).lower() for marker in (
+                    "play", "concurrent", "23503", "409", "entry list changed",
+                    "pending registration", "unpaid approved", "registration snapshot",
+                    "draw settings changed")):
+                raise HTTPException(status_code=409, detail=(
+                    "The entry list or draw changed before it was saved. "
+                    "Reload registrations and fixtures, then retry."
+                )) from e
             raise
         if int(written or 0) != len(match_rows):
             raise HTTPException(status_code=503, detail="The draw could not be verified after writing; reload fixtures.")
@@ -1589,8 +1631,11 @@ async def publish_schedule(id: str, admin = Depends(verify_admin)):
         rules = published_t.get("rules") or {}
         conflicts = detect_schedule_conflicts(
             matches, team_members,
-            int(rules.get("matchDurationMinutes") or 30),
-            int(rules.get("restTimeMinutes") or 10),
+            int(rules.get("matchDurationMinutes") if rules.get("matchDurationMinutes") is not None else 30),
+            int(rules.get("restTimeMinutes") if rules.get("restTimeMinutes") is not None else 10),
+            tournament_start_date=published_t.get("tournament_start_date"),
+            tournament_end_date=published_t.get("tournament_end_date"),
+            number_of_boards=published_t.get("number_of_boards"),
         )
         if conflicts:
             raise HTTPException(status_code=409, detail=conflicts[0]["detail"])
@@ -1646,6 +1691,7 @@ async def open_registration(id: str, admin = Depends(verify_admin)):
         _validate_tournament_dates(t)
         if date.fromisoformat(str(t["registration_end_date"])[:10]) < registration_calendar_today():
             raise HTTPException(status_code=409, detail="Registration end date has passed. Update the tournament dates before publishing.")
+        assert_entry_list_not_drawn(admin_db, t)
         return _lifecycle_move(admin_db, admin, t, "registration_open", verb="open_registration")
     except HTTPException:
         raise
@@ -1842,9 +1888,6 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
 
         if data.player1_id == data.player2_id:
             raise HTTPException(status_code=422, detail="A player cannot be fixtured against themselves.")
-        if data.stage not in ("league", "knockout"):
-            raise HTTPException(status_code=422, detail="Stage must be 'league' or 'knockout'.")
-
         # Both sides have to be in this tournament, and approved.
         regs = admin_db.table("registrations").select(
             "*, player:profiles(*), team:teams(*)"
@@ -1869,6 +1912,16 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
                 status_code=422,
                 detail="A singles player cannot be fixtured against a doubles team.",
             )
+        if canonical_tournament_status(t.get("status")) in (None, "draft", "registration_open"):
+            raise HTTPException(
+                status_code=409,
+                detail="Close registration before adding a match so every entrant can be included.",
+            )
+        if data.stage == "league" and knockout_qualifiers_assigned(admin_db, id, p1["type"]):
+            raise HTTPException(
+                status_code=409,
+                detail="League fixtures are locked after knockout qualifiers have been assigned.",
+            )
 
         rules = t.get("rules") or {}
         max_boards = int(rules.get("maxBoardsPerMatch") or 8)
@@ -1881,10 +1934,46 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
         if boards_per_set:
             max_boards = boards_per_set
 
-        existing = admin_db.table("matches").select("match_number, round_index").eq(
+        existing = admin_db.table("matches").select("*").eq(
             "tournament_id", id).execute().data or []
         next_number = max((m.get("match_number") or 0) for m in existing) + 1 if existing else 1
         round_index = max((m.get("round_index") or 0) for m in existing) if existing else 0
+
+        bracket_position = {"manual": True, "addedBy": admin.get("name")}
+        existing_groups = {}
+        for match in existing:
+            if match.get("stage") != "league" or match.get("type") != p1["type"]:
+                continue
+            position = match.get("bracket_position") or {}
+            group = position.get("group") if isinstance(position, dict) else None
+            if not group:
+                continue
+            for entrant_id in (match.get("player1_id"), match.get("player2_id")):
+                if entrant_id:
+                    existing_groups.setdefault(entrant_id, set()).add(group)
+        group_labels = {group for memberships in existing_groups.values() for group in memberships}
+        grouped = bool(group_labels) or t.get("format") in ("group_stage", "group_knockout") \
+            or int(rules.get("groupCount") or 1) > 1
+        if data.stage == "league" and grouped:
+            if not group_labels:
+                raise HTTPException(status_code=409, detail="Generate the group draw before adding a league match.")
+            memberships = existing_groups.get(data.player1_id, set()) | existing_groups.get(data.player2_id, set())
+            if len(memberships) > 1:
+                raise HTTPException(status_code=422, detail="Both entrants must belong to the same group for a league match.")
+            group = (data.group or "").strip() or (next(iter(memberships)) if memberships else None)
+            if group not in group_labels:
+                raise HTTPException(status_code=422, detail="Choose an existing group for this league match.")
+            if memberships and group not in memberships:
+                raise HTTPException(status_code=422, detail="An entrant is already assigned to another group.")
+            bracket_position["group"] = group
+        elif data.group:
+            raise HTTPException(status_code=422, detail="A group can only be assigned to a grouped league match.")
+
+        published = bool(t.get("schedule_published"))
+        if published and not (data.scheduled_date and data.scheduled_time and data.board_number):
+            raise HTTPException(status_code=422, detail="A published schedule needs a date, time and board for the new match.")
+        if bool(data.scheduled_date) != bool(data.scheduled_time):
+            raise HTTPException(status_code=422, detail="Enter both the match date and time.")
 
         match_payload = {
             "id": str(uuid.uuid4()),
@@ -1904,7 +1993,7 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
             "max_boards": max_boards,
             "target_points": rules.get("targetScore", 25),
             # Marked so it is distinguishable from a drawn fixture later.
-            "bracket_position": {"manual": True, "addedBy": admin.get("name")},
+            "bracket_position": bracket_position,
         }
         if data.scheduled_date:
             match_payload["scheduled_date"] = data.scheduled_date
@@ -1912,6 +2001,26 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
             match_payload["scheduled_time"] = data.scheduled_time
         if number_of_sets > 1:
             match_payload["number_of_sets"] = number_of_sets
+
+        if published:
+            team_members = {}
+            if p1["type"] == "doubles":
+                team_ids = {m.get(side) for m in [*existing, match_payload]
+                            for side in ("player1_id", "player2_id") if m.get("type") == "doubles" and m.get(side)}
+                teams = admin_db.table("teams").select("id, player1_id, player2_id").in_(
+                    "id", list(team_ids)).execute().data or []
+                team_members = {team["id"]: [pid for pid in (team.get("player1_id"), team.get("player2_id")) if pid]
+                                for team in teams}
+            conflicts = detect_schedule_conflicts(
+                [*existing, match_payload], team_members,
+                int(rules.get("matchDurationMinutes") if rules.get("matchDurationMinutes") is not None else 30),
+                int(rules.get("restTimeMinutes") if rules.get("restTimeMinutes") is not None else 10),
+                tournament_start_date=t.get("tournament_start_date"),
+                tournament_end_date=t.get("tournament_end_date"),
+                number_of_boards=t.get("number_of_boards"),
+            )
+            if conflicts:
+                raise HTTPException(status_code=409, detail=conflicts[0]["detail"])
 
         created = admin_db.table("matches").insert(match_payload).execute()
         match_id = created.data[0]["id"]
@@ -1936,12 +2045,24 @@ async def add_manual_match(id: str, data: ManualMatchSchema, admin = Depends(ver
         if board_rows:
             admin_db.table("boards").insert(board_rows).execute()
 
+        notified = 0
+        if published:
+            recipients = (team_members.get(data.player1_id, []) + team_members.get(data.player2_id, [])
+                          if p1["type"] == "doubles" else [data.player1_id, data.player2_id])
+            notified = fan_out_notification(
+                admin_db, title="New Match Scheduled",
+                message=(f"A match was added to '{t['name']}': {p1['name']} vs {p2['name']} "
+                         f"on {data.scheduled_date} at {data.scheduled_time}, board {data.board_number}."),
+                type="match_scheduled", tournament_id=id,
+                recipient_ids=list(dict.fromkeys(recipients)),
+            )
+
         record_audit(
             admin_db, actor=admin, action="match.added_manually",
             entity_type="match", entity_id=match_id,
             new_state={"round": match_payload["round_name"],
                        "player1": p1["name"], "player2": p2["name"]},
-            request_context={"tournament_id": id},
+            request_context={"tournament_id": id, "notified": notified},
         )
 
         rows = admin_db.table("matches").select("*").eq("id", match_id).execute().data

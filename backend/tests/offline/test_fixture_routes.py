@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from harness import Harness                       # noqa: E402
+from app.services.schedule_validation import detect_schedule_conflicts  # noqa: E402
 
 RESULTS = {}
 
@@ -92,8 +93,21 @@ def create_tournament(h, admin, fmt="round_robin", boards=3):
     return body(r).get("id")
 
 
-def approve_pool(h, admin, tid, entrants, prefix="Entrant"):
-    """Register `entrants` singles players and approve them, as the desk would."""
+def close_registration(h, admin, tid):
+    """Finish the entry list through the same lifecycle actions as the organiser."""
+    state = next(t for t in h.db.rows("tournaments") if t["id"] == tid).get("status")
+    if state == "draft":
+        opened = h.post("/api/tournaments/%s/open-registration" % tid, {}, user_id=admin)
+        if not check("registration opens before the draw", opened.status_code == 200,
+                     "%s %s" % (opened.status_code, detail(opened))):
+            return False
+    closed = h.post("/api/tournaments/%s/close-registration" % tid, {}, user_id=admin)
+    return check("registration closes before the draw", closed.status_code == 200,
+                 "%s %s" % (closed.status_code, detail(closed)))
+
+
+def approve_pool(h, admin, tid, entrants, prefix="Entrant", close=True):
+    """Register and approve a singles pool, then normally close registration."""
     for i in range(entrants):
         rp = h.post("/api/players", {"name": "%s %d" % (prefix, i + 1),
                                      "email": "%s%d@carrom.example.com" % (prefix.lower(), i),
@@ -109,8 +123,9 @@ def approve_pool(h, admin, tid, entrants, prefix="Entrant"):
             h.post("/api/registrations/%s/approve" % reg["id"], {}, user_id=admin)
     approved = [r for r in h.db.rows("registrations")
                 if r["tournament_id"] == tid and r.get("status") == "approved"]
-    return check("the pool is approved before the draw", len(approved) == entrants,
-                 "approved=%d of %d" % (len(approved), entrants))
+    approved_ok = check("the pool is approved before the draw", len(approved) == entrants,
+                        "approved=%d of %d" % (len(approved), entrants))
+    return approved_ok and (not close or close_registration(h, admin, tid))
 
 
 def matches_of(h, tid):
@@ -285,20 +300,46 @@ def test_import_confirm_autogenerate():
     check("the import registers every row",
           p.get("imported") == 4 and p.get("singlesImported") == 4 and p.get("skipped") == [],
           p)
-    check("autoGenerate builds the fixtures", p.get("fixturesGenerated") is True, p)
-    check("autoGenerate reports no fixture error",
-          p.get("fixtureError") is None and "not generated" not in str(p.get("message")),
-          p)
-    check("the import says the draw was made and the schedule published",
-          "Fixtures generated" in str(p.get("message")), p.get("message"))
+    check("autoGenerate before closing registration reports the lifecycle gate",
+          p.get("fixturesGenerated") is False
+          and "Close registration" in str(p.get("fixtureError"))
+          and "not generated" in str(p.get("message")), p)
+    check("premature autoGenerate writes no matches or boards",
+          not matches_of(h, tid) and not h.db.rows("boards"),
+          "matches=%d boards=%d" % (len(matches_of(h, tid)), len(h.db.rows("boards"))))
+    row = [t for t in h.db.rows("tournaments") if t["id"] == tid][0]
+    check("premature autoGenerate does not publish a draw or schedule",
+          not row.get("fixtures_generated") and not row.get("schedule_published"), row)
+
+    # A retry of the same sheet adds nobody. Imports happen while the entry
+    # desk is open; drawing is a separate action after closing it.
+    r = confirm_import(h, admin, tid, entries, auto_generate=True)
+    p = body(r)
+    check("re-importing the same sheet registers nobody twice",
+          r.status_code == 200 and p.get("imported") == 0, p)
+    check("re-importing the same sheet still writes no draw",
+          p.get("fixturesGenerated") is False and not matches_of(h, tid), p)
+
+    if not close_registration(h, admin, tid):
+        return
+    draw = h.post("/api/fixtures/%s/generate" % tid, user_id=admin)
+    if not check("the imported pool can be drawn after registration closes",
+                 draw.status_code == 200, "%s %s" % (draw.status_code, detail(draw))):
+        return
+    scheduled = h.post("/api/scheduling/%s/generate" % tid, {}, user_id=admin)
+    check("the imported pool can be scheduled", scheduled.status_code == 200,
+          "%s %s" % (scheduled.status_code, detail(scheduled)))
+    published = h.post("/api/scheduling/%s/publish" % tid, {}, user_id=admin)
+    check("the imported pool can be published", published.status_code == 200,
+          "%s %s" % (published.status_code, detail(published)))
 
     drawn = matches_of(h, tid)
-    check("a four-entrant import draws six matches", len(drawn) == 6,
+    check("a four-entrant import later draws six matches", len(drawn) == 6,
           "matches=%d" % len(drawn))
-    check("the auto-generated draw is scheduled",
+    check("the generated draw is scheduled",
           drawn and all(m.get("scheduled_time") and m.get("scheduled_date") for m in drawn),
           [(m.get("scheduled_date"), m.get("scheduled_time")) for m in drawn[:3]])
-    check("the auto-generated draw stays within the venue's boards",
+    check("the generated draw stays within the venue's boards",
           drawn and all(1 <= (m.get("board_number") or 0) <= 2 for m in drawn),
           sorted(set(m.get("board_number") for m in drawn)))
 
@@ -322,27 +363,19 @@ def test_import_confirm_autogenerate():
           [e["email"] for e in entries if e["email"] not in profiles])
 
     # ---- off unless asked ---------------------------------------------
-    before = match_ids(h, tid)
+    no_auto = create_tournament(h, admin, "round_robin", boards=2)
     late = [{"name": "Late Entrant", "email": "late@carrom.example.com", "type": "singles"}]
-    r = confirm_import(h, admin, tid, late)
-    check("a later import without the flag is accepted", r.status_code == 200,
+    r = confirm_import(h, admin, no_auto, late)
+    check("an import without the flag is accepted", r.status_code == 200,
           "%s %s" % (r.status_code, detail(r)))
     p = body(r)
-    check("an import does not rebuild the draw unless asked",
+    check("an import does not ask for a draw unless flagged",
           p.get("fixturesGenerated") is False and p.get("fixtureError") is None
-          and match_ids(h, tid) == before, p)
+          and not matches_of(h, no_auto), p)
     approved = [r_ for r_ in h.db.rows("registrations")
-                if r_["tournament_id"] == tid and r_.get("status") == "approved"]
-    check("the late entrant is registered all the same", len(approved) == 5,
+                if r_["tournament_id"] == no_auto and r_.get("status") == "approved"]
+    check("the unflagged entrant is registered all the same", len(approved) == 1,
           "approved=%d" % len(approved))
-
-    # A second import of the same people adds nobody and draws nothing.
-    r = confirm_import(h, admin, tid, entries, auto_generate=True)
-    p = body(r)
-    check("re-importing the same sheet registers nobody twice",
-          r.status_code == 200 and p.get("imported") == 0, p)
-    check("re-importing the same sheet leaves the draw alone",
-          p.get("fixturesGenerated") is False and match_ids(h, tid) == before, p)
 
     # ---- when the draw cannot be built, the reason is machine-readable -------
     thin = create_tournament(h, admin, "knockout", boards=2)
@@ -353,9 +386,9 @@ def test_import_confirm_autogenerate():
         p = body(r)
         check("an import whose draw cannot be built still imports", r.status_code == 200
               and p.get("imported") == 1, "%s %s" % (r.status_code, p))
-        check("an import whose draw cannot be built says why in fixtureError",
+        check("an early import says why in fixtureError",
               p.get("fixturesGenerated") is False
-              and "fewer than 2" in str(p.get("fixtureError")), p)
+              and "Close registration" in str(p.get("fixtureError")), p)
         check("the fixture failure is a reason, not a Python error",
               "Depends" not in str(p.get("fixtureError"))
               and "object" not in str(p.get("fixtureError")), p.get("fixtureError"))
@@ -363,6 +396,11 @@ def test_import_confirm_autogenerate():
               "not generated" in str(p.get("message")), p.get("message"))
         check("a failed draw writes no matches", not matches_of(h, thin),
               "matches=%d" % len(matches_of(h, thin)))
+        if close_registration(h, admin, thin):
+            blocked = h.post("/api/fixtures/%s/generate" % thin, user_id=admin)
+            check("one imported entrant is still insufficient after closing",
+                  blocked.status_code == 400 and "fewer than 2" in detail(blocked),
+                  "%s %s" % (blocked.status_code, detail(blocked)))
 
 
 def test_paid_import_waits_for_settlement():
@@ -398,6 +436,8 @@ def test_paid_import_waits_for_settlement():
     for reg in regs[:2]:
         h.db.table("registrations").update({"status": "approved"}).eq(
             "id", reg["id"]).execute()
+    if not close_registration(h, admin, tid):
+        return
     premature = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
     check("a legacy approved-but-unpaid entry blocks a new draw",
           premature.status_code == 409
@@ -1097,7 +1137,7 @@ def test_the_result_cannot_be_edited_through_the_fixture_route():
           (after.get("player1_board_wins"), after.get("player1_total_points")))
 
 
-def test_a_clash_is_reported_not_refused():
+def test_a_clash_is_refused_after_draw_publication():
     h = Harness()
     admin = h.make_user("Owner", "admin")
     tid = create_tournament(h, admin, "round_robin", boards=3)
@@ -1105,6 +1145,7 @@ def test_a_clash_is_reported_not_refused():
         return
     h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
     a, b = matches_of(h, tid)[0], matches_of(h, tid)[1]
+    original_b = (b.get("board_number"), b.get("scheduled_date"), b.get("scheduled_time"))
     clash_date = (date.today() + timedelta(days=41)).isoformat()
 
     h.put("/api/matches/%s" % a["id"],
@@ -1113,22 +1154,40 @@ def test_a_clash_is_reported_not_refused():
     r = h.put("/api/matches/%s" % b["id"],
               {"boardNumber": 2, "scheduledDate": clash_date, "scheduledTime": "10:00 AM"},
               user_id=admin)
-    if not check("a clashing move is allowed", r.status_code == 200,
-                 "%s %s" % (r.status_code, detail(r))):
-        return
-    warnings = body(r).get("warnings") or []
-    check("but the double-booked board is reported",
-          any("board 2" in w for w in warnings), warnings)
-
+    check("a published draw refuses a clashing move",
+          r.status_code == 409 and "published schedule" in detail(r),
+          "%s %s" % (r.status_code, detail(r)))
     after = next(x for x in matches_of(h, tid) if x["id"] == b["id"])
-    check("the move still went through", after["board_number"] == 2, after["board_number"])
+    check("the clashing edit leaves the fixture unchanged",
+          (after.get("board_number"), after.get("scheduled_date"),
+           after.get("scheduled_time")) == original_b, after)
 
     # A clear slot draws no warning at all.
     r = h.put("/api/matches/%s" % b["id"],
-              {"boardNumber": 3, "scheduledTime": "2:00 PM"}, user_id=admin)
+              {"boardNumber": 3, "scheduledDate": clash_date,
+               "scheduledTime": "2:00 PM"}, user_id=admin)
     check("an uncontested slot warns about nothing",
           r.status_code == 200 and not (body(r).get("warnings") or []),
           body(r).get("warnings"))
+
+    # Once players have been told their schedule, a warning is insufficient:
+    # the edit must leave the published time and board unchanged.
+    h.db.table("tournaments").update({"status": "fixture_published",
+                                      "schedule_published": True}).eq("id", tid).execute()
+    overlap = h.put("/api/matches/%s" % b["id"],
+                    {"boardNumber": 2, "scheduledTime": "10:15 AM"}, user_id=admin)
+    check("published fixtures reject an overlapping board slot, not just an identical start",
+          overlap.status_code == 409 and "published schedule" in detail(overlap),
+          "%s %s" % (overlap.status_code, detail(overlap)))
+    check("the rejected published edit leaves the old slot intact",
+          (next(x for x in matches_of(h, tid) if x["id"] == b["id"])["board_number"],
+           next(x for x in matches_of(h, tid) if x["id"] == b["id"])["scheduled_time"])
+          == (3, "2:00 PM"))
+
+    unavailable = h.put("/api/matches/%s" % b["id"],
+                        {"boardNumber": 4}, user_id=admin)
+    check("published fixtures cannot use a board the venue does not have",
+          unavailable.status_code == 409, "%s %s" % (unavailable.status_code, detail(unavailable)))
 
 
 def test_editing_is_owner_only():
@@ -1291,7 +1350,55 @@ def test_bulk_import_closes_with_it():
           "%d -> %d" % (held, registration_count(h, tid)))
 
 
+def test_schedule_checks_use_event_rules_and_venue_limits():
+    h = Harness()
+    admin = h.make_user("Owner", "admin")
+    event_day = (date.today() + timedelta(days=20)).isoformat()
+    tid = h.seed_tournament(
+        owner_id=admin, number_of_boards=2,
+        rules=dict(RULES, matchDurationMinutes=45, restTimeMinutes=20),
+        tournament_start_date=event_day, tournament_end_date=event_day,
+    )
+    shared = h.make_user("Shared player")
+    other_a = h.make_user("Other A")
+    other_b = h.make_user("Other B")
+    h.db.seed("matches", [
+        {"id": "schedule-a", "tournament_id": tid, "match_number": 1,
+         "status": "scheduled", "stage": "league", "type": "singles",
+         "player1_id": shared, "player2_id": other_a,
+         "board_number": 1, "scheduled_date": event_day, "scheduled_time": "9:00 AM"},
+        {"id": "schedule-b", "tournament_id": tid, "match_number": 2,
+         "status": "scheduled", "stage": "league", "type": "singles",
+         "player1_id": shared, "player2_id": other_b,
+         "board_number": 2, "scheduled_date": event_day, "scheduled_time": "9:45 AM"},
+    ])
+    response = h.get("/api/scheduling/%s/conflicts" % tid)
+    issues = body(response).get("conflicts", []) if response.status_code == 200 else []
+    check("schedule conflict preview uses configured match duration and rest",
+          response.status_code == 200 and any(
+              issue["type"] == "participant_double_booked" for issue in issues),
+          "%s %s" % (response.status_code, body(response)))
+
+    invalid = [{
+        "id": "bad-team", "match_number": 3, "type": "doubles", "status": "scheduled",
+        "player1_id": "missing-team", "player2_id": "also-missing",
+        "board_number": 3, "scheduled_date": (date.today() + timedelta(days=19)).isoformat(),
+        "scheduled_time": "11:45 PM",
+    }]
+    findings = detect_schedule_conflicts(
+        invalid, team_members={}, duration_minutes=45,
+        tournament_start_date=event_day, tournament_end_date=event_day,
+        number_of_boards=2,
+    )
+    kinds = {issue["type"] for issue in findings}
+    check("schedule rejects boards the venue does not have", "board_out_of_range" in kinds, kinds)
+    check("schedule rejects matches outside event dates", "outside_tournament_dates" in kinds, kinds)
+    check("schedule cannot certify a doubles team without its member records",
+          "unknown_team_members" in kinds, kinds)
+
+
 SUITES = [
+    ("schedule rules and venue limits", test_schedule_checks_use_event_rules_and_venue_limits),
     ("draw, replay and redraw through /fixtures", test_generate_draws_replays_and_redraws),
     ("import with autoGenerate", test_import_confirm_autogenerate),
     ("paid import waits for settlement", test_paid_import_waits_for_settlement),
@@ -1308,7 +1415,7 @@ SUITES = [
     ("re-pair a fixture", test_repairing_a_fixture),
     ("played fixtures resist re-pairing", test_a_played_fixture_cannot_be_quietly_repaired),
     ("the result is not editable here", test_the_result_cannot_be_edited_through_the_fixture_route),
-    ("clashes are reported", test_a_clash_is_reported_not_refused),
+    ("published clashes are refused", test_a_clash_is_refused_after_draw_publication),
     ("editing is owner only", test_editing_is_owner_only),
     ("entries close with registration", test_entries_close_with_registration),
     ("the organiser keeps a way in", test_the_organiser_keeps_a_deliberate_way_in),

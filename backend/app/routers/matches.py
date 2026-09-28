@@ -12,7 +12,7 @@ from app.services.scoring_engine import (
 )
 from app.services.notification_service import fan_out_notification, resolve_tournament_audience
 from app.services.transaction_service import apply_board_result, confirm_match_result
-from app.services.qualification import try_auto_promote
+from app.services.qualification import try_auto_promote, knockout_qualifiers_assigned, category_of
 from app.services.access_control import require_tournament_access
 from app.services.audit_service import record_audit
 from app.services.state_machine import (
@@ -21,6 +21,7 @@ from app.services.state_machine import (
     set_tournament_status,
 )
 from app.services.score_validation import validate_board_score
+from app.services.schedule_validation import detect_schedule_conflicts
 from app.utils.serializers import serialize_board, serialize_match
 from app.utils.idempotency import IdempotencyGuard, get_idempotency_key
 from typing import Dict, Any, List, Optional
@@ -31,6 +32,23 @@ import time
 logger = logging.getLogger("uvicorn.error")
 
 router = APIRouter(prefix="/matches", tags=["matches"])
+
+
+def _assert_league_standings_mutable(admin_db, match: Dict[str, Any]) -> None:
+    """Do not change league standings after their knockout seats are filled.
+
+    Promotion currently replaces each rank placeholder with a participant
+    name. Recomputing the table afterwards cannot identify the original seat
+    and would leave the bracket showing the wrong qualifiers.
+    """
+    if match.get("stage") == "league" and knockout_qualifiers_assigned(
+        admin_db, match["tournament_id"], category_of(match)
+    ):
+        raise HTTPException(status_code=409, detail=(
+            "This league has already supplied knockout entrants. Its results and "
+            "pairings are locked because changing the table would leave the "
+            "knockout bracket with the wrong qualifiers."
+        ))
 
 def tournament_rules(admin_db, tournament_id: str) -> dict:
     """The tournament's scoring rules, for the queen value."""
@@ -64,6 +82,35 @@ def _resolve_set(boards, board_number: int, requested):
             ),
         )
     return next(iter(sets)) if sets else 1
+
+
+def _official_game_points(boards, set_number: int, board_number: int, winner: str) -> int:
+    """Winner's score entering a board, reset at the start of each game."""
+    field = "player1_score" if winner == "player1" else "player2_score"
+    return sum(int(b.get(field) or 0) for b in boards
+               if (b.get("set_number") or 1) == set_number
+               and b.get("board_number", 0) < board_number
+               and b.get("status") == "completed")
+
+
+def _validate_official_observation(winner, coins_with, coins, queen_by, covered_by):
+    """ICF boards have one winner and credit only opposing men still on board."""
+    if winner not in ("player1", "player2"):
+        raise HTTPException(status_code=422, detail="Choose who finished and won this board.")
+    opponent = "player2" if winner == "player1" else "player1"
+    if coins_with != opponent:
+        raise HTTPException(status_code=422, detail=(
+            "The coins remaining must belong to the board winner's opponent."))
+    if coins is None or not 0 <= coins <= 9:
+        raise HTTPException(status_code=422, detail="Enter 0 to 9 opposing coins remaining.")
+    queen_by = queen_by or "none"
+    covered_by = covered_by or "none"
+    if queen_by not in ("none", "player1", "player2") or covered_by not in (
+            "none", "player1", "player2"):
+        raise HTTPException(status_code=422, detail="Choose a valid side for the queen.")
+    if covered_by != "none" and covered_by != queen_by:
+        raise HTTPException(status_code=422, detail=(
+            "The player who pockets the queen must cover it with their own coin."))
 
 
 def _authorise_match(admin_db, match_id: str, admin, action: str):
@@ -258,6 +305,9 @@ async def add_board(id: str, admin = Depends(verify_admin)):
     try:
         match, tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.add_board")
+        assert_tournament_not_terminal(tournament, "change its boards")
+        if match.get("result_confirmed"):
+            raise HTTPException(status_code=409, detail="Reopen this result before changing its boards.")
         rules = (tournament or {}).get("rules") or {}
         if rules.get("setWinnerRule") == "target_points":
             boards = admin_db.table("boards").select("*").eq("match_id", id).execute().data or []
@@ -278,6 +328,13 @@ async def add_board(id: str, admin = Depends(verify_admin)):
                 "tie_break_required": False,
             }).eq("id", id).execute()
             return serialize_board(row)
+
+        if set_layout(match, rules)[0] > 1:
+            raise HTTPException(status_code=409, detail=(
+                "A multi-game match can add a board only to decide a tied game."))
+        if match.get("status") == "completed":
+            raise HTTPException(status_code=409, detail=(
+                "This match is complete. Reopen or correct its result before adding boards."))
 
         # Count existing boards
         boards_res = admin_db.table("boards").select("board_number").eq("match_id", id).execute()
@@ -327,20 +384,28 @@ async def resize_match_boards(id: str, boards: int = Query(..., ge=1, le=31),
     """
     admin_db = get_admin_db()
     try:
-        _authorise_match(admin_db, id, admin, "match.add_board")
+        match, tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.add_board")
+        assert_tournament_not_terminal(tournament, "resize its boards")
+        if match.get("result_confirmed") or match.get("status") == "completed":
+            raise HTTPException(status_code=409, detail=(
+                "A completed match cannot have its board limit changed."))
+        if set_layout(match, (tournament or {}).get("rules") or {})[0] > 1:
+            raise HTTPException(status_code=409, detail=(
+                "Resize each game through the tournament rules before fixtures are played."))
 
         existing = admin_db.table("boards").select("*").eq(
             "match_id", id).order("board_number").execute().data or []
         played = [b for b in existing if b.get("status") == "completed"
                   or (b.get("player1_score") or 0) or (b.get("player2_score") or 0)]
 
-        if boards < len(played):
+        if played:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "This match already has {} board(s) with a result on them, so it "
-                    "cannot be shortened to {}."
-                ).format(len(played), boards),
+                    "This match already has a board result. Changing the board limit now "
+                    "would change its win condition."
+                ),
             )
 
         added = removed = 0
@@ -398,7 +463,15 @@ async def remove_unplayed_boards(id: str, admin = Depends(verify_admin)):
     """
     admin_db = get_admin_db()
     try:
-        _authorise_match(admin_db, id, admin, "match.add_board")
+        match, tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.add_board")
+        assert_tournament_not_terminal(tournament, "remove its boards")
+        if match.get("result_confirmed"):
+            raise HTTPException(status_code=409, detail="Reopen this result before removing boards.")
+        rules = (tournament or {}).get("rules") or {}
+        if set_layout(match, rules)[0] > 1 or rules.get("setWinnerRule") == "target_points":
+            raise HTTPException(status_code=409, detail=(
+                "Configured games keep their board limit. Use a deciding board for a tie."))
 
         boards = admin_db.table("boards").select("*").eq(
             "match_id", id).order("board_number").execute().data or []
@@ -434,9 +507,30 @@ async def remove_unplayed_boards(id: str, admin = Depends(verify_admin)):
             admin_db.table("boards").delete().eq("id", b["id"]).execute()
 
         remaining = len(boards) - len(removable)
-        # Bring the configured length back in line with what is actually there,
-        # so the win condition matches the match being played.
-        admin_db.table("matches").update({"max_boards": remaining}).eq("id", id).execute()
+        # Bring the win condition and the result back into agreement. Under
+        # remaining-coins scoring an extra pending board prevented completion;
+        # simply deleting it left the row live with no winner even though all
+        # remaining boards had been played.
+        kept = [b for b in boards if b not in removable]
+        baseline = {**match, "max_boards": remaining}
+        if match.get("status") == "completed":
+            baseline["status"] = "live"
+        decided = recalculate_match_scores(baseline, kept, rules)
+        patch = {
+            "max_boards": remaining,
+            "player1_board_wins": decided["player1BoardWins"],
+            "player2_board_wins": decided["player2BoardWins"],
+            "player1_total_points": decided["player1TotalPoints"],
+            "player2_total_points": decided["player2TotalPoints"],
+            "winner_id": decided["winnerId"],
+            "winner_name": decided["winnerName"],
+            "status": decided["status"],
+            "match_completed_at": decided.get("matchCompletedAt"),
+        }
+        if board_detail_available(admin_db):
+            patch["tie_break_required"] = decided.get("tieBreakRequired", False)
+            patch["tie_break_rule"] = decided.get("tieBreakRule")
+        admin_db.table("matches").update(patch).eq("id", id).execute()
 
         record_audit(
             admin_db, actor=admin, action="match.remove_unplayed_boards",
@@ -495,6 +589,7 @@ async def update_board(
         # tournament, which is precisely what the ownership model exists to stop.
         match_data, tournament_row = _authorise_match_with_tournament(
             admin_db, id, admin, "match.score")
+        _assert_league_standings_mutable(admin_db, match_data)
 
         if match_data.get("result_confirmed"):
             # A confirmed result is the official record, and it may already
@@ -522,6 +617,8 @@ async def update_board(
                    if (b.get("set_number") or 1) == wanted), None)
         if pb is None:
             raise HTTPException(status_code=404, detail="Board not found")
+        if data.status not in ("pending", "in_progress", "completed"):
+            raise HTTPException(status_code=422, detail="Invalid board status.")
 
         if pb.get("locked") and not override:
             raise HTTPException(
@@ -538,8 +635,21 @@ async def update_board(
         # scoring, silently re-scored under the classic formula.
         corrected_rules = ((tournament_row or {}).get("rules") or {})
         corrected_mode = scoring_mode(corrected_rules)
+        if corrected_mode == "official_icf":
+            if not board_detail_available(admin_db):
+                raise HTTPException(status_code=503, detail=(
+                    "Official carrom scoring needs board detail migration 005."))
+            if data.status == "completed" and any(
+                b.get("status") == "completed"
+                and (b.get("set_number") or 1) == wanted
+                and b.get("board_number", 0) > board_number
+                for b in boards
+            ):
+                raise HTTPException(status_code=409, detail=(
+                    "Correct the latest played board first. A score earlier in this game "
+                    "can change whether later queen bonuses are legal."))
 
-        if corrected_mode == "remaining_coins":
+        if corrected_mode in ("remaining_coins", "official_icf"):
             # A correction restates the observations, so it is scored from them
             # rather than from the two numbers, which are outputs not inputs.
             # Anything the correction does not mention keeps what the board
@@ -550,6 +660,14 @@ async def update_board(
                     return value
                 return pb.get(stored, fallback) if pb.get(stored) is not None else fallback
 
+            if corrected_mode == "official_icf" and data.status == "completed":
+                _validate_official_observation(
+                    restated("board_winner", "board_winner", "none"),
+                    restated("coins_remaining_with", "coins_remaining_with"),
+                    restated("coins_remaining", "coins_remaining"),
+                    restated("queen_pocketed_by", "queen_pocketed_by") or data.queen_claimed_by,
+                    restated("queen_covered_by", "queen_covered_by"),
+                )
             outcome = board_result(
                 winner=restated("board_winner", "board_winner", "none"),
                 p1_coins_pocketed=restated("p1_coins_pocketed", "p1_coins_pocketed"),
@@ -561,6 +679,10 @@ async def update_board(
                 queen_covered_by=restated("queen_covered_by", "queen_covered_by"),
                 p1_penalty=restated("p1_penalty", "p1_penalty", 0) or 0,
                 p2_penalty=restated("p2_penalty", "p2_penalty", 0) or 0,
+                game_points_before=(
+                    _official_game_points(boards, wanted, board_number,
+                                          restated("board_winner", "board_winner", "none"))
+                    if corrected_mode == "official_icf" else 0),
                 rules=corrected_rules,
             )
             c_p1, c_p2 = outcome["player1_score"], outcome["player2_score"]
@@ -632,7 +754,8 @@ async def update_board(
             "player1_score": c_p1,
             "player2_score": c_p2,
             "status": data.status,
-            "board_winner": data.board_winner or "none",
+            "board_winner": (data.board_winner if data.board_winner is not None
+                             else pb.get("board_winner") or "none"),
             "queen_claimed_by": data.queen_claimed_by,
             "queen_covered": data.queen_covered,
             "fouls_player1": data.fouls_player1,
@@ -642,7 +765,7 @@ async def update_board(
             "notes": data.notes
         }
 
-        if corrected_mode == "remaining_coins":
+        if corrected_mode in ("remaining_coins", "official_icf"):
             # Store what the correction observed, not just what it scored, so a
             # second correction reads the current board rather than the original.
             board_patch.update({
@@ -660,6 +783,24 @@ async def update_board(
                 "p1_penalty": restated("p1_penalty", "p1_penalty", 0) or 0,
                 "p2_penalty": restated("p2_penalty", "p2_penalty", 0) or 0,
                 "scoring_warnings": outcome["warnings"] or None,
+            })
+
+        if corrected_mode == "official_icf" and data.status != "completed":
+            # To correct an earlier game score, first roll back later boards
+            # from latest to earliest. Clear their lock and observations so
+            # they can be played back in order with the right queen threshold.
+            c_p1 = c_p2 = 0
+            board_patch.update({
+                "player1_score": 0, "player2_score": 0,
+                "board_winner": "none", "queen_claimed_by": "none",
+                "queen_covered": False, "coins_remaining_with": None,
+                "coins_remaining": None, "queen_pocketed_by": "none",
+                "queen_covered_by": "none", "queen_status": None,
+                "queen_awarded_to": "none", "base_points": 0,
+                "queen_bonus": 0, "p1_penalty": 0, "p2_penalty": 0,
+                "scoring_warnings": None, "locked": False,
+                "confirmed_by": None, "confirmed_at": None,
+                "completed_at": None,
             })
 
         detail_available = board_detail_available(admin_db)
@@ -781,7 +922,11 @@ async def submit_board(
     try:
         match_data, tournament_row = _authorise_match_with_tournament(
             admin_db, id, admin, "match.score")
+        _assert_league_standings_mutable(admin_db, match_data)
         assert_match_scorable(match_data)
+        if match_data.get("status") == "completed":
+            raise HTTPException(status_code=409, detail=(
+                "This match is complete. Correct a board or reopen the result instead."))
 
         boards = admin_db.table("boards").select("*").eq("match_id", id).order("board_number").execute().data or []
 
@@ -799,8 +944,16 @@ async def submit_board(
                     board_number, set_number),
             )
 
+        target_board = next(b for b in boards if is_target(b))
+        if target_board.get("status") == "completed" or target_board.get("locked"):
+            raise HTTPException(status_code=409, detail=(
+                "This board has already been scored. Use the board correction action with a reason."))
+
         rules = ((tournament_row or {}).get("rules") or {})
         mode = scoring_mode(rules)
+        if mode == "official_icf" and not board_detail_available(admin_db):
+            raise HTTPException(status_code=503, detail=(
+                "Official carrom scoring needs board detail migration 005."))
         official_game = rules.get("setWinnerRule") == "target_points"
         if official_game:
             games = summarise_sets(match_data, boards, rules)
@@ -821,13 +974,19 @@ async def submit_board(
 
         validate_board_score(
             data.p1_score, data.p2_score, match_data, data.queen_claimed_by,
-            allow_scoreless_queen=(mode == "remaining_coins"),
+            allow_scoreless_queen=(mode in ("remaining_coins", "official_icf")),
         )
 
-        if mode == "remaining_coins":
+        if mode in ("remaining_coins", "official_icf"):
             # The umpire's observations are scored server-side. Each one is
             # taken as given: the winner, the queen and the coins left on the
             # board are three separate facts and none is inferred from another.
+            if mode == "official_icf":
+                _validate_official_observation(
+                    data.board_winner, data.coins_remaining_with, data.coins_remaining,
+                    data.queen_pocketed_by or data.queen_claimed_by,
+                    data.queen_covered_by,
+                )
             outcome = board_result(
                 winner=data.board_winner or "none",
                 # Passed through as-is: the engine treats None as "not counted"
@@ -842,6 +1001,9 @@ async def submit_board(
                 queen_covered_by=data.queen_covered_by,
                 p1_penalty=data.p1_penalty or 0,
                 p2_penalty=data.p2_penalty or 0,
+                game_points_before=(
+                    _official_game_points(boards, set_number, board_number, data.board_winner)
+                    if mode == "official_icf" else 0),
                 rules=rules,
             )
             p1_final = outcome["player1_score"]
@@ -904,7 +1066,12 @@ async def submit_board(
                 "player1_score": p1_final,
                 "player2_score": p2_final,
                 "status": "completed",
-                "board_winner": data.board_winner or "none",
+                # Infer from raw coin counts, before adding the queen; the
+                # queen can belong to the losing side in a custom game.
+                "board_winner": (data.board_winner if data.board_winner is not None
+                                 else "player1" if data.p1_score > data.p2_score
+                                 else "player2" if data.p2_score > data.p1_score
+                                 else "none"),
                 "queen_claimed_by": data.queen_claimed_by,
                 "queen_covered": data.queen_covered,
                 "completed_at": datetime.utcnow().isoformat(),
@@ -1022,6 +1189,8 @@ async def confirm_match(
     try:
         m, confirm_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.confirm")
+        if not m.get("result_confirmed"):
+            _assert_league_standings_mutable(admin_db, m)
 
         confirm_rules = (confirm_tournament or {}).get("rules") or {}
         if not m.get("winner_id") and confirm_rules.get("setWinnerRule") == "target_points":
@@ -1228,6 +1397,8 @@ async def reopen_match(id: str, data: MatchReopenSchema, admin = Depends(verify_
                 ),
             )
 
+        _assert_league_standings_mutable(admin_db, match)
+
         # The winner may already be playing the next round. Taking their result
         # back while that match is under way would leave a player in a match
         # they may no longer have qualified for, with boards already played
@@ -1410,6 +1581,7 @@ async def resolve_tie_break(id: str, data: TieBreakSchema, admin = Depends(verif
     try:
         match, tb_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.confirm")
+        _assert_league_standings_mutable(admin_db, match)
 
         if match.get("result_confirmed"):
             raise HTTPException(
@@ -1517,6 +1689,7 @@ async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_
     try:
         match, walkover_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.walkover")
+        _assert_league_standings_mutable(admin_db, match)
 
         if match.get("result_confirmed"):
             raise HTTPException(
@@ -1786,6 +1959,8 @@ async def remove_match(
     try:
         match, _tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "tournament.manage")
+        assert_tournament_not_terminal(_tournament, "edit its fixtures")
+        _assert_league_standings_mutable(admin_db, match)
         tournament_id = match["tournament_id"]
 
         try:
@@ -1910,6 +2085,9 @@ async def update_match_fixture(
         moving_stage = data.stage is not None and data.stage != match.get("stage")
 
         if repairing or moving_stage:
+            _assert_league_standings_mutable(admin_db, match)
+            if data.stage == "league":
+                _assert_league_standings_mutable(admin_db, {**match, "stage": "league"})
             boards = admin_db.table("boards").select(
                 "id, status, player1_score, player2_score"
             ).eq("match_id", id).execute().data or []
@@ -1996,14 +2174,46 @@ async def update_match_fixture(
                 status_code=422,
                 detail="Nothing to change. Send at least one field to update.")
 
-        warnings.extend(_schedule_clashes(
-            admin_db, match, tournament_id,
-            patch.get("scheduled_date", match.get("scheduled_date")),
-            patch.get("scheduled_time", match.get("scheduled_time")),
-            patch.get("board_number", match.get("board_number")),
-            (patch.get("player1_id", match.get("player1_id")),
-             patch.get("player2_id", match.get("player2_id"))),
-        ))
+        # Use the same duration, rest and participant-level check as schedule
+        # publication. An exact-start comparison missed overlapping matches
+        # (10:00 and 10:15 on the same board) and two different doubles teams
+        # containing the same player.
+        all_matches = admin_db.table("matches").select("*").eq(
+            "tournament_id", tournament_id).execute().data or []
+        proposed_matches = [{**row, **patch} if row.get("id") == id else row
+                            for row in all_matches]
+        team_ids = {side for row in proposed_matches if row.get("type") == "doubles"
+                    for side in (row.get("player1_id"), row.get("player2_id")) if side}
+        team_members = {}
+        if team_ids:
+            teams = admin_db.table("teams").select("id, player1_id, player2_id").in_(
+                "id", list(team_ids)).execute().data or []
+            team_members = {team["id"]: [pid for pid in (
+                team.get("player1_id"), team.get("player2_id")) if pid]
+                            for team in teams}
+        rules = (_tournament or {}).get("rules") or {}
+        def conflicts(rows):
+            return detect_schedule_conflicts(
+                rows, team_members,
+                int(rules.get("matchDurationMinutes") or 30),
+                int(rules.get("restTimeMinutes") if rules.get("restTimeMinutes") is not None else 10),
+                tournament_start_date=_tournament.get("tournament_start_date"),
+                tournament_end_date=_tournament.get("tournament_end_date"),
+                number_of_boards=_tournament.get("number_of_boards"),
+            )
+        def signature(conflict):
+            return (conflict["type"], tuple(sorted(str(n) for n in conflict["matchNumbers"])))
+        before = {signature(c) for c in conflicts(all_matches)}
+        changed_number = match.get("match_number")
+        introduced = [c for c in conflicts(proposed_matches)
+                      if changed_number in c.get("matchNumbers", [])
+                      and signature(c) not in before]
+        if introduced and canonical_tournament_status(
+                _tournament.get("status")) in ("fixture_published", "in_progress"):
+            raise HTTPException(status_code=409, detail=(
+                "This fixture change would conflict with the published schedule: "
+                + "; ".join(c["detail"] for c in introduced)))
+        warnings.extend(c["detail"] for c in introduced)
 
         admin_db.table("matches").update(patch).eq("id", id).execute()
 

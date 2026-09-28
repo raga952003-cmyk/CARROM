@@ -89,8 +89,8 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const restChoices = Array.from(new Set([minimumRest, 1, 2, 5, 10, 15, 20, 30, 45, 60]))
     .filter(minutes => minutes >= minimumRest)
     .sort((left, right) => left - right);
-  // How many league finishers the knockout takes. Powers of two only: any
-  // other size gives the top seeds byes, which the server refuses.
+  // How many league finishers the knockout takes. Group draws can legitimately
+  // have a non-power-of-two total when each group sends the same number.
   const [knockoutSlots, setKnockoutSlots] = useState(8);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [isRegenerateModalOpen, setIsRegenerateModalOpen] = useState(false);
@@ -183,6 +183,15 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   // never shows these controls anyway; `role` still has the final say so a
   // player cannot reach them through a stale access object.
   const canManage = role === 'admin' && (access ? access.canManage : false);
+  const canGenerateDraw = [
+    'registration_closed', 'fixture_generation', 'fixture_published',
+    'scheduled', 'in_progress', 'ongoing'
+  ].includes(tournament.status);
+  const drawUnavailableReason = tournament.status === 'draft'
+    ? 'Open registration, review entries, then close registration before generating fixtures.'
+    : tournament.status === 'registration_open'
+      ? 'Close registration in the Registration tab before generating fixtures.'
+      : 'Fixtures cannot be generated in this tournament state.';
 
   const allMatches = tournament.matches || [];
   const feederCounts = useMemo(() => {
@@ -250,7 +259,42 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
   const leagueMatches = allMatches.filter(m => m.stage === 'league');
   const hasKnockout = allMatches.some(m => m.stage === 'knockout');
   const leagueConfirmed = leagueMatches.filter(m => m.resultConfirmed).length;
-  const canDrawKnockout = leagueMatches.length > 0 && !hasKnockout;
+  const groupedLeague = leagueMatches.some(m =>
+    !!(m.bracketPosition as { group?: string } | undefined)?.group);
+  const knockoutOptions = useMemo(() => {
+    const league = allMatches.filter(m => m.stage === 'league');
+    const categories = Array.from(new Set(league.map(m => m.type)));
+    if (!categories.length) return [];
+    if (league.some(m => !!(m.bracketPosition as { group?: string } | undefined)?.group)) {
+      const perGroup = tournament.rules.qualifiersPerGroup || 2;
+      const totals = categories.map(category => {
+        const groups = new Map<string, Set<string>>();
+        for (const match of league.filter(m => m.type === category)) {
+          const group = (match.bracketPosition as { group?: string } | undefined)?.group;
+          if (!group) return 0;
+          const ids = groups.get(group) || new Set<string>();
+          if (match.player1Id) ids.add(match.player1Id);
+          if (match.player2Id) ids.add(match.player2Id);
+          groups.set(group, ids);
+        }
+        return groups.size && Array.from(groups.values()).every(ids => ids.size >= perGroup)
+          ? groups.size * perGroup : 0;
+      });
+      return totals.every(total => total === totals[0] && total >= 2 && total <= 32)
+        ? [totals[0]] : [];
+    }
+    const smallestField = Math.min(...categories.map(category => new Set(
+      league.filter(m => m.type === category).flatMap(m => [m.player1Id, m.player2Id].filter(Boolean))
+    ).size));
+    return [2, 4, 8, 16, 32].filter(size => size <= smallestField);
+  }, [allMatches, tournament.rules.qualifiersPerGroup]);
+  useEffect(() => {
+    if (knockoutOptions.length && !knockoutOptions.includes(knockoutSlots)) {
+      setKnockoutSlots(knockoutOptions[Math.min(1, knockoutOptions.length - 1)]);
+    }
+  }, [knockoutOptions, knockoutSlots]);
+  const canDrawKnockout = leagueMatches.length > 0 && !hasKnockout && knockoutOptions.length > 0;
+  const hasStartedMatch = allMatches.some(matchHasPlay);
   const isScheduled = tournament.status === 'scheduled' || tournament.status === 'ongoing' || tournament.status === 'completed';
 
   // Group matches by round, within the selected category, and count each one
@@ -337,6 +381,11 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
           )}
           {canManage && (
             <>
+              {!canGenerateDraw && (tournament.status === 'draft' || tournament.status === 'registration_open') && (
+                <span role="status" className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 max-w-sm">
+                  {drawUnavailableReason}
+                </span>
+              )}
               {/* Rest buffer slider/selector */}
               <div className="flex items-center bg-gray-50 px-2.5 py-1.5 rounded-xl border border-gray-200 text-xs">
                 <span className="text-gray-500 mr-2 font-medium">Rest Buffer (min {minimumRest}):</span>
@@ -355,7 +404,8 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                 <button
                   id="generate-fixtures-btn"
                   onClick={runGenerate}
-                  disabled={!!busy}
+                  disabled={!!busy || !canGenerateDraw}
+                  title={!canGenerateDraw ? drawUnavailableReason : 'Generate the draw from final approved entries'}
                   className="px-4 py-2 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md transition-all flex items-center gap-1.5 disabled:opacity-50"
                 >
                   {busy === 'generate'
@@ -370,7 +420,8 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                   <button
                     id="generate-fixtures-btn"
                     onClick={() => setIsRegenerateModalOpen(true)}
-                    disabled={!!busy}
+                    disabled={!!busy || !canGenerateDraw}
+                    title={!canGenerateDraw ? drawUnavailableReason : 'Replace the existing draw'}
                     className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-[#0B5D3B] text-xs font-bold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1.5 disabled:opacity-50"
                   >
                     {busy === 'generate'
@@ -388,9 +439,11 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                         className="bg-transparent text-xs font-bold text-indigo-900 focus:outline-hidden disabled:opacity-50"
                         title="How many league finishers go through"
                       >
-                        <option value={4}>Top 4</option>
-                        <option value={8}>Top 8</option>
-                        <option value={16}>Top 16</option>
+                        {knockoutOptions.map(size => (
+                          <option key={size} value={size}>
+                            {groupedLeague ? `Top ${tournament.rules.qualifiersPerGroup || 2} per group (${size})` : `Top ${size}`}
+                          </option>
+                        ))}
                       </select>
                       <button
                         id="draw-knockout-btn"
@@ -447,7 +500,10 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                     <button
                       id="reschedule-btn"
                       onClick={() => setIsRescheduleModalOpen(true)}
-                      disabled={!!busy}
+                      disabled={!!busy || hasStartedMatch}
+                      title={hasStartedMatch
+                        ? 'A match has started. Edit only the remaining fixtures individually.'
+                        : 'Build and republish a new schedule for every unplayed match.'}
                       className="px-3.5 py-2 bg-amber-50 hover:bg-[#D4A72C]/10 text-amber-800 text-xs font-bold rounded-xl border border-amber-200 transition-colors flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {busy === 'reschedule'
@@ -455,6 +511,11 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
                         : <Calendar className="w-3.5 h-3.5 text-[#D4A72C]" />}
                       <span>{busy === 'reschedule' ? 'Rescheduling…' : 'Reschedule'}</span>
                     </button>
+                  )}
+                  {tournament.scheduledPublished && hasStartedMatch && (
+                    <span className="text-[11px] text-amber-800 max-w-48">
+                      Match play has started. Edit remaining fixtures individually.
+                    </span>
                   )}
 
                   {/* Regenerating the draw discards every board already scored,
@@ -612,12 +673,15 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
             Fixtures Have Not Been Generated Yet
           </h4>
           <p className="text-xs text-gray-500 max-w-md mx-auto mb-4">
-            Click "Generate Fixtures" to automatically compute all round-robin pairings or seeded knockout brackets according to tournament rules.
+            {canGenerateDraw
+              ? 'Generate fixtures from the final approved entry list using the tournament rules.'
+              : drawUnavailableReason}
           </p>
           {canManage && (
             <button
               onClick={runGenerate}
-              disabled={!!busy}
+              disabled={!!busy || !canGenerateDraw}
+              title={!canGenerateDraw ? drawUnavailableReason : 'Generate the draw from final approved entries'}
               className="px-5 py-2.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl shadow-md inline-flex items-center gap-2 disabled:opacity-50"
             >
               {busy === 'generate'
@@ -1003,7 +1067,7 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
         onClose={() => setIsRescheduleModalOpen(false)}
         onConfirm={runReschedule}
         title="Reschedule the published schedule?"
-        description={`Every match — including any already played — is given a fresh board and time using the ${restMinutes}-minute rest buffer, and the new schedule is published straight away, so every participant is notified again. Scores and results are not touched.`}
+        description={`Every unplayed match is given a fresh board and time using the ${restMinutes}-minute rest buffer. The new schedule is published straight away and participants are notified again.`}
         confirmLabel="Reschedule and Republish"
         variant="warning"
       />

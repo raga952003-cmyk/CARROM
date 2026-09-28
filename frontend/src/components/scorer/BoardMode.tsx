@@ -107,6 +107,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
     if (!tournament) return [];
     return (tournament.matches || [])
       .filter(m => (m.boardNumber || 1) === boardNumber && !m.resultConfirmed)
+      .filter(m => m.status !== 'cancelled' && m.status !== 'postponed')
       .filter(m => m.player1Id && m.player2Id)
       .sort((a, b) =>
         compareMatches(a, b));
@@ -188,7 +189,24 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   }
 
   const rules: any = tournament.rules || {};
-  const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
+  const usesRemainingCoins = rules.scoringMode === 'remaining_coins' || rules.scoringMode === 'official_icf';
+  const usesOfficialRules = rules.scoringMode === 'official_icf';
+  const priorGamePoints = { player1: 0, player2: 0 };
+  if (activeBoard) {
+    for (const board of match.boards || []) {
+      if (board.status !== 'completed' ||
+          (board.setNumber || 1) !== (activeBoard.setNumber || 1) ||
+          board.boardNumber >= activeBoard.boardNumber) continue;
+      priorGamePoints.player1 += board.player1Score || 0;
+      priorGamePoints.player2 += board.player2Score || 0;
+    }
+  }
+  const invalidOfficialEntry = usesOfficialRules && (
+    obs.winner === 'none' ||
+    obs.coinsRemainingWith !== (obs.winner === 'player1' ? 'player2' : 'player1') ||
+    obs.coinsRemaining < 0 || obs.coinsRemaining > 9 ||
+    (obs.queenCoveredBy !== 'none' && obs.queenCoveredBy !== obs.queenPocketedBy)
+  );
 
   const decided = match.status === 'completed' || !!match.winnerId;
 
@@ -239,7 +257,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
           <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">{note}</div>
         )}
 
-        {match.status === 'scheduled' && (
+        {(match.status === 'scheduled' || match.status === 'ready') && (
           <button
             disabled={busy}
             onClick={() => run(() => startMatch(tournament.id, match.id), 'Match started.')}
@@ -308,7 +326,8 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
               </div>
             </div>
             {usesRemainingCoins ? (
-              <BoardResultForm match={match} rules={rules} value={obs} onChange={setObs} />
+              <BoardResultForm match={match} rules={rules} value={obs} onChange={setObs}
+                priorGamePoints={priorGamePoints} />
             ) : (
               <>
             <Stepper label={match.player1Name} value={p1} onChange={setP1} highlight={p1 > p2} />
@@ -371,7 +390,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
             )}
 
             <button
-              disabled={busy || (usesRemainingCoins
+              disabled={busy || invalidOfficialEntry || (usesRemainingCoins
                 ? obs.winner === 'none' && obs.queenPocketedBy === 'none'
                 : p1 === 0 && p2 === 0)}
               onClick={() => run(async () => {
@@ -379,7 +398,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                 // the server writes to set 1 whatever the umpire is scoring.
                 const setNumber = activeBoard.setNumber;
                 if (usesRemainingCoins) {
-                  const preview = previewBoard(obs, rules);
+                  const preview = previewBoard(obs, rules, undefined, priorGamePoints);
                   await submitBoardScore(tournament.id, match.id, activeBoard.boardNumber, {
                     ...(setNumber ? { setNumber } : {}),
                     p1Score: preview.p1,

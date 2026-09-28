@@ -68,8 +68,8 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
       return;
     }
     if (file.size === 0 || file.size > 5 * 1024 * 1024 ||
-        !['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(file.type)) {
-      setError('Choose a JPEG, PNG, WebP, or PDF receipt up to 5 MB.');
+        !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setError('Choose a JPEG, PNG, or WebP receipt image up to 5 MB.');
       return;
     }
     setSubmitting(true);
@@ -96,7 +96,7 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
       <div>
         <h4 className="font-bold text-sm">Pay ₹{amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} with GPay / UPI</h4>
         <p className="mt-1">Send payment to this tournament's UPI ID: <strong className="select-all break-all">{tournament.gpayUpiId}</strong></p>
-        <p className="mt-1 text-blue-800">Upload the receipt and transaction reference after paying. Your entry stays pending until an organiser checks that the money arrived.</p>
+        <p className="mt-1 text-blue-800">Upload the receipt and transaction reference after paying. Image receipts may be checked for reused screenshots and read by Google Cloud Vision for the reference and amount. Your entry stays pending until an organiser checks that the money arrived.</p>
         <button type="button" onClick={() => void refreshStatus()} disabled={loading || submitting}
           className="mt-2 rounded-lg border border-blue-300 bg-white px-3 py-1.5 font-semibold text-blue-900 disabled:opacity-50">
           Refresh proof status
@@ -119,8 +119,8 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
               placeholder="Transaction ID / UTR" maxLength={100} required
               className="mt-1 block w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-gray-900" />
           </label>
-          <label className="block font-semibold">Payment receipt (JPEG, PNG, WebP, PDF; up to 5 MB)
-            <input type="file" accept="image/jpeg,image/png,image/webp,application/pdf"
+          <label className="block font-semibold">Payment receipt image (JPEG, PNG, WebP; up to 5 MB)
+            <input type="file" accept="image/jpeg,image/png,image/webp"
               onChange={e => setFile(e.target.files?.[0] || null)} required
               className="mt-1 block w-full text-xs" />
           </label>

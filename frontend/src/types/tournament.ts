@@ -17,7 +17,7 @@ export type TournamentStatus =
   | 'ongoing'
   | 'completed'
   | 'cancelled';
-export type MatchStatus = 'scheduled' | 'live' | 'paused' | 'completed';
+export type MatchStatus = 'scheduled' | 'ready' | 'live' | 'paused' | 'completed' | 'postponed' | 'cancelled';
 export type BoardStatus = 'pending' | 'in_progress' | 'completed';
 export type UserRole = 'admin' | 'player';
 
@@ -208,8 +208,11 @@ export interface Match {
   nextMatchId?: string;
   nextMatchSlot?: 'player1' | 'player2';
   bracketPosition?: {
-    round: number;
-    matchIndex: number;
+    round?: number;
+    matchIndex?: number;
+    group?: string;
+    manual?: boolean;
+    addedBy?: string;
   };
   
   auditHistory: ScoreAuditLog[];
@@ -224,10 +227,11 @@ export interface TournamentRules {
   queenPoints: number; // usually 3 points
   /**
    * 'classic'         — each player keeps the coins they pocketed.
-   * 'remaining_coins' — only the board winner scores, and scores the coins the
-   *                     loser still had on the board (standard tournament carrom).
+   * 'remaining_coins' — configurable house scoring using coins left on the board.
+   * 'official_icf'    — federation scoring with winner-only points, a covered
+   *                     queen, score eligibility, and a 12-point board cap.
    */
-  scoringMode?: 'classic' | 'remaining_coins';
+  scoringMode?: 'classic' | 'remaining_coins' | 'official_icf';
   /** Coins per side, 9 in standard carrom. */
   coinsPerSide?: number;
   /** An uncovered queen returns to the board and scores nothing. */

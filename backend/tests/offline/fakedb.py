@@ -259,6 +259,9 @@ class Query:
                 row = dict(item)
                 row.setdefault("id", str(uuid.uuid4()))
                 row.setdefault("created_at", _now())
+                if self.table == "payment_proofs":
+                    row.setdefault("status", "pending")
+                    row.setdefault("submitted_at", _now())
                 existing = None
                 for r in rows:
                     if str(r.get("id")) == str(row["id"]):
@@ -490,6 +493,7 @@ class FakeSupabase:
         self.postgrest = _Postgrest(self)
         self.rpc_calls = []
         self.registration_auto_approval_ready = True
+        self.registration_draw_atomicity_ready = True
 
     # -- constraints ------------------------------------------------------
     def enforce_foreign_keys(self, table, row, changed=None):
@@ -579,11 +583,275 @@ class _Rpc:
             return self._delete_match_safely()
         if self.name == "replace_tournament_fixtures":
             return self._replace_tournament_fixtures()
+        if self.name == "replace_tournament_fixtures_checked":
+            return self._replace_tournament_fixtures_checked()
         if self.name == "update_match_schedule_batch":
             return self._update_match_schedule_batch()
+        if self.name == "record_manual_entry_payment":
+            return self._record_manual_entry_payment()
+        if self.name == "payment_proof_similar_images":
+            return self._payment_proof_similar_images()
+        if self.name == "payment_proof_reconsideration_ready":
+            return Result(True)
+        if self.name == "registration_draw_atomicity_ready":
+            return Result(self.db.registration_draw_atomicity_ready)
+        if self.name == "review_payment_proof_v2":
+            return self._review_payment_proof_v2()
         # Unknown RPCs behave like a database without that migration applied.
         raise PostgrestError(
             'Could not find the function public.%s' % self.name, "PGRST202")
+
+    def _payment_proof_similar_images(self):
+        fingerprint = self.params.get("p_hash", "")
+        distance = self.params.get("p_max_distance", 4)
+        if not re.fullmatch(r"[0-9a-f]{16}", fingerprint) or not 0 <= distance <= 8:
+            raise PostgrestError("Invalid receipt image fingerprint", "P0001")
+        similar = []
+        for row in reversed(self.db.rows("payment_proofs")):
+            prior = row.get("image_dhash")
+            if prior and (int(prior, 16) ^ int(fingerprint, 16)).bit_count() <= distance:
+                similar.append({"proof_id": row["id"],
+                                "registration_id": row["registration_id"],
+                                "transaction_reference": row["transaction_reference"],
+                                "distance": (int(prior, 16) ^ int(fingerprint, 16)).bit_count()})
+            if len(similar) == 5:
+                break
+        return Result(similar)
+
+    def _review_payment_proof_v2(self):
+        """Model 026's settlement, reversal of a rejection, and rollback."""
+        params = self.params
+        proof_id = params.get("p_proof_id")
+        actor_id = params.get("p_reviewer_id")
+        decision = params.get("p_decision")
+        note = str(params.get("p_note") or "").strip()
+        before = deepcopy(self.db.tables)
+        try:
+            if decision not in ("approved", "rejected"):
+                raise PostgrestError("Decision must be approved or rejected", "P0001")
+            proof = next((p for p in self.db.tables.get("payment_proofs", [])
+                          if str(p.get("id")) == str(proof_id)), None)
+            if not proof:
+                raise PostgrestError("Payment proof %s does not exist" % proof_id, "P0001")
+            entry = next((r for r in self.db.tables.get("registrations", [])
+                          if str(r.get("id")) == str(proof["registration_id"])), None)
+            tournament = next((t for t in self.db.rows("tournaments")
+                               if str(t.get("id")) == str(proof["tournament_id"])), None)
+            if not entry or not tournament or entry.get("tournament_id") != proof.get("tournament_id"):
+                raise PostgrestError("Payment proof is not linked to a valid registration", "P0001")
+            actor = next((p for p in self.db.rows("profiles")
+                          if str(p.get("id")) == str(actor_id)), None)
+            manager = any(a.get("tournament_id") == proof["tournament_id"]
+                          and a.get("user_id") == actor_id
+                          and a.get("status") == "approved"
+                          and a.get("access_role") == "manager"
+                          for a in self.db.rows("tournament_access"))
+            if not actor or actor.get("role") != "admin" or not (
+                    params.get("p_allow_any_admin")
+                    or tournament.get("owner_id") is None
+                    or tournament.get("owner_id") == actor_id or manager):
+                raise PostgrestError("Only this tournament owner or an approved manager may review payment proof", "P0001")
+            if proof.get("status") != "pending" and not (
+                    proof.get("status") == "rejected" and decision == "approved"):
+                if proof.get("status") == decision:
+                    payment = next((p for p in self.db.rows("payments")
+                                    if p.get("id") == proof.get("payment_id")), None)
+                    return Result({"proof": deepcopy(proof), "payment": deepcopy(payment),
+                                   "registration": deepcopy(entry)})
+                raise PostgrestError("This payment proof has already been reviewed", "P0001")
+            reconsidered = proof.get("status") == "rejected"
+            if reconsidered and len(note) < 15:
+                raise PostgrestError("Explain the corrected rejection in at least 15 characters", "P0001")
+            previous = deepcopy(proof)
+            payment = None
+            if decision == "approved":
+                if (entry.get("status") == "rejected"
+                        or tournament.get("status") in ("cancelled", "completed")
+                        or entry.get("payment_status") != "pending"):
+                    raise PostgrestError("Entry cannot accept proof approval", "P0001")
+                fee = entry.get("fee_paise")
+                if fee is None:
+                    fee = round(float(tournament.get("entry_fee") or 0) * 100)
+                if fee <= 0 or proof.get("amount_paise") != fee:
+                    raise PostgrestError("Proof amount does not match the registration fee", "P0001")
+                if any(p.get("registration_id") == entry["id"] and p.get("status") == "paid"
+                       for p in self.db.rows("payments")):
+                    raise PostgrestError("A payment is already recorded for this registration", "P0001")
+                if reconsidered and any(p.get("registration_id") == entry["id"]
+                                        and p.get("id") != proof_id and p.get("status") == "pending"
+                                        for p in self.db.rows("payment_proofs")):
+                    raise PostgrestError("Review the newer pending proof before reconsidering this one", "P0001")
+                if any(p.get("method") in ("upi", "bank_transfer", "gpay_upi")
+                       and p.get("status") in ("paid", "refunded", "refund_due")
+                       and re.sub(r"[^A-Z0-9]", "", str((p.get("notes") or {}).get("reference") or "").upper()) == proof["transaction_reference"]
+                       for p in self.db.rows("payments")):
+                    raise PostgrestError("This transaction reference is already recorded in the payment ledger", "P0001")
+                payment = self.db.table("payments").insert({
+                    "registration_id": entry["id"], "tournament_id": proof["tournament_id"],
+                    "razorpay_order_id": "gpay-proof-" + str(proof_id),
+                    "amount_paise": fee, "status": "paid", "method": "gpay_upi",
+                    "paid_at": _now(),
+                    "notes": {"reference": proof["transaction_reference"],
+                              "proof_id": proof_id, "reviewed_by": actor_id,
+                              "reconsidered": reconsidered},
+                }).execute().data[0]
+                entry.update({"payment_status": "paid", "status": "approved"})
+                proof.update({"status": "approved", "payment_id": payment["id"]})
+            else:
+                if len(note) < 5:
+                    raise PostgrestError("A rejection needs a reason of at least 5 characters", "P0001")
+                proof["status"] = "rejected"
+            proof.update({"reviewed_by": actor_id, "reviewed_at": _now(),
+                          "review_note": note or None})
+            self.db.table("audit_logs").insert({
+                "user_id": actor_id,
+                "action": "payment.proof_reconsidered_approved" if reconsidered else "payment.proof_" + decision,
+                "entity_type": "payment_proof", "entity_id": str(proof_id),
+                "previous_state": previous, "new_state": deepcopy(proof),
+                "request_context": {"receiving_account_confirmed": decision == "approved",
+                                    "reconsidered": reconsidered, "review_note": note},
+            }).execute()
+            return Result({"proof": deepcopy(proof), "payment": deepcopy(payment),
+                           "registration": deepcopy(entry)})
+        except Exception:
+            self.db.tables = before
+            raise
+
+    def _record_manual_entry_payment(self):
+        """Model migration 023's all-or-nothing desk settlement."""
+        params = self.params
+        registration_id = params.get("p_registration_id")
+        actor_id = params.get("p_actor_id")
+        method = params.get("p_method")
+        reference = str(params.get("p_reference") or "").strip()
+        if method not in ("cash", "upi", "bank_transfer"):
+            raise PostgrestError("Choose cash, UPI or bank transfer", "P0001")
+        if method != "cash":
+            reference = re.sub(r"[^A-Z0-9]", "", reference.upper())
+            if not 6 <= len(reference) <= 80:
+                raise PostgrestError("Invalid bank or UPI reference", "P0001")
+        elif not 3 <= len(reference) <= 120:
+            raise PostgrestError("Invalid cash receipt reference", "P0001")
+
+        before = deepcopy(self.db.tables)
+        try:
+            registration = next((row for row in self.db.rows("registrations")
+                                 if str(row.get("id")) == str(registration_id)), None)
+            if not registration:
+                raise PostgrestError("Registration does not exist", "P0001")
+            tournament = next((row for row in self.db.rows("tournaments")
+                               if str(row.get("id")) == str(registration["tournament_id"])), None)
+            actor = next((row for row in self.db.rows("profiles")
+                          if str(row.get("id")) == str(actor_id)), None)
+            access = any(row.get("tournament_id") == registration["tournament_id"]
+                         and row.get("user_id") == actor_id
+                         and row.get("status") == "approved"
+                         and row.get("access_role") == "manager"
+                         for row in self.db.rows("tournament_access"))
+            if not actor or actor.get("role") != "admin" or not (
+                    params.get("p_allow_any_admin")
+                    or not tournament.get("owner_id")
+                    or tournament.get("owner_id") == actor_id or access):
+                raise PostgrestError("Only this organiser may record payment", "P0001")
+            paid = next((row for row in self.db.rows("payments")
+                         if row.get("registration_id") == registration_id
+                         and row.get("status") == "paid"), None)
+            if paid:
+                if (not str(paid.get("razorpay_order_id") or "").startswith("manual-")
+                        or paid.get("method") != method
+                        or (paid.get("notes") or {}).get("reference") != reference):
+                    raise PostgrestError("A different payment is already recorded for this entry", "P0001")
+                if (registration.get("payment_status") == "pending"
+                        and registration.get("status") != "rejected"
+                        and tournament.get("status") not in ("cancelled", "completed")):
+                    registration = self.db.table("registrations").update({
+                        "payment_status": "paid", "status": "approved",
+                    }).eq("id", registration_id).execute().data[0]
+                return Result({"payment": paid, "registration": registration})
+            if (registration.get("status") == "rejected"
+                    or tournament.get("status") in ("cancelled", "completed")
+                    or registration.get("payment_status") != "pending"):
+                raise PostgrestError("Entry cannot accept payment", "P0001")
+            if any(row.get("registration_id") == registration_id and row.get("status") == "pending"
+                   for row in self.db.rows("payment_proofs")):
+                raise PostgrestError("A GPay proof is awaiting review", "P0001")
+            fee = registration.get("fee_paise")
+            if fee is None:
+                fee = round(float(tournament.get("entry_fee") or 0) * 100)
+            fee = int(fee)
+            if fee <= 0:
+                raise PostgrestError("This entry has no fee to collect", "P0001")
+            if method != "cash":
+                if any(row.get("transaction_reference") == reference
+                       for row in self.db.rows("payment_proofs")):
+                    raise PostgrestError("This reference was already submitted as proof", "P0001")
+                if any(row.get("method") in ("upi", "bank_transfer", "gpay_upi")
+                       and row.get("status") in ("paid", "refunded", "refund_due")
+                       and re.sub(r"[^A-Z0-9]", "", str((row.get("notes") or {}).get("reference") or "").upper()) == reference
+                       for row in self.db.rows("payments")):
+                    raise PostgrestError("This bank or UPI reference is already recorded", "P0001")
+            payment = self.db.table("payments").insert({
+                "registration_id": registration_id,
+                "tournament_id": registration["tournament_id"],
+                "razorpay_order_id": "manual-" + str(uuid.uuid4()),
+                "amount_paise": fee, "status": "paid", "method": method,
+                "paid_at": _now(),
+                "notes": {"reference": reference, "recorded_by": actor_id},
+            }).execute().data[0]
+            updated = self.db.table("registrations").update({
+                "payment_status": "paid", "status": "approved",
+            }).eq("id", registration_id).execute().data
+            if len(updated) != 1:
+                raise PostgrestError("Registration changed during settlement", "P0001")
+            self.db.table("audit_logs").insert([
+                {"user_id": actor_id, "action": "payment.manual_recorded",
+                 "entity_type": "payment", "entity_id": payment["id"],
+                 "new_state": payment},
+                {"user_id": actor_id, "action": "registration.auto_approved_after_payment",
+                 "entity_type": "registration", "entity_id": registration_id,
+                 "previous_state": registration, "new_state": updated[0]},
+            ]).execute()
+            return Result({"payment": payment, "registration": updated[0]})
+        except Exception:
+            self.db.tables = before
+            raise
+
+    def _replace_tournament_fixtures_checked(self):
+        tournament_id = self.params["p_tournament_id"]
+        tournament = next((t for t in self.db.rows("tournaments")
+                           if t.get("id") == tournament_id), None)
+        if not tournament or tournament.get("status") not in (
+                "registration_closed", "fixture_generation", "fixture_published",
+                "scheduled", "in_progress", "ongoing"):
+            raise PostgrestError("Close registration before generating fixtures", "P0001")
+        settings_snapshot = {
+            "status": tournament.get("status"),
+            "fixtures_generated": tournament.get("fixtures_generated"),
+            "format": tournament.get("format"),
+            "category": tournament.get("category"),
+            "rules": tournament.get("rules"),
+            "number_of_boards": tournament.get("number_of_boards"),
+        }
+        if settings_snapshot != self.params.get("p_tournament_snapshot"):
+            raise PostgrestError("Tournament draw settings changed; reload and retry", "P0001")
+        rows = [r for r in self.db.rows("registrations")
+                if r.get("tournament_id") == tournament_id]
+        if any(r.get("status") == "pending" for r in rows):
+            raise PostgrestError("Resolve every pending registration", "P0001")
+        current_fee = round(float(tournament.get("entry_fee") or 0) * 100)
+        if any(r.get("status") == "approved"
+               and int(r.get("fee_paise") if r.get("fee_paise") is not None else current_fee) > 0
+               and r.get("payment_status") not in ("paid", "waived") for r in rows):
+            raise PostgrestError("Resolve every unpaid approved registration", "P0001")
+        roster = [{
+            "id": r["id"], "type": r["type"],
+            "player_id": r.get("player_id"), "team_id": r.get("team_id"),
+            "payment_status": r.get("payment_status"), "fee_paise": r.get("fee_paise"),
+        } for r in sorted(rows, key=lambda r: r["id"])
+            if r.get("status") == "approved"]
+        if roster != self.params.get("p_approved_roster"):
+            raise PostgrestError("The approved entry list changed during the draw", "P0001")
+        return self._replace_tournament_fixtures()
 
     def _replace_tournament_fixtures(self):
         """Emulate the database RPC's all-or-nothing draw replacement."""

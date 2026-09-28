@@ -38,7 +38,7 @@ def scoring_mode(rules: Optional[Dict[str, Any]]) -> str:
     on 'classic', so their confirmed results keep the totals they were decided on.
     """
     mode = _rule(rules or {}, "scoringMode", "scoring_mode", "classic")
-    return mode if mode in ("classic", "remaining_coins") else "classic"
+    return mode if mode in ("classic", "remaining_coins", "official_icf") else "classic"
 
 
 def recalculate_match_scores(
@@ -93,7 +93,7 @@ def recalculate_match_scores(
         return (_field(match, f"player{n}Id", f"player{n}_id"),
                 _field(match, f"player{n}Name", f"player{n}_name"))
 
-    if scoring_mode(rules) == "remaining_coins":
+    if scoring_mode(rules) in ("remaining_coins", "official_icf"):
         # Every board is played. A side that has already won most boards can
         # still lose on points, so the match is not called early.
         updated_match["tieBreakRequired"] = False
@@ -496,6 +496,7 @@ def board_result(
     queen_covered_by: Optional[str] = "none",
     p1_penalty: int = 0,
     p2_penalty: int = 0,
+    game_points_before: int = 0,
     rules: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
@@ -519,6 +520,7 @@ def board_result(
     must_cover = bool(_rule(rules, "queenMustBeCovered", "queen_must_be_covered", True))
     # Who the queen pays: whoever covered it, or whoever sank it.
     award_to = _rule(rules, "queenAwardTo", "queen_award_to", "coverer")
+    official = scoring_mode(rules) == "official_icf"
 
     warnings: List[str] = []
     winner = winner if winner in SIDES else "none"
@@ -602,9 +604,23 @@ def board_result(
     queen_side = None
     queen_bonus = 0
     if queen_status == "covered" and pocketed_by in SIDES:
-        queen_side = covered_by if (award_to == "coverer" and covered_by in SIDES) else pocketed_by
-        queen_bonus = queen_points
-        if covered_by in SIDES and covered_by != pocketed_by:
+        if official:
+            # ICF Laws 53-54: the queen is credited only to the board winner,
+            # and in a 25-point game only while that winner entered the board
+            # on 21 or fewer game points. The 21-point age-group version
+            # credits it throughout the game.
+            if winner == pocketed_by and (int(_rule(rules, "targetScore", "target_score", 25)) == 21
+                                          or game_points_before <= 21):
+                queen_side = winner
+                queen_bonus = queen_points
+            elif winner == pocketed_by:
+                warnings.append("queen bonus is no longer available after 21 game points")
+            else:
+                warnings.append("the player who covered the queen lost the board, so no queen bonus is scored")
+        else:
+            queen_side = covered_by if (award_to == "coverer" and covered_by in SIDES) else pocketed_by
+            queen_bonus = queen_points
+        if not official and covered_by in SIDES and covered_by != pocketed_by:
             warnings.append(
                 f"{pocketed_by} pocketed the queen but {covered_by} covered it; "
                 f"the {queen_points} points went to {queen_side}"
@@ -624,6 +640,12 @@ def board_result(
         # A board cannot be worth less than nothing; penalties cannot push a
         # side into debt that would then be subtracted from their match total.
         points[s] = max(0, points[s] - penalty[s])
+
+    if official and winner in SIDES:
+        # Nine opposing men plus the three-point queen is the maximum board
+        # score in the ICF Laws. A misconfigured preset must not publish an
+        # impossible board score even if its coin value was raised.
+        points[winner] = min(12, points[winner])
 
     return {
         "player1_score": points["player1"],

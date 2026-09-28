@@ -40,12 +40,18 @@ export interface SideNames {
   player2: string;
 }
 
+export interface PriorGamePoints {
+  player1: number;
+  player2: number;
+}
+
 const SIDE_LABELS: SideNames = { player1: 'Player 1', player2: 'Player 2' };
 
 export function previewBoard(
   obs: BoardObservation,
   rules: Partial<TournamentRules>,
   names: SideNames = SIDE_LABELS,
+  priorGamePoints: PriorGamePoints = { player1: 0, player2: 0 },
 ) {
   // A warning is read by the umpire mid-match, so it names the player rather
   // than the field the value happens to be stored in.
@@ -56,6 +62,41 @@ export function previewBoard(
   const mustCover = rules.queenMustBeCovered !== false;
   const awardTo = rules.queenAwardTo ?? 'coverer';
   const warnings: string[] = [];
+
+  if (rules.scoringMode === 'official_icf') {
+    const winner = obs.winner;
+    const loser = winner === 'player1' ? 'player2' : winner === 'player2' ? 'player1' : 'none';
+    const validCoins = Number.isInteger(obs.coinsRemaining)
+      && obs.coinsRemaining >= 0 && obs.coinsRemaining <= 9;
+    if (winner === 'none') warnings.push('Choose the player who won this board.');
+    if (loser !== 'none' && obs.coinsRemainingWith !== loser) {
+      warnings.push(`The coins left on the board must belong to ${who(loser)}.`);
+    }
+    if (!validCoins) warnings.push('Enter 0 to 9 opposing coins left on the board.');
+    if (obs.queenPocketedBy !== 'none' && obs.queenCoveredBy !== 'none'
+        && obs.queenPocketedBy !== obs.queenCoveredBy) {
+      warnings.push('The queen must be covered by the player who pocketed it.');
+    }
+    if (obs.queenPocketedBy === 'none' && obs.queenCoveredBy !== 'none') {
+      warnings.push('A queen cannot be covered without being pocketed.');
+    }
+    const covered = obs.queenPocketedBy !== 'none'
+      && obs.queenCoveredBy === obs.queenPocketedBy;
+    const queenStatus: 'not_pocketed' | 'covered' | 'returned' =
+      obs.queenPocketedBy === 'none' ? 'not_pocketed' : covered ? 'covered' : 'returned';
+    const eligible = winner !== 'none' && (rules.targetScore === 21 || priorGamePoints[winner] <= 21);
+    const queenBonus = covered && obs.queenPocketedBy === winner && eligible ? 3 : 0;
+    const base = validCoins && obs.coinsRemainingWith === loser && winner !== 'none'
+      ? obs.coinsRemaining : 0;
+    const penalty = winner === 'player1' ? obs.p1Penalty : winner === 'player2' ? obs.p2Penalty : 0;
+    const winnerPoints = Math.min(12, Math.max(0, base + queenBonus - Math.max(0, penalty)));
+    return {
+      p1: winner === 'player1' ? winnerPoints : 0,
+      p2: winner === 'player2' ? winnerPoints : 0,
+      base, queenBonus, queenSide: queenBonus ? winner : 'none' as Side,
+      queenStatus, warnings,
+    };
+  }
 
   let base = 0;
   if (obs.winner !== 'none' && obs.coinsRemainingWith !== 'none') {

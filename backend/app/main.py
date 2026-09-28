@@ -342,6 +342,64 @@ async def health():
         except Exception:
             pending.append("022_auto_approve_settled_registrations")
 
+        # A zero registration id exits before any write. Its specific error
+        # proves migration 023's RPC is installed without collecting money.
+        try:
+            supabase_admin.rpc("record_manual_entry_payment", {
+                "p_registration_id": "00000000-0000-0000-0000-000000000000",
+                "p_actor_id": "00000000-0000-0000-0000-000000000000",
+                "p_method": "cash", "p_reference": "HEALTH-023",
+                "p_allow_any_admin": False,
+            }).execute()
+        except Exception as e:
+            if "Registration does not exist" not in str(e):
+                pending.append("023_atomic_manual_entry_payment")
+
+        # The empty similarity lookup cannot write a proof. It confirms the
+        # image analysis columns and RPC from migration 024 are present.
+        try:
+            supabase_admin.rpc("payment_proof_similar_images", {
+                "p_hash": "0000000000000000", "p_max_distance": 0,
+            }).execute()
+        except Exception:
+            pending.append("024_payment_proof_image_analysis")
+
+        # A missing proof cannot be reviewed, so this probe exits before any
+        # write while confirming the policy-aligned review RPC is installed.
+        try:
+            supabase_admin.rpc("review_payment_proof_v2", {
+                "p_proof_id": "00000000-0000-0000-0000-000000000000",
+                "p_reviewer_id": "00000000-0000-0000-0000-000000000000",
+                "p_decision": "rejected", "p_note": "health check",
+                "p_allow_any_admin": False,
+            }).execute()
+        except Exception as e:
+            if "Payment proof 00000000-0000-0000-0000-000000000000 does not exist" not in str(e):
+                pending.append("025_payment_proof_review_access")
+
+        # Migration 026 replaces the v2 RPC without changing its signature.
+        # A read-only introspection helper distinguishes it from the older
+        # pending-only implementation without touching any real payment.
+        try:
+            ready = supabase_admin.rpc(
+                "payment_proof_reconsideration_ready", {}
+            ).execute().data
+            if ready is not True:
+                pending.append("026_payment_proof_reconsideration")
+        except Exception:
+            pending.append("026_payment_proof_reconsideration")
+
+        # The 027 helper checks both the checked draw RPC and the enabled
+        # registration trigger without writing a fixture or entry.
+        try:
+            ready = supabase_admin.rpc(
+                "registration_draw_atomicity_ready", {}
+            ).execute().data
+            if ready is not True:
+                pending.append("027_registration_draw_atomicity")
+        except Exception:
+            pending.append("027_registration_draw_atomicity")
+
     _pending_cache = pending
     _pending_checked_at = time.monotonic()
     return _health_payload(pending, rpc_state, idem_state, owner_state,

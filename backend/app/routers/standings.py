@@ -286,14 +286,14 @@ async def get_qualified(
 @router.post("/{tournament_id}/promote")
 async def promote_league_qualifiers(
     tournament_id: str,
-    force: bool = Query(False, description="Promote before every league match is confirmed"),
+    force: bool = Query(False, description="Reserved for compatibility; early promotion is disabled"),
     admin = Depends(verify_admin),
 ):
     """
     Fill the knockout bracket from the league standings (spec 68, 74).
 
     Runs automatically when the last league result is confirmed; this endpoint
-    exists to re-run it, or to seed the bracket early with force=true.
+    exists to fill any still-unresolved rank labels after the league finishes.
     """
     admin_db = get_admin_db()
     require_tournament_access(admin_db, tournament_id, admin)
@@ -310,18 +310,21 @@ async def promote_league_qualifiers(
             )
 
         complete, confirmed, total = league_is_complete(matches)
-        if not complete and not force:
+        if not complete:
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"The league is not finished ({confirmed}/{total} results confirmed). "
-                    "Confirm the remaining matches, or pass force=true to seed the bracket now."
+                    "Confirm the remaining matches before seeding the knockout. "
+                    "Early seeding cannot stay correct when later results change the table."
                 ),
             )
-        if knockout_has_started(matches) and not force:
+        # An already played bracket cannot be rewritten, even when all league
+        # matches are complete.
+        if knockout_has_started(matches):
             raise HTTPException(
                 status_code=409,
-                detail="The knockout stage has already started; re-seeding would rewrite live matches.",
+                detail="The knockout stage has already started; re-seeding would rewrite played matches.",
             )
 
         # The whole breakdown, not just the primary table: every category's

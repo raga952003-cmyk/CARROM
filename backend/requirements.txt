@@ -31,3 +31,6 @@ passlib[bcrypt]>=1.7.4
 openpyxl>=3.1.0
 python-multipart>=0.0.6
 httpx>=0.24.0
+# Decode receipt screenshots for bounded perceptual fingerprints. OCR itself
+# is optional and uses the external Vision API when configured.
+Pillow>=10.4.0,<13

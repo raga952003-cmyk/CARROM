@@ -8,9 +8,11 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.database import get_admin_db
 from app.services.access_control import require_tournament_access
 from app.services.audit_service import record_audit
+from app.services.payment_image_analysis import image_dhash, analyze_receipt_image
 from app.utils.security import get_user_profile, verify_admin
 from app.utils.serializers import camelize
 
@@ -33,9 +35,7 @@ def _file_kind(content: bytes) -> tuple[str, str]:
         return "image/png", "png"
     if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
         return "image/webp", "webp"
-    if content.startswith(b"%PDF-"):
-        return "application/pdf", "pdf"
-    raise HTTPException(status_code=422, detail="Upload a JPEG, PNG, WebP, or PDF receipt.")
+    raise HTTPException(status_code=422, detail="Upload a JPEG, PNG, or WebP receipt image.")
 
 
 def _entry_and_tournament(db, registration_id: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -103,6 +103,7 @@ async def submit_payment_proof(
         raise HTTPException(status_code=413, detail="Payment proof must be a nonempty file of at most 5 MB.")
     mime, extension = _file_kind(content)
     digest = hashlib.sha256(content).hexdigest()
+    visual_hash = image_dhash(content, mime)
     for column, value in (("transaction_reference", reference), ("content_sha256", digest)):
         used = db.table("payment_proofs").select("id").eq(column, value).limit(1).execute().data or []
         if used:
@@ -119,6 +120,17 @@ async def submit_payment_proof(
     if pending:
         raise HTTPException(status_code=409, detail="A payment proof is already awaiting review for this entry.")
 
+    similar = []
+    if visual_hash:
+        try:
+            similar = db.rpc("payment_proof_similar_images", {
+                "p_hash": visual_hash, "p_max_distance": 4,
+            }).execute().data or []
+        except Exception as exc:
+            logger.error("Receipt similarity check unavailable: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="Payment proof image checking needs database migration 024.") from exc
+    analysis = await analyze_receipt_image(content, mime, reference, int(fee), len(similar))
+
     proof_id = str(uuid.uuid4())
     path = f"{entry['tournament_id']}/{registration_id}/{proof_id}.{extension}"
     try:
@@ -131,6 +143,7 @@ async def submit_payment_proof(
         "id": proof_id, "registration_id": registration_id,
         "tournament_id": entry["tournament_id"], "submitted_by": profile["id"],
         "transaction_reference": reference, "content_sha256": digest,
+        "image_dhash": visual_hash, "image_analysis": analysis,
         "payee_upi_id": tournament["gpay_upi_id"],
         "object_path": path, "mime_type": mime,
         "content_size_bytes": len(content), "amount_paise": int(fee),
@@ -150,7 +163,8 @@ async def submit_payment_proof(
         raise HTTPException(status_code=503, detail="Could not record the proof. Try again shortly.")
     record_audit(db, actor=profile, action="payment.proof_submitted",
                  entity_type="registration", entity_id=registration_id,
-                 new_state={"proof_id": proof_id, "transaction_reference": reference})
+                 new_state={"proof_id": proof_id, "transaction_reference": reference,
+                            "image_analysis": analysis})
     return {"status": "pending_review", "proof": _signed_proof(db, saved[0]),
             "message": "Proof submitted. Your entry is not paid until an organizer checks the received transaction."}
 
@@ -184,9 +198,30 @@ async def review_payment_proof(proof_id: str, body: ProofReview, admin=Depends(v
         raise HTTPException(status_code=404, detail="Payment proof not found.")
     proof = rows[0]
     require_tournament_access(db, proof["tournament_id"], admin, "payment.proof_review")
-    result = db.rpc("review_payment_proof", {
-        "p_proof_id": proof_id, "p_reviewer_id": admin["id"],
-        "p_decision": body.decision, "p_note": body.note,
-    }).execute().data
+    if proof.get("status") == "rejected" and body.decision == "approved":
+        if len(body.note.strip()) < 15:
+            raise HTTPException(status_code=422, detail="Explain the corrected rejection in at least 15 characters.")
+        try:
+            ready = db.rpc("payment_proof_reconsideration_ready", {}).execute().data
+        except Exception as exc:
+            logger.error("Payment proof reconsideration probe failed: %s", type(exc).__name__)
+            raise HTTPException(status_code=503, detail="Correcting a rejected proof needs database migration 026.") from exc
+        if ready is not True:
+            raise HTTPException(status_code=503, detail="Correcting a rejected proof needs database migration 026.")
+    try:
+        result = db.rpc("review_payment_proof_v2", {
+            "p_proof_id": proof_id, "p_reviewer_id": admin["id"],
+            "p_decision": body.decision, "p_note": body.note,
+            "p_allow_any_admin": not settings.ENFORCE_TOURNAMENT_OWNERSHIP,
+        }).execute().data
+    except Exception as exc:
+        message = str(exc)
+        code = str(getattr(exc, "code", "") or "")
+        if code == "PGRST202" or "Could not find the function" in message:
+            raise HTTPException(status_code=503, detail="Payment review needs database migration 025.") from exc
+        if code in ("P0001", "23505"):
+            raise HTTPException(status_code=409, detail=message) from exc
+        logger.error("Payment proof review failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Could not review the proof safely. Reload and retry.") from exc
     # The RPC writes its audit row in the same transaction as the review.
     return camelize(result or {})

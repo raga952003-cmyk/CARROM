@@ -46,6 +46,8 @@ export const OperationsBar: React.FC<OperationsBarProps> = ({ tournament }) => {
   const publicUrl = `${window.location.origin}${window.location.pathname}#/live/${tournament.id}`;
   const isPublic = tournament.status !== 'draft';
   const boards = Array.from({ length: Math.max(1, tournament.numberOfBoards || 1) }, (_, i) => i + 1);
+  const canRapidScore = tournament.rules.scoringMode === 'classic'
+    && (tournament.matches || []).some(m => m.maxBoards === 1 && (m.numberOfSets ?? 1) === 1);
 
   const open = (hash: string) => window.open(`${window.location.pathname}${hash}`, '_blank');
 
@@ -109,9 +111,9 @@ export const OperationsBar: React.FC<OperationsBarProps> = ({ tournament }) => {
           {copied ? 'Copied' : 'Copy link'}
         </Btn>}
 
-        <Btn onClick={() => setBulkOpen(true)}>
+        {canRapidScore && <Btn onClick={() => setBulkOpen(true)}>
           <Zap className="w-3.5 h-3.5" /> Rapid scores
-        </Btn>
+        </Btn>}
       </div>
 
       <BulkScoreEntry

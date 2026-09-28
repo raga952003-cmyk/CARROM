@@ -1253,6 +1253,53 @@ def test_a_redelivery_repairs_an_unconfirmed_entry():
         teardown(h)
 
 
+def test_registration_write_failure_retries_the_captured_payment():
+    """A captured payment must not be acknowledged while its entry is pending."""
+    from fakedb import Query
+
+    h, fake, org, player, tid = setup()
+    original_execute = Query.execute
+    try:
+        reg = body(register(h, tid, player))
+        order = body(h.post("/api/payments/registrations/%s/order" % reg["id"],
+                            {}, user_id=player))
+        fake.pay(order["orderId"], "pay_registration_write_outage")
+
+        def fail_registration_write_once(query):
+            if (query.table == "registrations" and query.op == "update"
+                    and query.payload.get("payment_status") == "paid"):
+                Query.execute = original_execute
+                raise RuntimeError("temporary database write failure")
+            return original_execute(query)
+
+        Query.execute = fail_registration_write_once
+        raw = webhook_event("payment.captured", order["orderId"],
+                            "pay_registration_write_outage", 50000)
+        headers = {"x-razorpay-signature": sign_webhook(raw),
+                   "content-type": "application/json"}
+        first = h.client.post("/api/payments/webhook", content=raw, headers=headers)
+        check("a lost registration write asks Razorpay to retry",
+              first.status_code == 503, detail(first))
+        check("the captured charge remains on the ledger while approval waits",
+              h.db.rows("payments")[0].get("status") == "paid"
+              and h.db.rows("registrations")[0].get("status") == "pending",
+              h.db.rows("registrations"))
+
+        retry = h.client.post("/api/payments/webhook", content=raw, headers=headers)
+        check("redelivery repairs a captured but unapproved entry",
+              retry.status_code == 200
+              and h.db.rows("registrations")[0].get("status") == "approved"
+              and h.db.rows("registrations")[0].get("payment_status") == "paid",
+              detail(retry))
+        check("redelivery keeps one captured ledger payment",
+              len([row for row in h.db.rows("payments")
+                   if row.get("status") == "paid"]) == 1,
+              h.db.rows("payments"))
+    finally:
+        Query.execute = original_execute
+        teardown(h)
+
+
 def test_a_malformed_signature_is_rejected_not_raised():
     """
     Every shape of rubbish a caller can put in the signature header.
@@ -1466,6 +1513,92 @@ def test_admin_settlement_needs_no_second_approval():
         teardown(h)
 
 
+def test_pending_gpay_proof_blocks_desk_collection_and_waiver():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        h.db.seed("payment_proofs", [{
+            "id": "proof_at_the_desk", "registration_id": reg["id"],
+            "tournament_id": tid, "status": "pending",
+        }])
+        manual_url = "/api/registrations/%s/manual-payment" % reg["id"]
+        waiver_url = "/api/registrations/%s/waive-fee" % reg["id"]
+        desk = h.post(manual_url, {"method": "cash", "reference": "desk-receipt-77"},
+                      user_id=org)
+        waiver = h.post(waiver_url, {"reason": "Organiser sponsorship"},
+                        user_id=org)
+        check("a pending GPay claim blocks separate desk collection",
+              desk.status_code == 409 and "proof" in detail(desk).lower(), detail(desk))
+        check("a pending GPay claim blocks fee waiver",
+              waiver.status_code == 409 and "proof" in detail(waiver).lower(), detail(waiver))
+        check("a pending proof does not create a payment or approval",
+              not h.db.rows("payments")
+              and h.db.rows("registrations")[0].get("status") == "pending")
+        h.db.table("payment_proofs").update({"status": "rejected"}).eq(
+            "id", "proof_at_the_desk").execute()
+        resolved = h.post(manual_url, {"method": "cash", "reference": "desk-receipt-77"},
+                          user_id=org)
+        check("desk collection resumes after proof rejection",
+              resolved.status_code == 200
+              and h.db.rows("registrations")[0].get("status") == "approved",
+              detail(resolved))
+    finally:
+        teardown(h)
+
+
+def test_desk_payment_rpc_is_atomic_and_idempotent():
+    from fakedb import Query
+
+    h, fake, org, player, tid = setup()
+    original_execute = Query.execute
+    try:
+        reg = body(register(h, tid, player))
+        url = "/api/registrations/%s/manual-payment" % reg["id"]
+        request = {"method": "upi", "reference": "UTR-ABC-123456"}
+
+        def fail_registration_update_once(query):
+            if (query.table == "registrations" and query.op == "update"
+                    and query.payload.get("payment_status") == "paid"):
+                Query.execute = original_execute
+                raise RuntimeError("temporary registration write outage")
+            return original_execute(query)
+
+        Query.execute = fail_registration_update_once
+        failed = h.post(url, request, user_id=org)
+        check("desk settlement rolls back payment if approval write fails",
+              failed.status_code == 503 and not h.db.rows("payments")
+              and h.db.rows("registrations")[0].get("status") == "pending",
+              detail(failed))
+
+        first = h.post(url, request, user_id=org)
+        second = h.post(url, request, user_id=org)
+        check("a retry of the same desk receipt returns the settled entry",
+              first.status_code == 200 and second.status_code == 200
+              and body(second).get("paymentStatus") == "paid"
+              and body(second).get("status") == "approved", detail(second))
+        check("a retried desk receipt creates one ledger payment and audit",
+              len(h.db.rows("payments")) == 1
+              and len([row for row in h.db.rows("audit_logs")
+                       if row.get("action") == "payment.manual_recorded"]) == 1,
+              h.db.rows("payments"))
+        changed = h.post(url, {"method": "upi", "reference": "UTR-ABC-999999"}, user_id=org)
+        check("a changed reference cannot settle an already paid entry",
+              changed.status_code == 409 and len(h.db.rows("payments")) == 1,
+              detail(changed))
+
+        another = h.make_user("Second Player", role="player")
+        next_reg = body(register(h, tid, another))
+        reused = h.post("/api/registrations/%s/manual-payment" % next_reg["id"],
+                        request, user_id=org)
+        check("a paid UPI reference cannot settle another entry",
+              reused.status_code == 409
+              and h.db.rows("registrations")[1].get("status") == "pending"
+              and len(h.db.rows("payments")) == 1, detail(reused))
+    finally:
+        Query.execute = original_execute
+        teardown(h)
+
+
 def test_a_refund_retry_repairs_a_half_updated_registration():
     h, fake, org, player, tid = setup()
     try:
@@ -1548,9 +1681,12 @@ SUITES = [
     ("transient failure is retried", test_a_transient_failure_asks_razorpay_to_retry),
     ("terminal rejection is not retried", test_a_terminal_rejection_is_not_retried),
     ("redelivery repairs a half-settle", test_a_redelivery_repairs_an_unconfirmed_entry),
+    ("captured charge retries entry write", test_registration_write_failure_retries_the_captured_payment),
     ("online full refund", test_a_full_online_refund_repairs_the_entry),
     ("manual refund", test_a_manual_refund_records_proof_and_repairs_the_entry),
     ("admin payment approves entry", test_admin_settlement_needs_no_second_approval),
+    ("pending GPay proof blocks desk settlement", test_pending_gpay_proof_blocks_desk_collection_and_waiver),
+    ("atomic and idempotent desk payment", test_desk_payment_rpc_is_atomic_and_idempotent),
     ("refund retry repair", test_a_refund_retry_repairs_a_half_updated_registration),
     ("post-draw refund audit", test_a_refund_after_draw_is_flagged_for_organiser_action),
 ]

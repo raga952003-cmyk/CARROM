@@ -35,6 +35,11 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
   const { fetchStandings } = useTournament();
   const [standings, setStandings] = useState<StandingsRow[]>([]);
   const [standingsError, setStandingsError] = useState<string>('');
+  const confirmedResultsRevision = tournament.matches.map(match => [
+    match.id, match.resultConfirmed, match.winnerId,
+    match.player1BoardWins, match.player2BoardWins,
+    match.player1TotalPoints, match.player2TotalPoints,
+  ].join(':')).join('|');
 
   useEffect(() => {
     let cancelled = false;
@@ -64,7 +69,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
     load();
     return () => { cancelled = true; };
     // Recompute when confirmed results change, which is what moves the table.
-  }, [tournament.id, rows, tournament.matches.filter(m => m.resultConfirmed).length]);
+  }, [tournament.id, rows, confirmedResultsRevision]);
 
   const sortedStandings = [...standings].sort((a, b) => {
     if (sortField === 'rank') {
@@ -97,6 +102,9 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
     board_difference: 'Board wins difference (boards won minus boards lost)',
     head_to_head: 'Head-to-head result between tied competitors',
   };
+  const knockoutPlanned = tournament.format === 'league_knockout'
+    || tournament.matches.some(match => match.stage === 'knockout');
+  const qualifyingCut = standings.filter(row => row.isQualified).length;
 
   /**
    * The cut comes from the server, not from a number written in here.
@@ -112,7 +120,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
    */
   const getQualificationBadge = (row: StandingsRow) => {
     const rank = row.rank;
-    if (tournament.format === 'league_knockout' || row.isQualified) {
+    if (knockoutPlanned) {
       if (row.isQualified) {
         return (
           <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
@@ -122,8 +130,7 @@ export const PointsTableView: React.FC<PointsTableViewProps> = ({
       }
       // The first name below the line: one result from going through, which
       // is the thing worth pointing out on a table nobody has finished yet.
-      const cut = standings.filter(r => r.isQualified).length;
-      if (cut > 0 && rank === cut + 1) {
+      if (qualifyingCut > 0 && rank === qualifyingCut + 1) {
         return (
           <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-800">
             First Reserve

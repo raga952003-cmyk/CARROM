@@ -22,8 +22,35 @@ router = APIRouter(prefix="/scheduling", tags=["scheduling"])
 def detect_conflicts(matches: List[Dict[str, Any]],
                      team_members: Optional[Dict[str, List[str]]] = None,
                      duration_minutes: int = 30,
-                     rest_minutes: int = 10) -> List[Dict[str, Any]]:
-    return detect_schedule_conflicts(matches, team_members, duration_minutes, rest_minutes)
+                     rest_minutes: int = 10,
+                     *, tournament_start_date: Optional[str] = None,
+                     tournament_end_date: Optional[str] = None,
+                     number_of_boards: Optional[int] = None) -> List[Dict[str, Any]]:
+    return detect_schedule_conflicts(
+        matches, team_members, duration_minutes, rest_minutes,
+        tournament_start_date=tournament_start_date,
+        tournament_end_date=tournament_end_date,
+        number_of_boards=number_of_boards,
+    )
+
+
+def _configured_conflicts(admin_db, tournament_id: str,
+                          matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    tournament = admin_db.table("tournaments").select(
+        "rules, tournament_start_date, tournament_end_date, number_of_boards"
+    ).eq("id", tournament_id).execute().data or []
+    if not tournament:
+        raise HTTPException(status_code=404, detail="Tournament not found.")
+    details = tournament[0]
+    rules = details.get("rules") or {}
+    return detect_conflicts(
+        matches, _team_members(admin_db, matches),
+        int(rules.get("matchDurationMinutes") or 30),
+        int(rules.get("restTimeMinutes") if rules.get("restTimeMinutes") is not None else 10),
+        tournament_start_date=details.get("tournament_start_date"),
+        tournament_end_date=details.get("tournament_end_date"),
+        number_of_boards=details.get("number_of_boards"),
+    )
 
 def _team_members(admin_db, matches: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     """Team id -> the two player ids on it, for the doubles sides in `matches`."""
@@ -53,7 +80,7 @@ async def get_schedule(tournament_id: str):
         return {
             "tournamentId": tournament_id,
             "matches": [serialize_match(m) for m in matches],
-            "conflicts": detect_conflicts(matches, _team_members(supabase, matches)),
+            "conflicts": _configured_conflicts(supabase, tournament_id, matches),
         }
     except HTTPException:
         raise
@@ -69,7 +96,7 @@ async def get_conflicts(tournament_id: str):
         matches = supabase.table("matches").select("*").eq(
             "tournament_id", tournament_id
         ).execute().data or []
-        conflicts = detect_conflicts(matches, _team_members(supabase, matches))
+        conflicts = _configured_conflicts(supabase, tournament_id, matches)
         return {
             "tournamentId": tournament_id,
             "conflictFree": len(conflicts) == 0,

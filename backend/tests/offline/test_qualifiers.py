@@ -263,6 +263,69 @@ def test_groups_honour_qualifiers_per_group():
                   "%s %s" % (ctx, [row.get("group") for row in listed]))
 
 
+def test_append_group_knockout_uses_group_ranks():
+    """An existing played group league gets one seat per actual group rank."""
+    h = Harness()
+    admin = h.make_user("Admin", "admin")
+    tid = h.seed_tournament(owner_id=admin, format="group_stage",
+                            rules=dict(RULES, groupCount=3, qualifiersPerGroup=2))
+    pool = singles_entrants(h, tid, 9)
+    league = [m for m in generate_group_knockout_fixtures(
+        tid, pool, 3, group_count=3, qualifiers_per_group=2)
+              if m["stage"] == "league"]
+    seed_draw(h, tid, league)
+    decide_league(h, tid, [p["id"] for p in pool])
+    before_ids = {m["id"] for m in h.db.rows("matches")}
+
+    wrong = h.post("/api/fixtures/%s/knockout?slots=8" % tid, user_id=admin)
+    check("group bracket rejects a cut that disagrees with its groups",
+          wrong.status_code == 422 and "use 6 knockout slots" in detail(wrong), detail(wrong))
+
+    response = h.post("/api/fixtures/%s/knockout?slots=6" % tid, user_id=admin)
+    if not check("six group qualifiers can enter an appended bracket",
+                 response.status_code == 200, "%s %s" % (response.status_code, detail(response))):
+        return
+    check("adding the group bracket preserves played league matches",
+          before_ids.issubset({m["id"] for m in h.db.rows("matches")}))
+    bracket = knockout_rows(h, tid, "singles")
+    check("six qualifiers generate five knockout matches", len(bracket) == 5, len(bracket))
+    # Promotion resolves labels throughout the bracket, including bye slots
+    # placed directly into the semi-final by the bracket engine.
+    seated = [m.get(key) for m in bracket for key in ("player1_id", "player2_id")
+              if m.get(key) in {p["id"] for p in pool}]
+    check("every group qualifier has one distinct bracket seat",
+          len(seated) == len(set(seated)) == 6, seated)
+    check("all six seats come from the top two of their group",
+          set(seated) == {row["participantId"] for group in
+                          block_for(standings_of(h, tid), "singles")["groups"]
+                          for row in group["standings"][:2]}, seated)
+
+
+def test_force_cannot_reseed_played_knockout():
+    """Early league promotion never grants consent to rewrite played knockouts."""
+    for status, confirmed in (("live", False), ("paused", False),
+                              ("completed", False), ("scheduled", True)):
+        h = Harness()
+        admin = h.make_user("Admin", "admin")
+        tid = h.seed_tournament(owner_id=admin, format="league_knockout",
+                                rules=dict(RULES))
+        pool = singles_entrants(h, tid, 8)
+        seed_draw(h, tid, generate_league_knockout_fixtures(tid, pool, 3))
+        knockout = knockout_rows(h, tid, "singles")
+        first = first_round(knockout)[0]
+        h.db.table("matches").update({"status": status,
+                                     "result_confirmed": confirmed}).eq("id", first["id"]).execute()
+        before = [(m["id"], m.get("player1_id"), m.get("player2_id"))
+                  for m in knockout_rows(h, tid, "singles")]
+        response = h.post("/api/standings/%s/promote?force=true" % tid, {}, user_id=admin)
+        check("force cannot re-seed a knockout with play already recorded",
+              response.status_code == 409, "%s %s %s" % (status, confirmed, detail(response)))
+        after = [(m["id"], m.get("player1_id"), m.get("player2_id"))
+                 for m in knockout_rows(h, tid, "singles")]
+        check("a rejected forced promotion changes no knockout seats",
+              after == before, "%s %s" % (status, after))
+
+
 # ---------------------------------------------------------------------------
 # A league feeding a knockout: as many as the first round seats
 # ---------------------------------------------------------------------------
@@ -951,8 +1014,76 @@ def test_a_cut_that_covers_the_field_flags_nobody():
           sum(1 for r in rows if r["isQualified"]))
 
 
+def test_seeded_knockout_keeps_its_league_table_locked():
+    h = Harness()
+    admin = h.make_user("Admin", "admin")
+    tid, pool, _ = build_league_knockout(h, admin, 4)
+
+    early = h.post("/api/standings/%s/promote?force=true" % tid, {}, user_id=admin)
+    check("an unfinished league cannot be seeded even with force",
+          early.status_code == 409 and "Early seeding" in detail(early), detail(early))
+    check("early promotion leaves rank labels waiting",
+          bracket_waiting(h, tid, "singles"))
+
+    decide_league(h, tid, [p["id"] for p in pool])
+    seeded = h.post("/api/standings/%s/promote" % tid, {}, user_id=admin)
+    check("the completed league can fill the knockout",
+          seeded.status_code == 200 and body(seeded).get("promotedCount", 0) > 0,
+          "%s %s" % (seeded.status_code, detail(seeded)))
+    seats_before = [(m["id"], m.get("player1_id"), m.get("player2_id"))
+                    for m in knockout_rows(h, tid, "singles")]
+    league = next(m for m in h.db.rows("matches") if m["tournament_id"] == tid
+                  and m.get("stage") == "league")
+
+    reopen = h.post("/api/matches/%s/reopen" % league["id"],
+                    {"reason": "score was transposed"}, user_id=admin)
+    check("a seeded league result cannot be reopened",
+          reopen.status_code == 409 and "knockout" in detail(reopen).lower(), detail(reopen))
+    correction = h.put("/api/matches/%s/boards/1" % league["id"],
+                       {"boardNumber": 1}, user_id=admin)
+    check("a seeded league board cannot be corrected",
+          correction.status_code == 409, detail(correction))
+    re_pair = h.put("/api/matches/%s?force=true" % league["id"],
+                    {"player1Id": pool[-1]["id"]}, user_id=admin)
+    check("force cannot re-pair a seeded league result",
+          re_pair.status_code == 409, detail(re_pair))
+    deleted = h.delete("/api/matches/%s?force=true" % league["id"], user_id=admin)
+    check("force cannot delete a seeded league result",
+          deleted.status_code == 409, detail(deleted))
+    match_count = len(h.db.rows("matches"))
+    late_league = h.post("/api/tournaments/%s/matches" % tid, {
+        "stage": "league", "player1Id": pool[0]["id"], "player2Id": pool[1]["id"],
+    }, user_id=admin)
+    check("a seeded knockout refuses another league fixture",
+          late_league.status_code == 409, detail(late_league))
+    check("the refused late league fixture adds no match",
+          len(h.db.rows("matches")) == match_count)
+    check("rejected changes preserve the confirmed table and knockout seats",
+          league.get("result_confirmed") is True and seats_before == [
+              (m["id"], m.get("player1_id"), m.get("player2_id"))
+              for m in knockout_rows(h, tid, "singles")])
+
+    mixed = Harness()
+    mixed_admin = mixed.make_user("Mixed Admin", "admin")
+    mixed_tid, singles, _teams = build_mixed(mixed, mixed_admin)
+    decide_league(mixed, mixed_tid, singles, category="singles")
+    try_auto_promote(mixed.db, mixed_tid)
+    doubles_match = next(m for m in mixed.db.rows("matches")
+                         if m["tournament_id"] == mixed_tid and m.get("stage") == "league"
+                         and m.get("type") == "doubles")
+    mixed.db.table("matches").update({
+        "result_confirmed": True, "status": "completed",
+    }).eq("id", doubles_match["id"]).execute()
+    unseeded = mixed.post("/api/matches/%s/reopen" % doubles_match["id"],
+                          {"reason": "correct a doubles score"}, user_id=mixed_admin)
+    check("singles seeding does not lock an unrelated doubles league",
+          unseeded.status_code == 200, detail(unseeded))
+
+
 SUITES = [
     ("groups", test_groups_honour_qualifiers_per_group),
+    ("append group knockout", test_append_group_knockout_uses_group_ranks),
+    ("played knockouts cannot be reseeded", test_force_cannot_reseed_played_knockout),
     ("league knockout", test_league_knockout_marks_the_bracket_size),
     ("legacy default", test_legacy_default_stays_four),
     ("mixed categories", test_mixed_categories_promote_into_both_brackets),
@@ -969,6 +1100,7 @@ SUITES = [
     ("head-to-head decides", test_head_to_head_separates_entrants_no_column_can),
     ("head-to-head cycle", test_a_head_to_head_cycle_falls_back_rather_than_looping),
     ("a cut covering the field", test_a_cut_that_covers_the_field_flags_nobody),
+    ("seeded league result lock", test_seeded_knockout_keeps_its_league_table_locked),
 ]
 
 

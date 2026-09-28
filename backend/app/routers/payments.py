@@ -788,17 +788,16 @@ def _confirm_registration(admin_db, payment: Dict[str, Any],
     and both notify the organiser rather than the player: the decision about
     what happens to that money is theirs.
 
-    Never raises. The money has already moved and the payment row already says
-    so; a failure to update the registration or send a notification must not
-    turn into an error response that invites the player to pay a second time.
+    A registration write failure raises 503 so Razorpay redelivers the webhook.
+    The ledger already says paid, which prevents another checkout while that
+    retry repairs the entry. Audit and notification failures are best effort.
     """
     registration_id = payment.get("registration_id")
     try:
         rows = admin_db.table("registrations").select("*").eq(
             "id", registration_id).execute().data
         if not rows:
-            logger.error(f"Paid registration {registration_id} has vanished.")
-            return
+            raise RuntimeError(f"Paid registration {registration_id} has vanished")
         before = rows[0]
 
         if before.get("payment_status") == "paid" and before.get("status") == "approved":
@@ -812,9 +811,21 @@ def _confirm_registration(admin_db, payment: Dict[str, Any],
         updated = admin_db.table("registrations").update({
             "payment_status": "paid",
             "status": "approved",
-        }).eq("id", registration_id).execute()
-        after = updated.data[0] if updated.data else before
+        }).eq("id", registration_id).neq("status", "rejected").execute()
+        if not updated.data:
+            raise RuntimeError(f"Paid registration {registration_id} was not updated")
+        after = updated.data[0]
+        if after.get("payment_status") != "paid" or after.get("status") != "approved":
+            raise RuntimeError(f"Paid registration {registration_id} is still unconfirmed")
+    except Exception as exc:
+        logger.error("Payment %s captured, but registration %s could not be confirmed: %s",
+                     payment.get("id"), registration_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Payment was captured, but entry approval needs a retry. Do not pay again.",
+        ) from exc
 
+    try:
         record_audit(
             admin_db, actor=actor, action="registration.paid",
             entity_type="registration", entity_id=str(registration_id),
@@ -834,8 +845,9 @@ def _confirm_registration(admin_db, payment: Dict[str, Any],
             tournament_id=before["tournament_id"],
             recipient_ids=_participant_ids(admin_db, before),
         )
-    except Exception as e:
-        logger.error(f"Payment settled but confirming registration {registration_id} failed: {str(e)}")
+    except Exception as exc:
+        logger.error("Entry %s was confirmed, but its audit or notification failed: %s",
+                     registration_id, exc)
 
 
 @router.post("/verify")

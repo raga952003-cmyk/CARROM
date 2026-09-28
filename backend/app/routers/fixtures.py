@@ -18,7 +18,9 @@ from app.routers.tournaments import (
     sets_supported,
 )
 from app.routers.standings import compute_standings
-from app.services.fixture_engine import generate_knockout_bracket, QUALIFIER_PREFIX
+from app.services.fixture_engine import (
+    generate_knockout_bracket, QUALIFIER_PREFIX, _separate_groupmates,
+)
 from app.services.qualification import (
     knockout_has_started,
     league_is_complete,
@@ -148,18 +150,6 @@ async def add_knockout_stage(
     t = require_tournament_access(admin_db, tournament_id, admin, "tournament.fixtures")
     assert_tournament_not_terminal(t, "add a knockout stage")
 
-    # A bracket that is not a power of two gives the top seeds byes. That is
-    # right for a knockout drawn from entrants and wrong for one drawn from a
-    # league table, where a bye hands rank 1 a free round for no visible reason.
-    if slots & (slots - 1):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"A bracket needs a power-of-two number of slots; {slots} would give "
-                "the top seeds byes. Use 2, 4, 8, 16 or 32."
-            ),
-        )
-
     matches = _select_all(
         lambda: admin_db.table("matches").select("*").eq("tournament_id", tournament_id)
     )
@@ -174,6 +164,49 @@ async def add_knockout_stage(
         )
 
     categories = sorted({(m.get("type") or "singles") for m in league})
+    rules = t.get("rules") or {}
+    group_labels: Dict[str, List[str]] = {}
+    for category in categories:
+        labels = {
+            (m.get("bracket_position") or {}).get("group")
+            for m in league if (m.get("type") or "singles") == category
+            and isinstance(m.get("bracket_position"), dict)
+        }
+        group_labels[category] = sorted(label for label in labels if label)
+
+    if any(group_labels.values()):
+        if not all(group_labels.values()):
+            raise HTTPException(status_code=422, detail="Every category needs a group stage before adding a shared knockout bracket.")
+        per_group = int(rules.get("qualifiersPerGroup") or rules.get("qualifiers_per_group") or 2)
+        for category, labels in group_labels.items():
+            expected = len(labels) * per_group
+            if slots != expected:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(f"The {category} group stage sends {per_group} from each of "
+                            f"{len(labels)} groups: use {expected} knockout slots."),
+                )
+            for label in labels:
+                group_entrants = {
+                    pid for m in league
+                    if (m.get("type") or "singles") == category
+                    and (m.get("bracket_position") or {}).get("group") == label
+                    for pid in (m.get("player1_id"), m.get("player2_id")) if pid
+                }
+                if len(group_entrants) < per_group:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Group {label} has only {len(group_entrants)} {category} entrants and cannot send {per_group} qualifiers.",
+                    )
+    elif slots & (slots - 1):
+        # In an ordinary league, a non-power-of-two cut gives some finishers
+        # byes. Group stages may legitimately send, for example, six from
+        # three groups and the bracket engine handles those byes.
+        raise HTTPException(
+            status_code=422,
+            detail=(f"A league bracket needs 2, 4, 8, 16 or 32 slots; {slots} would give the top seeds byes."),
+        )
+
     for category in categories:
         ranked = len({
             pid for m in league if (m.get("type") or "singles") == category
@@ -201,7 +234,6 @@ async def add_knockout_stage(
             detail="The knockout stage has already been played; redrawing it would delete results.",
         )
 
-    rules = t.get("rules") or {}
     max_boards = int(rules.get("maxBoardsPerMatch") or 8)
     number_of_sets = int(rules.get("numberOfSets") or 1)
     boards_per_set = int(rules.get("boardsPerSet") or max_boards)
@@ -218,10 +250,22 @@ async def add_knockout_stage(
 
     drawn: List[Dict[str, Any]] = []
     for category in categories:
-        placeholders = [
-            {"id": f"{QUALIFIER_PREFIX}{i}", "name": f"League Rank #{i}", "seed": i}
-            for i in range(1, slots + 1)
-        ]
+        if group_labels[category]:
+            placeholders = []
+            for rank in range(1, per_group + 1):
+                for position, label in enumerate(group_labels[category]):
+                    placeholders.append({
+                        "id": f"{QUALIFIER_PREFIX}{label}_{rank}",
+                        "name": f"Group {label} #{rank}",
+                        "seed": (rank - 1) * len(group_labels[category]) + position + 1,
+                        "groupLabel": label,
+                    })
+            _separate_groupmates(placeholders)
+        else:
+            placeholders = [
+                {"id": f"{QUALIFIER_PREFIX}{i}", "name": f"League Rank #{i}", "seed": i}
+                for i in range(1, slots + 1)
+            ]
         bracket = generate_knockout_bracket(
             tournament_id, placeholders, max_boards,
             number_of_sets=number_of_sets,

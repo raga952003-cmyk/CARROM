@@ -44,7 +44,10 @@ UNPROBEABLE = {"008_drop_city_default", "009_stop_timer_on_finish",
                "021_atomic_match_delete"}
 
 # 007 replaces a function, so it is probed by rpc rather than by column.
-RPC_PROBED = {"007_apply_board_result_sets", "022_auto_approve_settled_registrations"}
+RPC_PROBED = {"007_apply_board_result_sets", "022_auto_approve_settled_registrations",
+              "023_atomic_manual_entry_payment", "024_payment_proof_image_analysis",
+              "025_payment_proof_review_access", "026_payment_proof_reconsideration",
+              "027_registration_draw_atomicity"}
 
 PAYLOAD_KEYS = {
     "status", "pending_migrations", "migrations", "env", "database_client",
@@ -169,6 +172,9 @@ def test_complete_schema_is_ok():
     check("the 022 probe checks the enabled registration trigger",
           any(name == "registration_auto_approval_ready"
               for name, _ in h.db.rpc_calls), h.db.rpc_calls)
+    check("the 027 probe checks the draw RPC and roster trigger",
+          any(name == "registration_draw_atomicity_ready"
+              for name, _ in h.db.rpc_calls), h.db.rpc_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +220,69 @@ def test_missing_auto_approval_trigger_is_pending():
           ["022_auto_approve_settled_registrations"], payload)
     check("missing approval trigger degrades health",
           payload.get("status") == "degraded", payload)
+
+
+def test_missing_proof_review_access_rpc_is_pending():
+    h = Harness()
+    with_schema(h)
+    original_rpc = h.db.rpc
+
+    def without_review_v2(name, params=None):
+        if name == "review_payment_proof_v2":
+            raise PostgrestError("Could not find the function public.review_payment_proof_v2", "PGRST202")
+        return original_rpc(name, params)
+
+    h.db.rpc = without_review_v2
+    payload = fresh_health(h)
+    check("missing policy-aligned proof review reports migration 025",
+          payload.get("pending_migrations") == ["025_payment_proof_review_access"], payload)
+
+
+def test_missing_proof_reconsideration_rpc_is_pending():
+    h = Harness()
+    with_schema(h)
+    original_rpc = h.db.rpc
+
+    def without_reconsideration(name, params=None):
+        if name == "payment_proof_reconsideration_ready":
+            raise PostgrestError("Could not find the function public.payment_proof_reconsideration_ready", "PGRST202")
+        return original_rpc(name, params)
+
+    h.db.rpc = without_reconsideration
+    payload = fresh_health(h)
+    check("missing corrected-review RPC reports migration 026",
+          payload.get("pending_migrations") == ["026_payment_proof_reconsideration"], payload)
+
+    def older_review(name, params=None):
+        if name == "payment_proof_reconsideration_ready":
+            return type("Result", (), {"data": False})()
+        return original_rpc(name, params)
+
+    h.db.rpc = older_review
+    payload = fresh_health(h)
+    check("old pending-only review RPC does not pass migration 026 probe",
+          payload.get("pending_migrations") == ["026_payment_proof_reconsideration"], payload)
+
+
+def test_missing_registration_draw_guard_is_pending():
+    h = Harness()
+    with_schema(h)
+    h.db.registration_draw_atomicity_ready = False
+    payload = fresh_health(h)
+    check("disabled roster trigger reports migration 027",
+          payload.get("pending_migrations") == ["027_registration_draw_atomicity"], payload)
+
+    original_rpc = h.db.rpc
+
+    def without_readiness(name, params=None):
+        if name == "registration_draw_atomicity_ready":
+            raise PostgrestError("Could not find registration_draw_atomicity_ready", "PGRST202")
+        return original_rpc(name, params)
+
+    h.db.rpc = without_readiness
+    payload = fresh_health(h)
+    check("missing checked draw RPC reports migration 027",
+          payload.get("pending_migrations") == ["027_registration_draw_atomicity"], payload)
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +401,9 @@ SUITES = [
     ("complete schema", test_complete_schema_is_ok),
     ("missing column", test_missing_column_is_pending),
     ("missing approval trigger", test_missing_auto_approval_trigger_is_pending),
+    ("missing proof review access RPC", test_missing_proof_review_access_rpc_is_pending),
+    ("missing proof reconsideration RPC", test_missing_proof_reconsideration_rpc_is_pending),
+    ("missing registration draw guard", test_missing_registration_draw_guard_is_pending),
     ("unprobeable migrations", test_unprobeable_migrations_are_listed_not_claimed),
     ("cached paths", test_cached_paths_carry_the_list),
     ("every migration accounted for", test_every_migration_is_accounted_for),

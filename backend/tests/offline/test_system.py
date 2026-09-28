@@ -134,6 +134,17 @@ def test_full_tournament_journey():
             check("an entry can be approved", ra.status_code == 200,
                   "%s %s" % (ra.status_code, detail(ra)))
 
+    opened = h.post("/api/tournaments/%s/open-registration" % tid, {}, user_id=admin)
+    if not check("registration can be opened before the draw",
+                 opened.status_code == 200,
+                 "%s %s" % (opened.status_code, detail(opened))):
+        return
+    closed = h.post("/api/tournaments/%s/close-registration" % tid, {}, user_id=admin)
+    if not check("the final entry list can be closed before the draw",
+                 closed.status_code == 200,
+                 "%s %s" % (closed.status_code, detail(closed))):
+        return
+
     rf = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
     check("the draw can be generated", rf.status_code == 200,
           "%s %s" % (rf.status_code, detail(rf)))

@@ -14,6 +14,14 @@ export interface PaymentProof {
   reviewNote?: string | null;
   fileUrl?: string | null;
   mimeType: string;
+  imageAnalysis?: {
+    scanStatus: 'scanned' | 'unreadable' | 'unavailable' | 'not_configured' | 'pdf_not_scanned';
+    similarImageCount: number;
+    referenceRead?: string | null;
+    referenceMatches?: boolean | null;
+    amountPaiseRead?: number | null;
+    amountMatches?: boolean | null;
+  };
 }
 
 export const paymentProofService = {

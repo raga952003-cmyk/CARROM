@@ -110,6 +110,17 @@ def build_tournament(h, admin, fmt, entrants, boards):
         if reg.get("status") == "pending":
             h.post("/api/registrations/%s/approve" % reg["id"], {}, user_id=admin)
 
+    opened = h.post("/api/tournaments/%s/open-registration" % tid, {}, user_id=admin)
+    if not check("registration opens before match day",
+                 opened.status_code == 200,
+                 "%s %s" % (opened.status_code, detail(opened))):
+        return None
+    closed = h.post("/api/tournaments/%s/close-registration" % tid, {}, user_id=admin)
+    if not check("the final entry list closes before match day",
+                 closed.status_code == 200,
+                 "%s %s" % (closed.status_code, detail(closed))):
+        return None
+
     rf = h.post("/api/tournaments/%s/fixtures" % tid, {}, user_id=admin)
     if not check("the draw can be generated", rf.status_code == 200,
                  "%s %s" % (rf.status_code, detail(rf))):

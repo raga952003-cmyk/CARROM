@@ -459,7 +459,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                     setScoring({ ...defaultScoringRules, numberOfSets: 3, boardsPerSet: 6 });
                     setTargetScore(21); setRulePreset('other_age');
                   }} className={`rounded-lg border px-3 py-1.5 font-semibold ${rulePreset === 'other_age' ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white' : 'border-emerald-200 bg-white text-emerald-900'}`}>
-                    Other age · 3 × 6 · 21 pts
+                    Federation 21/6 · 3 × 6 · 21 pts
                   </button>
                   {rulePreset === 'custom' && <span className="self-center font-semibold text-amber-800">Custom rules selected</span>}
                 </div>
@@ -519,15 +519,27 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                   <select
                     value={targetScore}
                     onChange={e => { setTargetScore(parseInt(e.target.value) || 25); setRulePreset('custom'); }}
+                    disabled={scoring.scoringMode === 'official_icf'}
                     className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
                   >
                     <option value={25}>25 points (senior standard)</option>
                     <option value={21}>21 points (other age)</option>
                     <option value={29}>29 points (house rule)</option>
                   </select>
+                  {scoring.scoringMode === 'official_icf' && (
+                    <p className="mt-1 text-[10px] text-gray-600">Choose the 25/8 or 21/6 preset above. Select a custom scoring model to change the target.</p>
+                  )}
               </div>
 
-              <ScoringRulesSettings value={scoring} onChange={next => { setScoring(next); setRulePreset('custom'); }} />
+              <ScoringRulesSettings value={scoring} onChange={next => {
+                setScoring(next);
+                if (next.scoringMode === 'official_icf' && scoring.scoringMode !== 'official_icf') {
+                  setTargetScore(25);
+                  setRulePreset('senior');
+                } else {
+                  setRulePreset('custom');
+                }
+              }} />
 
               <GroupStageSettings
                 format={format}

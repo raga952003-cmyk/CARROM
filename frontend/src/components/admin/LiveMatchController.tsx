@@ -247,6 +247,17 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     return !!last && last.status !== 'completed'
       && !(last.player1Score || 0) && !(last.player2Score || 0);
   })();
+  const setPoints = setBoards.reduce((totals, board) => ({
+    player1: totals.player1 + (board.status === 'completed' ? board.player1Score || 0 : 0),
+    player2: totals.player2 + (board.status === 'completed' ? board.player2Score || 0 : 0),
+  }), { player1: 0, player2: 0 });
+  const needsDecidingBoard = setBoards.length >= boardsPerSet
+    && setBoards.every(board => board.status === 'completed')
+    && setPoints.player1 === setPoints.player2;
+  const canAddBoard = role === 'admin' && !match.resultConfirmed
+    && (rules.setWinnerRule === 'target_points' || rules.scoringMode === 'official_icf'
+      ? needsDecidingBoard
+      : totalSets === 1);
 
   const removeUnplayedBoards = async () => {
     let message = '';
@@ -268,6 +279,12 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
       ? 'No board has been scored yet, so there is no result to confirm.'
       : '';
   const [selectedBoardForScore, setSelectedBoardForScore] = useState<number>(1);
+  const priorGamePoints = setBoards
+    .filter(board => board.status === 'completed' && board.boardNumber < selectedBoardForScore)
+    .reduce((totals, board) => ({
+      player1: totals.player1 + (board.player1Score || 0),
+      player2: totals.player2 + (board.player2Score || 0),
+    }), { player1: 0, player2: 0 });
 
   // Score Input form state
   const [p1InputScore, setP1InputScore] = useState<number>(21);
@@ -282,7 +299,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
   // Tournaments created before remaining-coins scoring existed keep the old
   // model, so their confirmed results are not rewritten underneath them.
-  const usesRemainingCoins = rules.scoringMode === 'remaining_coins';
+  const usesRemainingCoins = rules.scoringMode === 'remaining_coins' || rules.scoringMode === 'official_icf';
 
   const isLive = match.status === 'live';
   const isPaused = match.status === 'paused';
@@ -346,7 +363,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const handleSaveBoardScore = async () => {
     const payload = usesRemainingCoins
       ? (() => {
-          const preview = previewBoard(observation, rules);
+          const preview = previewBoard(observation, rules, undefined, priorGamePoints);
           return {
             // The server recomputes these; they are sent so the request is
             // meaningful to anything reading the raw payload (audit, replay).
@@ -392,7 +409,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     // A correction restates the observations, the same shape the original
     // submission used. Sending the two score numbers instead left the server
     // with nothing to re-score from, so the edit appeared to do nothing.
-    const preview = usesRemainingCoins ? previewBoard(observation, rules) : null;
+    const preview = usesRemainingCoins ? previewBoard(observation, rules, undefined, priorGamePoints) : null;
     const ok = await run('saveBoard', () => updateBoardScore(
       tournament.id,
       match.id,
@@ -831,7 +848,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
               Board-by-Board Scores
             </h3>
             <p className="text-xs text-gray-500">
-              Official scores for each carrom board. Standard target score: 29 pts or highest score.
+              Each game ends at {rules.targetScore ?? match.targetPoints ?? 25} points or its board limit, according to this tournament's rules.
             </p>
           </div>
 
@@ -839,23 +856,23 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             <div className="text-xs font-semibold text-gray-600 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-200">
               {setBoards.filter(b => b.status === 'completed').length} / {setBoards.length} Boards Completed{totalSets > 1 ? ` · Set ${activeSet} of ${totalSets}` : ''}
             </div>
-            {role === 'admin' && !match.resultConfirmed && (
+            {canAddBoard && (
               <button
                 onClick={() => run('addBoard', () => addBoardToMatch(tournament.id, match.id), 'Could not add a board.')}
                 disabled={!!busy}
                 className="px-3 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-xl border border-transparent shadow-xs transition-colors flex items-center gap-1 disabled:opacity-40"
-                title="Add a new board score record to this match"
+                title={needsDecidingBoard ? 'Add a board to decide the tied game' : 'Add a new board score record to this match'}
               >
                 {busy === 'addBoard'
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <Plus className="w-3.5 h-3.5" />}
-                <span>Add Board</span>
+                <span>{needsDecidingBoard ? 'Add deciding board' : 'Add board'}</span>
               </button>
             )}
             {/* Add Board has no undo, and under remaining-coins scoring an
                 unplayed board leaves the match permanently undecided, so
                 there has to be a way back. */}
-            {role === 'admin' && !match.resultConfirmed && hasUnplayedTail && (
+            {role === 'admin' && totalSets === 1 && !match.resultConfirmed && hasUnplayedTail && (
               <button
                 onClick={() => setIsRemoveBoardsModalOpen(true)}
                 disabled={!!busy}
@@ -1094,6 +1111,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                   rules={rules}
                   value={observation}
                   onChange={setObservation}
+                  priorGamePoints={priorGamePoints}
                 />
               ) : (
                 <>

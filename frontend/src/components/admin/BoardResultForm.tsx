@@ -1,7 +1,7 @@
 import React from 'react';
 import { Flame, Crown, Circle, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { Match, Side, TournamentRules } from '../../types/tournament';
-import { BoardObservation, emptyObservation, previewBoard } from '../../utils/boardScoring';
+import { BoardObservation, PriorGamePoints, emptyObservation, previewBoard } from '../../utils/boardScoring';
 export type { BoardObservation };
 export { emptyObservation, previewBoard };
 
@@ -52,6 +52,7 @@ interface BoardResultFormProps {
   rules: Partial<TournamentRules>;
   value: BoardObservation;
   onChange: (next: BoardObservation) => void;
+  priorGamePoints?: PriorGamePoints;
 }
 
 /**
@@ -168,8 +169,8 @@ const SimpleBoardForm: React.FC<BoardResultFormProps> = ({ match, rules, value, 
   );
 };
 
-export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, value, onChange }) => {
-  if ((rules as any).boardEntryMode !== 'detailed') {
+export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, value, onChange, priorGamePoints }) => {
+  if (rules.scoringMode !== 'official_icf' && (rules as any).boardEntryMode !== 'detailed') {
     return <SimpleBoardForm match={match} rules={rules} value={value} onChange={onChange} />;
   }
 
@@ -191,7 +192,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
   const maxCoins = coinsPerSide;
   const set = (patch: Partial<BoardObservation>) => onChange({ ...value, ...patch });
   const result = previewBoard(value, rules,
-    { player1: match.player1Name, player2: match.player2Name });
+    { player1: match.player1Name, player2: match.player2Name }, priorGamePoints);
 
   return (
     <div className="space-y-3 text-xs">

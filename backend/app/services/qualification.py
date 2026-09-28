@@ -48,6 +48,23 @@ def category_of(match: Dict[str, Any]) -> str:
     return match.get("type") or "singles"
 
 
+def knockout_qualifiers_assigned(admin_db, tournament_id: str, category: str) -> bool:
+    """Whether this category has already been seated in its knockout bracket.
+
+    Promotion replaces the rank labels with names. Until the original rank is
+    kept separately, a later standings correction cannot safely reseed those
+    seats, even when no knockout board has been played yet.
+    """
+    rows = admin_db.table("matches").select(
+        "type, player1_id, player2_id"
+    ).eq("tournament_id", tournament_id).eq("stage", "knockout").execute().data or []
+    return any(
+        category_of(row) == category and
+        (row.get("player1_id") is not None or row.get("player2_id") is not None)
+        for row in rows
+    )
+
+
 def tables_by_category(standings: Any) -> Dict[Optional[str], List[Dict[str, Any]]]:
     """
     The rows to promote from, keyed by category.

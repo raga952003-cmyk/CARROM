@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin
 from app.services.access_control import require_tournament_access
-from app.services.state_machine import assert_participants_can_be_added
+from app.services.state_machine import (
+    assert_participants_can_be_added, assert_entry_list_not_drawn,
+)
 from app.services.sheet_parser import read_sheet, parse_participants
 from app.services.audit_service import record_audit
 from app.services.razorpay_client import rupees_to_paise
@@ -160,6 +162,7 @@ async def confirm_bulk_import(
     tournament = admin_db.table("tournaments").select("*").eq("id", tournamentId).execute().data
     if not tournament:
         raise HTTPException(status_code=404, detail="Tournament not found.")
+    assert_entry_list_not_drawn(admin_db, tournament[0])
     # A bulk import is the same act as entering people one at a time, and was
     # the unguarded way in: the single-entry route checked the tournament's
     # state and this one never did, so a whole sheet could be imported into a

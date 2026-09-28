@@ -33,12 +33,9 @@ TOURNAMENT_TRANSITIONS: Dict[str, Set[str]] = {
     # path generate_fixtures takes.
     #
     # in_progress is reachable from registration_closed and fixture_generation
-    # because a draw does not always move the status: fixtures generated while
-    # the tournament was still a draft leave it there, and the organiser then
-    # opens and closes registration around a bracket that already exists.
-    # POST /tournaments/{id}/start is the only caller that takes these two
-    # edges, and it refuses when the tournament has no matches, so a
-    # tournament cannot be running without a draw to run.
+    # for older tournaments with a draw already recorded in those states.
+    # New draws require registration to be closed and advance to
+    # fixture_published. POST /tournaments/{id}/start refuses an empty draw.
     "registration_closed": {"fixture_generation", "fixture_published",
                             "in_progress", "registration_open", "cancelled"},
     "fixture_generation": {"fixture_published", "in_progress",
@@ -183,6 +180,29 @@ def assert_registration_deadline_open(tournament: Dict) -> None:
             status_code=409,
             detail=(f"Registration closed on {closing_date.isoformat()}. "
                     "Players can no longer be added to this tournament."),
+        )
+
+
+def assert_entry_list_not_drawn(admin_db, tournament: Dict) -> None:
+    """No new entrant may be added once a draw exists, even in a stale state.
+
+    A successful fixture RPC writes matches and ``fixtures_generated`` before
+    the API advances the lifecycle state. If that later status write fails, the
+    tournament still says registration_closed and can otherwise be reopened or
+    force-entered despite having a complete draw.
+    """
+    if tournament.get("fixtures_generated"):
+        raise HTTPException(
+            status_code=409,
+            detail="Fixtures already exist. Registration cannot be reopened or accept new entrants.",
+        )
+    matches = admin_db.table("matches").select("id").eq(
+        "tournament_id", tournament["id"]
+    ).limit(1).execute().data or []
+    if matches:
+        raise HTTPException(
+            status_code=409,
+            detail="Fixtures already exist. Registration cannot be reopened or accept new entrants.",
         )
 
 

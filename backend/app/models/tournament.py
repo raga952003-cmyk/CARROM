@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, AliasGenerator, model_validator, field_validator
 from pydantic.alias_generators import to_camel
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Literal
 from datetime import date
 import re
 
@@ -28,26 +28,26 @@ class TournamentRulesSchema(BaseCamelModel):
     points_for_loss: int = 0
     max_boards_per_match: int = Field(default=8, ge=1, le=8)
     target_score: int = Field(default=25, ge=1, le=50)
-    queen_points: int = 3
+    queen_points: int = Field(default=3, ge=0, le=12)
     match_duration_minutes: int = Field(default=90, ge=1, le=480)
-    rest_time_minutes: int = 10
-    tiebreaker_rules: List[str] = ["points", "net_score_difference", "board_difference", "head_to_head"]
+    rest_time_minutes: int = Field(default=10, ge=0, le=1440)
+    tiebreaker_rules: List[str] = Field(default_factory=lambda: ["points", "net_score_difference", "board_difference", "head_to_head"])
     # Group stage (spec 68). groupCount > 1 splits the league phase into
     # balanced groups; undeclared fields are dropped by the model, so these
     # have to exist here for the setting to survive tournament creation.
-    group_count: Optional[int] = None
-    qualifiers_per_group: Optional[int] = None
+    group_count: Optional[int] = Field(default=None, ge=1)
+    qualifiers_per_group: Optional[int] = Field(default=None, ge=1)
     # How many league finishers reach the knockout in a league_knockout draw.
     # None keeps the engine's historical four.
-    knockout_qualifiers: Optional[int] = None
+    knockout_qualifiers: Optional[int] = Field(default=None, ge=2)
     # Board scoring. Associations score carrom differently, so the engine reads
     # these rather than assuming. Same caveat as above: an undeclared field is
     # dropped by the model, so it would never reach the scoring engine.
-    scoring_mode: Optional[str] = None          # 'classic' | 'remaining_coins'
-    coins_per_side: Optional[int] = None        # 9 in standard carrom
+    scoring_mode: Optional[Literal["classic", "remaining_coins", "official_icf"]] = None
+    coins_per_side: Optional[int] = Field(default=None, ge=1, le=20)
     queen_must_be_covered: Optional[bool] = None
-    queen_award_to: Optional[str] = None        # 'coverer' | 'pocketer'
-    tie_break: Optional[str] = None
+    queen_award_to: Optional[Literal["coverer", "pocketer"]] = None
+    tie_break: Optional[Literal["additional_board", "sudden_death", "most_board_wins", "organizer_decision"]] = None
     # Carromite format: a match is N sets of M boards, won on sets rather than
     # on total points. 1 set keeps the original flat-board behaviour.
     number_of_sets: Optional[int] = Field(default=3, ge=1, le=5)
@@ -55,16 +55,35 @@ class TournamentRulesSchema(BaseCamelModel):
     # What one coin is worth, and how a set is decided. Both belong in the
     # rules rather than the arithmetic: associations differ, and a set won
     # on boards can go to the other player than a set won on points.
-    coin_value: Optional[int] = None
-    set_winner_rule: Optional[str] = "target_points"   # target_points | total_points | board_wins
+    coin_value: Optional[int] = Field(default=None, ge=1, le=10)
+    set_winner_rule: Optional[Literal["target_points", "total_points", "board_wins"]] = "target_points"
     # What the scorer is asked for on a board: 'simple' is who finished
     # and the coins left; 'detailed' adds the queen and penalties.
-    board_entry_mode: Optional[str] = None
+    board_entry_mode: Optional[Literal["simple", "detailed"]] = None
+
+    @field_validator("tiebreaker_rules")
+    @classmethod
+    def valid_tiebreakers(cls, value):
+        allowed = {"points", "net_score_difference", "board_difference", "head_to_head"}
+        if not value or len(value) != len(set(value)) or set(value) - allowed or value[0] != "points":
+            raise ValueError("Tiebreakers must start with points and contain each supported rule at most once.")
+        return value
 
     @model_validator(mode="after")
-    def align_board_limit(self):
-        if self.boards_per_set is None:
-            self.boards_per_set = self.max_boards_per_match
+    def valid_official_preset(self):
+        # The federation variants have fixed scoring parameters. A custom
+        # combination belongs to the configurable remaining_coins mode.
+        if self.scoring_mode != "official_icf":
+            return self
+        boards = self.boards_per_set or self.max_boards_per_match
+        if (self.target_score, boards) not in {(25, 8), (21, 6)}:
+            raise ValueError("Official scoring supports 25 points/8 boards or 21 points/6 boards.")
+        if (self.number_of_sets or 3) != 3 or self.queen_points != 3 \
+                or (self.coins_per_side or 9) != 9 or (self.coin_value or 1) != 1 \
+                or self.queen_must_be_covered is False \
+                or self.set_winner_rule != "target_points" \
+                or self.board_entry_mode == "simple":
+            raise ValueError("Official scoring requires best of three games, nine coins per side, a covered three-point queen, and detailed board entry.")
         return self
 
 class PosterConfigSchema(BaseCamelModel):
@@ -78,21 +97,29 @@ class PosterConfigSchema(BaseCamelModel):
 class TournamentCreateSchema(BaseCamelModel):
     name: str
     description: Optional[str] = ""
-    category: str = "both"  # "singles", "doubles", "both"
-    format: str = "league_knockout"  # "round_robin", "knockout", "league_knockout"
+    category: Literal["singles", "doubles", "both"] = "both"
+    format: Literal["round_robin", "knockout", "league_knockout", "group_stage", "group_knockout"] = "league_knockout"
     registration_start_date: date
     registration_end_date: date
     tournament_start_date: date
     tournament_end_date: date
     venue: str
     city: str
-    number_of_boards: int = 4
-    entry_fee: float = 0.0
+    number_of_boards: int = Field(default=4, ge=1, le=128)
+    entry_fee: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     gpay_upi_id: Optional[str] = Field(default=None, max_length=100)
     prize_pool: Optional[str] = ""
     rules: TournamentRulesSchema
     poster_config: Optional[PosterConfigSchema] = None
-    status: Optional[str] = "draft"
+    status: Literal["draft"] = "draft"
+
+    @field_validator("name", "venue", "city")
+    @classmethod
+    def required_text(cls, value):
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("This field cannot be blank.")
+        return cleaned
 
     @field_validator("gpay_upi_id")
     @classmethod
@@ -109,16 +136,16 @@ class TournamentCreateSchema(BaseCamelModel):
 class TournamentUpdateSchema(BaseCamelModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    category: Optional[str] = None
-    format: Optional[str] = None
+    category: Optional[Literal["singles", "doubles", "both"]] = None
+    format: Optional[Literal["round_robin", "knockout", "league_knockout", "group_stage", "group_knockout"]] = None
     registration_start_date: Optional[date] = None
     registration_end_date: Optional[date] = None
     tournament_start_date: Optional[date] = None
     tournament_end_date: Optional[date] = None
     venue: Optional[str] = None
     city: Optional[str] = None
-    number_of_boards: Optional[int] = None
-    entry_fee: Optional[float] = None
+    number_of_boards: Optional[int] = Field(default=None, ge=1, le=128)
+    entry_fee: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     gpay_upi_id: Optional[str] = Field(default=None, max_length=100)
     prize_pool: Optional[str] = None
     rules: Optional[TournamentRulesSchema] = None
@@ -132,8 +159,18 @@ class TournamentUpdateSchema(BaseCamelModel):
     def valid_gpay_destination(cls, value):
         return _valid_gpay_destination(value)
 
+    @field_validator("name", "venue", "city")
+    @classmethod
+    def required_text(cls, value):
+        if value is None:
+            return value
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("This field cannot be blank.")
+        return cleaned
+
 class RegistrationCreateSchema(BaseCamelModel):
-    type: str  # "singles" or "doubles"
+    type: Literal["singles", "doubles"]
     player_id: Optional[str] = None
     team_name: Optional[str] = None
     # A doubles partner can be given either as an existing profile id, or as
@@ -166,10 +203,11 @@ class ManualMatchSchema(BaseCamelModel):
     does not produce all need a single match created on its own without
     redrawing the tournament and losing the results already recorded.
     """
-    stage: str = "league"                 # 'league' | 'knockout'
+    stage: Literal["league", "knockout"] = "league"
     round_name: str = "League"            # what the round is called on screen
+    group: Optional[str] = None            # required for new entrants in a grouped league
     player1_id: str
     player2_id: str
-    board_number: Optional[int] = None
+    board_number: Optional[int] = Field(default=None, ge=1, le=128)
     scheduled_date: Optional[str] = None
     scheduled_time: Optional[str] = None

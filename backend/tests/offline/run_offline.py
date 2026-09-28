@@ -45,6 +45,7 @@ SUITES = [
     ("test_auth_client_isolation", "auth          isolated sessions and profile lookup", True),
     ("test_payment_proofs", "payment proof private upload and review access", True),
     ("test_acceptance", "acceptance    user stories per role", True),
+    ("test_real_workflows", "workflows     191 role, phase, and fixture scenarios", True),
     # These five lived beside the others on disk but were never in this list,
     # so `run_offline.py` reported PASS across the board while they failed
     # unrun. test_health_probes had three assertions failing against the
@@ -52,6 +53,7 @@ SUITES = [
     # so -- the suite has to be in the runner to be a check at all.
     ("test_health_probes", "health        migration probes and the health payload", True),
     ("test_lifecycle", "lifecycle     tournament state transitions", True),
+    ("test_entry_list_freeze", "entries       final draw freezes registrations", True),
     ("test_reopen", "reopen        undoing a confirmed result", True),
     ("test_qualifiers", "qualifiers    who goes through, and into which slot", True),
     ("test_fixture_routes", "fixtures      draw, edit, remove, and who may", True),
