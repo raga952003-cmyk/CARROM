@@ -248,13 +248,20 @@ def _payments_state():
                 "detail": "RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET not set; "
                           "entry fees cannot be collected online."}
 
+    allowed_mode = razorpay_client.checkout_enabled()
+    has_webhook = razorpay_client.webhook_configured()
     return {
         "provider": "razorpay",
-        "configured": True,
+        "configured": allowed_mode and has_webhook,
+        "key_pair_present": True,
+        "checkout_enabled": allowed_mode and has_webhook,
         "mode": "live" if razorpay_client.is_live_mode() else "test",
-        "webhook": ("configured" if razorpay_client.webhook_configured()
+        "webhook": ("configured" if has_webhook
                     else "DEGRADED - RAZORPAY_WEBHOOK_SECRET not set; a payment "
                          "whose browser callback is lost will not be recorded"),
+        "detail": ("Checkout ready" if allowed_mode and has_webhook
+                   else "Test payments disabled for tournament fees"
+                   if not allowed_mode else "Webhook secret missing; checkout disabled"),
     }
 
 
@@ -399,6 +406,17 @@ async def health():
                 pending.append("027_registration_draw_atomicity")
         except Exception:
             pending.append("027_registration_draw_atomicity")
+
+        # The 028 helper checks the enabled payment-proof approval trigger.
+        # The probe reads catalog metadata and never touches a real receipt.
+        try:
+            ready = supabase_admin.rpc(
+                "payment_proof_payee_guard_ready", {}
+            ).execute().data
+            if ready is not True:
+                pending.append("028_receipt_payee_review_guard")
+        except Exception:
+            pending.append("028_receipt_payee_review_guard")
 
     _pending_cache = pending
     _pending_checked_at = time.monotonic()

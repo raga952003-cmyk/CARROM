@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     # webhook is an open endpoint for marking entries paid.
     RAZORPAY_WEBHOOK_SECRET: str = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 
+    # Test payments can confirm an entry without moving money. Require an
+    # explicit opt-in on a non-production server; a live tournament must use
+    # live Razorpay credentials or a separately verified payment method.
+    ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT: bool = os.getenv(
+        "ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
+
     # Comma-separated list of allowed browser origins, used outside development.
     CORS_ORIGINS: str = os.getenv("CORS_ORIGINS", "")
 

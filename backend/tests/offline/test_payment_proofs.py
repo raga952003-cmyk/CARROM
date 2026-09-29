@@ -222,6 +222,17 @@ def main():
     check("PDF cannot bypass receipt image checks",
           pdf.status_code == 422 and not storage.uploads)
 
+    for status in ("paid", "refund_due"):
+        h.db.seed("payments", [{
+            "id": "earlier-" + status, "registration_id": REG_ID,
+            "tournament_id": tid, "status": status, "method": "upi",
+        }])
+        already_collected = submit(h, player, "123456789012")
+        check("ledger %s blocks second UPI proof" % status,
+              already_collected.status_code == 409 and not storage.uploads)
+        h.db.tables["payments"] = [row for row in h.db.rows("payments")
+                                   if row.get("id") != "earlier-" + status]
+
     accepted = submit(h, player, "1234 5678 9012")
     body = accepted.json() if accepted.status_code == 200 else {}
     proof = body.get("proof", {})
@@ -368,6 +379,23 @@ def main():
     check("visual warning never auto-approves an entry",
           any(row["id"] == second_reg and row.get("payment_status") == "pending"
               for row in h.db.rows("registrations")))
+    reused_id = (reused_body.get("proof") or {}).get("id")
+    before_rpcs = len(rpc_calls)
+    short_warning_review = h.post("/api/payment-proofs/" + str(reused_id) + "/review", json={
+        "decision": "approved", "note": "checked",
+        "confirmed_received": True,
+    }, user_id=owner)
+    check("similar image requires a detailed verified-credit note",
+          short_warning_review.status_code == 422 and len(rpc_calls) == before_rpcs)
+    reused_row = next(row for row in h.db.tables["payment_proofs"]
+                      if row["id"] == reused_id)
+    reused_row["image_analysis"]["payeeMatches"] = False
+    wrong_payee_review = h.post("/api/payment-proofs/" + str(reused_id) + "/review", json={
+        "decision": "approved", "note": "I reviewed the credited account and amount",
+        "confirmed_received": True,
+    }, user_id=owner)
+    check("OCR evidence of another payee blocks approval before RPC",
+          wrong_payee_review.status_code == 409 and len(rpc_calls) == before_rpcs)
 
     matching = compare_receipt_text("UPI transaction ID: 999888777666\nPaid ₹ 100.00",
                                     "999888777666", 10000)
@@ -377,6 +405,39 @@ def main():
           matching["referenceMatches"] is True and matching["amountMatches"] is True)
     check("receipt text flags a different reference and amount",
           mismatch["referenceMatches"] is False and mismatch["amountMatches"] is False)
+    correct_payee = compare_receipt_text(
+        "Paid by: sender@okbank\nPaid to: club@okbank\n"
+        "UPI transaction ID: 999888777666\nPaid ₹ 100.00",
+        "999888777666", 10000, "club@okbank",
+    )
+    other_payee = compare_receipt_text(
+        "Paid by: sender@okbank\nRecipient UPI ID: other@okaxis\n"
+        "UPI transaction ID: 999888777666\nPaid ₹ 100.00",
+        "999888777666", 10000, "club@okbank",
+    )
+    unreadable_payee = compare_receipt_text(
+        "Paid by sender@okbank\nPaid to: C*** Club\nINR 100.00",
+        "999888777666", 10000, "club@okbank",
+    )
+    phone_payee = compare_receipt_text(
+        "Sent to: 9876543210\nINR 100.00", "999888777666", 10000,
+        "9876543210",
+    )
+    wrong_phone = compare_receipt_text(
+        "Sent to: 9876543211\nINR 100.00", "999888777666", 10000,
+        "9876543210",
+    )
+    check("OCR compares the labelled recipient, not the sender",
+          correct_payee["payeeMatches"] is True
+          and correct_payee["payeeRead"] == "club@okbank")
+    check("same amount sent to another VPA is identified",
+          other_payee["payeeMatches"] is False
+          and other_payee["amountMatches"] is True)
+    check("masked or absent recipient stays unknown for bank review",
+          unreadable_payee["payeeMatches"] is None)
+    check("recipient phone matches or flags a different phone",
+          phone_payee["payeeMatches"] is True
+          and wrong_phone["payeeMatches"] is False)
 
     calls = []
 
@@ -386,7 +447,7 @@ def main():
 
         def json(self):
             return {"responses": [{"fullTextAnnotation": {
-                "text": "UPI transaction ID: 999888777666\nPaid ₹ 100.00",
+                "text": "Paid to: club@okbank\nUPI transaction ID: 999888777666\nPaid ₹ 100.00",
             }}]}
 
     class VisionClient:
@@ -406,11 +467,12 @@ def main():
     with patch.dict(os.environ, {"PAYMENT_PROOF_VISION_API_KEY": "test-only-key"}), \
             patch.object(image_analysis.httpx, "AsyncClient", VisionClient):
         scanned = asyncio.run(image_analysis.analyze_receipt_image(
-            PNG, "image/png", "999888777666", 10000, 0))
+            PNG, "image/png", "999888777666", 10000, 0, "club@okbank"))
     check("configured OCR compares image text without approving payment",
           scanned["scanStatus"] == "scanned"
           and scanned["referenceMatches"] is True
-          and scanned["amountMatches"] is True)
+          and scanned["amountMatches"] is True
+          and scanned["payeeMatches"] is True)
     check("OCR sends only the receipt to the authorized server endpoint",
           len(calls) == 1
           and calls[0][0] == image_analysis.VISION_ENDPOINT

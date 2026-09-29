@@ -15,6 +15,7 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
   const [submitting, setSubmitting] = useState(false);
   const [reference, setReference] = useState('');
   const [file, setFile] = useState<File | null>(null);
+  const [recipientConfirmed, setRecipientConfirmed] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
@@ -62,6 +63,10 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (submitting || pending || !file) return;
+    if (!recipientConfirmed) {
+      setError('Confirm that you paid the exact tournament UPI recipient shown here.');
+      return;
+    }
     const normalizedReference = reference.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
     if (normalizedReference.length < 6 || normalizedReference.length > 80) {
       setError('Enter a UPI transaction reference of 6 to 80 letters or digits.');
@@ -81,6 +86,8 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
       onPendingChange?.(true);
       setMessage(result.message);
       setFile(null);
+      setReference('');
+      setRecipientConfirmed(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not upload the receipt.');
     } finally {
@@ -94,9 +101,10 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
   return (
     <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-xs text-blue-950 space-y-3">
       <div>
-        <h4 className="font-bold text-sm">Pay ₹{amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} with GPay / UPI</h4>
+        <h4 className="font-bold text-sm">Direct UPI payment · ₹{amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</h4>
         <p className="mt-1">Send payment to this tournament's UPI ID: <strong className="select-all break-all">{tournament.gpayUpiId}</strong></p>
-        <p className="mt-1 text-blue-800">Upload the receipt and transaction reference after paying. Image receipts may be checked for reused screenshots and read by Google Cloud Vision for the reference and amount. Your entry stays pending until an organiser checks that the money arrived.</p>
+        <p className="mt-1 font-semibold text-red-800">Check the recipient before paying. Sending the same amount to any other UPI ID does not pay this tournament.</p>
+        <p className="mt-1 text-blue-800">Use this method only if you are not paying through Razorpay. Upload the receipt and transaction reference after paying. An identical receipt or reused transaction ID is rejected; similar screenshots are flagged for review. Your entry stays pending until an organiser checks the actual credit in the receiving account.</p>
         <button type="button" onClick={() => void refreshStatus()} disabled={loading || submitting}
           className="mt-2 rounded-lg border border-blue-300 bg-white px-3 py-1.5 font-semibold text-blue-900 disabled:opacity-50">
           Refresh proof status
@@ -124,7 +132,12 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
               onChange={e => setFile(e.target.files?.[0] || null)} required
               className="mt-1 block w-full text-xs" />
           </label>
-          <button type="submit" disabled={submitting || !file}
+          <label className="flex items-start gap-2 font-semibold text-blue-950">
+            <input type="checkbox" checked={recipientConfirmed}
+              onChange={event => setRecipientConfirmed(event.target.checked)} />
+            I checked that the recipient of this payment is exactly {tournament.gpayUpiId}.
+          </label>
+          <button type="submit" disabled={submitting || !file || !recipientConfirmed}
             className="rounded-lg bg-blue-800 px-3 py-2 font-bold text-white disabled:opacity-50">
             {submitting ? 'Uploading…' : latest?.status === 'rejected' ? 'Submit a new proof' : 'Submit proof for review'}
           </button>

@@ -85,6 +85,22 @@ async def submit_payment_proof(
     _authorise_entry(db, entry, profile)
     if entry.get("payment_status") != "pending" or entry.get("status") == "rejected":
         raise HTTPException(status_code=409, detail="This entry cannot accept a payment proof.")
+    # A provider capture can be recorded before the registration update has
+    # completed. In that gap payment_status still says pending, but asking for
+    # a second GPay transfer would collect the fee twice. Fail closed if the
+    # ledger cannot be read.
+    try:
+        collected = db.table("payments").select("id,status").eq(
+            "registration_id", registration_id
+        ).in_("status", ["paid", "refund_due"]).limit(1).execute().data or []
+    except Exception as exc:
+        logger.error("Cannot check prior payments before proof upload: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Cannot check whether this entry was already paid. Try again shortly.") from exc
+    if collected:
+        raise HTTPException(
+            status_code=409,
+            detail="A payment is already recorded for this entry. Do not pay again; contact the organiser.",
+        )
     if tournament.get("status") in ("completed", "cancelled"):
         raise HTTPException(status_code=409, detail="This tournament no longer accepts payments.")
     if not tournament.get("gpay_upi_id"):
@@ -129,7 +145,8 @@ async def submit_payment_proof(
         except Exception as exc:
             logger.error("Receipt similarity check unavailable: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail="Payment proof image checking needs database migration 024.") from exc
-    analysis = await analyze_receipt_image(content, mime, reference, int(fee), len(similar))
+    analysis = await analyze_receipt_image(content, mime, reference, int(fee),
+                                           len(similar), tournament["gpay_upi_id"])
 
     proof_id = str(uuid.uuid4())
     path = f"{entry['tournament_id']}/{registration_id}/{proof_id}.{extension}"
@@ -198,6 +215,24 @@ async def review_payment_proof(proof_id: str, body: ProofReview, admin=Depends(v
         raise HTTPException(status_code=404, detail="Payment proof not found.")
     proof = rows[0]
     require_tournament_access(db, proof["tournament_id"], admin, "payment.proof_review")
+    if body.decision == "approved":
+        signals = proof.get("image_analysis") or {}
+        if signals.get("payeeMatches") is False:
+            raise HTTPException(
+                status_code=409,
+                detail="The receipt shows a different receiving account. Reject it and request the correct payment proof.",
+            )
+        flagged = (
+            isinstance(signals.get("similarImageCount"), (int, float))
+            and signals["similarImageCount"] > 0
+        ) or any(signals.get(key) is False for key in (
+            "referenceMatches", "amountMatches",
+        ))
+        if flagged and len(body.note.strip()) < 15:
+            raise HTTPException(
+                status_code=422,
+                detail="Explain the receipt warning and the verified bank credit in at least 15 characters.",
+            )
     if proof.get("status") == "rejected" and body.decision == "approved":
         if len(body.note.strip()) < 15:
             raise HTTPException(status_code=422, detail="Explain the corrected rejection in at least 15 characters.")

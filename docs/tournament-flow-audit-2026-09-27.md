@@ -1,10 +1,16 @@
 # Tournament flow audit and rollout
 
-This review covers the application changes completed on 27–28 September 2026.
-Migrations 023 through 027 were applied to the live Supabase SQL Editor and
+This review covers the application changes completed on 27–29 September 2026.
+Migrations 023 through 028 were applied to the live Supabase SQL Editor and
 checked for service-role-only execution. The older auth, draw, scoring and
 payment safeguards were also audited in the live database. Application code
 still needs deployment before the new live flows can be used.
+
+At the 29 September local check, the API reported no pending migrations and
+Razorpay checkout was disabled because its configured keys were in test mode.
+`PAYMENT_PROOF_VISION_API_KEY` was not configured, so receipt text and recipient
+checks require a human to verify the actual bank or UPI credit until OCR is
+enabled. Exact-file, reference, and visual-similarity checks still run locally.
 
 ## Decisions implemented
 
@@ -12,8 +18,8 @@ still needs deployment before the new live flows can be used.
 | --- | --- |
 | Create tournament | New events start in draft. The standard senior preset is best of three games, each to 25 points or eight boards. The 21-point/six-board variant is a separate preset. Federation presets fix their scoring options together; custom scoring stays available. |
 | Registration | New and existing players cannot be added after the registration closing date in India time. The server enforces this for admin actions too. Only eligible registrations feed the draw. |
-| Fee collection | A submitted GPay receipt stays pending until an organizer sees the credit in the receiving account. Approval settles the fee and approves the entry in one database transaction. A previously rejected receipt can be corrected after the credit is confirmed; a fresh explanation is required and the rejection remains in the audit history. Desk cash, UPI and bank-transfer collection records the amount, method, reference, actor and audit trail atomically. A captured Razorpay payment whose registration update fails is reported for retry and reconciliation. |
-| Receipt checks | Exact file hashes and normalized UPI references block obvious reuse. Image-only uploads also get a 64-bit visual similarity check. When configured, Google Cloud Vision reads receipt text and compares the visible reference and amount with the claim. Flags guide review; they never prove that money arrived or approve an entry automatically. |
+| Fee collection | A player chooses either Razorpay checkout or direct UPI; registration no longer opens Razorpay automatically. Direct UPI receipts stay pending until an organizer sees the exact reference and amount credited to the tournament receiving account. Approval settles the fee and approves the entry in one database transaction. Test-mode Razorpay is disabled by default so it cannot stand in for real fee collection. A previously rejected receipt can be corrected after the credit is confirmed; a fresh explanation is required and the rejection remains in the audit history. Desk cash, UPI and bank-transfer collection records the amount, method, reference, actor and audit trail atomically. A captured Razorpay payment whose registration update fails is reported for retry and reconciliation. |
+| Receipt checks | Exact file hashes and normalized UPI references block obvious reuse. Image-only uploads also get a 64-bit visual similarity check. When configured, Google Cloud Vision reads receipt text and compares the visible reference, amount, and recipient UPI ID with the claim. A definite different recipient blocks approval; a missing or unreadable recipient still needs independent bank-credit review. Similarity flags guide review, but never prove that money arrived or approve an entry automatically. |
 | Draw and fixtures | The organizer must close registration and resolve pending entries before generating fixtures. The database locks the entry list and tournament draw settings while replacing fixtures; later roster changes are refused. A one-entrant category or missing player/team blocks the whole draw instead of silently omitting an entry. Group fixtures retain their group; a cross-group league match is rejected. Late matches on a published schedule need a valid date, time and board, pass collision and rest checks, and notify both players. Once knockout qualifiers are seated, league fixtures and results for that category are locked so the bracket cannot silently disagree with the table. Early forced promotion is refused. Match deletion follows the result and publication safeguards. |
 | Scoring | Federation-style detailed board entry credits the winner from the opponent's remaining coins, handles a covered queen, the senior 21-point queen cutoff and the 12-point board cap. The target or board limit ends a game, and best of three games decides a match. Before qualifier seating, corrections replay the result and dependent standings. |
 | Points table | League match points sort first, then net score difference, board difference and head-to-head in the configured order. Board wins remain visible but are not silently substituted for net score difference. Knockout advancement uses match winners rather than league position. |
@@ -54,6 +60,8 @@ Supabase project.
 | Two people upload the identical receipt file or claim the same UPI reference | The later submission is refused. An organizer can correct the earlier rejected proof after confirming the credit and recording a new reason. | One reference cannot be reused for a different entry, even after a rejection. |
 | A receipt is re-encoded with a different typed transaction ID | A close visual fingerprint warns the reviewer; text reading may show a reference mismatch. | Cropping, overlays, or a very similar app template can evade or falsely trigger the visual warning. |
 | OCR is unavailable or reads a different amount | The proof stays pending and the organizer sees the flag or unavailable state. | A matching screenshot still does not prove money reached the account. |
+| A receipt shows the correct amount but another recipient | A definite scanned recipient mismatch blocks approval, and the organizer must reject the proof. | If the recipient cannot be read, the organizer still must verify the actual credit to the tournament account; OCR is not bank verification. |
+| A player sees both Razorpay and direct UPI | The player chooses one method and is told not to pay twice. Razorpay confirms through the provider and server verification; direct UPI needs a receipt and organizer review. | With the currently configured test Razorpay keys, direct UPI is the real payment path until live provider credentials are supplied. |
 | Razorpay captures money but the registration write fails | The callback reports a retryable failure and the ledger can reconcile the entry. | Test-mode credentials do not process live payments. |
 | A payment is reviewed twice or two channels try to settle one entry | Transactional database functions and unique payment safeguards prevent a second paid ledger row. The live database has a global unique normalized UPI/bank/GPay reference index, and the duplicate-group audit found zero existing conflicts. | Verify any ambiguous real bank transfer against the receiving account. |
 

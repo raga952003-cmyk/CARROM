@@ -494,6 +494,7 @@ class FakeSupabase:
         self.rpc_calls = []
         self.registration_auto_approval_ready = True
         self.registration_draw_atomicity_ready = True
+        self.payment_proof_payee_guard_ready = True
 
     # -- constraints ------------------------------------------------------
     def enforce_foreign_keys(self, table, row, changed=None):
@@ -593,6 +594,8 @@ class _Rpc:
             return self._payment_proof_similar_images()
         if self.name == "payment_proof_reconsideration_ready":
             return Result(True)
+        if self.name == "payment_proof_payee_guard_ready":
+            return Result(self.db.payment_proof_payee_guard_ready)
         if self.name == "registration_draw_atomicity_ready":
             return Result(self.db.registration_draw_atomicity_ready)
         if self.name == "review_payment_proof_v2":
@@ -665,6 +668,13 @@ class _Rpc:
             previous = deepcopy(proof)
             payment = None
             if decision == "approved":
+                signals = proof.get("image_analysis") or {}
+                if signals.get("payeeMatches") is False:
+                    raise PostgrestError("Receipt shows a different receiving account", "P0001")
+                if ((signals.get("similarImageCount") or 0) > 0
+                        or signals.get("referenceMatches") is False
+                        or signals.get("amountMatches") is False) and len(note) < 15:
+                    raise PostgrestError("Explain the receipt warning and verified bank credit", "P0001")
                 if (entry.get("status") == "rejected"
                         or tournament.get("status") in ("cancelled", "completed")
                         or entry.get("payment_status") != "pending"):

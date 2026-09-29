@@ -453,6 +453,15 @@ export const PlayerDashboard: React.FC = () => {
                       if (userRegistration.paymentStatus === 'pending' && status !== 'rejected') {
                         return (
                           <div className="flex flex-col items-end gap-1 shrink-0">
+                            <span className="text-[10px] text-amber-100 max-w-[17rem] text-right">
+                              {onlinePaymentsAvailable && currentTournament.gpayUpiId
+                                ? 'Choose one: Razorpay below, or direct UPI with a receipt in the section below. Do not pay twice.'
+                                : onlinePaymentsAvailable
+                                  ? 'Razorpay confirms a successful payment automatically.'
+                                  : currentTournament.gpayUpiId
+                                    ? 'Use the exact UPI ID below and upload the receipt for organiser review.'
+                                    : 'Contact the organiser to settle the entry fee.'}
+                            </span>
                             {onlinePaymentsAvailable && paymentPendingConfirmation !== userRegistration.id &&
                              currentTournament.status !== 'completed' &&
                              (!currentTournament.gpayUpiId || gpayProofPending === false) ? (
@@ -467,7 +476,7 @@ export const PlayerDashboard: React.FC = () => {
                               <span>
                                 {payingFee
                                   ? 'Processing…'
-                                  : `Pay Entry Fee (₹${((userRegistration.feePaise ?? Number(currentTournament.entryFee || 0) * 100) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })})`}
+                                  : `Razorpay checkout (₹${((userRegistration.feePaise ?? Number(currentTournament.entryFee || 0) * 100) / 100).toLocaleString('en-IN', { maximumFractionDigits: 2 })})`}
                               </span>
                             </button>
                             ) : (
@@ -482,7 +491,7 @@ export const PlayerDashboard: React.FC = () => {
                               </span>
                             )}
                             <span className="text-[10px] text-amber-300/90">
-                              Your entry is confirmed once the fee is paid
+                              Your entry is confirmed after the fee is verified
                             </span>
                             {feeError && (
                               <span className="text-[10px] text-red-300 max-w-[16rem] text-right">{feeError}</span>

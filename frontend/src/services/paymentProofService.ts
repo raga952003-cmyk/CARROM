@@ -21,6 +21,8 @@ export interface PaymentProof {
     referenceMatches?: boolean | null;
     amountPaiseRead?: number | null;
     amountMatches?: boolean | null;
+    payeeRead?: string | null;
+    payeeMatches?: boolean | null;
   };
 }
 

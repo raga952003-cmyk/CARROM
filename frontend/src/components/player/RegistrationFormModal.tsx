@@ -75,6 +75,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   // here invites a second charge for the same entry.
   const [unconfirmed, setUnconfirmed] = useState(false);
   const [gpayProofPending, setGpayProofPending] = useState<boolean | null>(false);
+  const [paymentChoice, setPaymentChoice] = useState<'razorpay' | 'upi' | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
 
   // Whether this server can take money at all. Null while unknown, so the
@@ -98,6 +99,10 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
     return () => { cancelled = true; };
   }, [isOpen, hasFee]);
 
+  useEffect(() => {
+    if (isOpen) setPaymentChoice(null);
+  }, [isOpen, tournament.id]);
+
   if (!isOpen) return null;
 
   const celebrate = () => {
@@ -109,8 +114,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   /**
    * Take the entry fee for an entry that already exists.
    *
-   * Called straight after registering, and again from the Pay button when the
-   * first attempt was abandoned or refused.
+   * Called only after the player chooses Razorpay for an existing entry.
    */
   const startPayment = async (registrationId: string) => {
     if (gpayProofPending !== false) {
@@ -200,15 +204,15 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
       }
 
       setRegistration(created);
+      if (tournament.gpayUpiId) setGpayProofPending(null);
 
       // The server decides whether anything is owed -- it may have waived the
       // fee, or the organiser may have entered this player themselves. Only a
-      // registration it left as 'pending' payment needs checkout.
+      // registration it left as 'pending' payment needs a method choice.
       const owesMoney = created?.paymentStatus === 'pending';
 
-      if (owesMoney && paymentsEnabled && created?.id) {
+      if (owesMoney) {
         setStep('payment');
-        await startPayment(created.id);
       } else {
         setStep('done');
         celebrate();
@@ -271,14 +275,45 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                          but your entry is not confirmed yet. <strong>Do not pay again.</strong>
                          Contact the organisers so they can review the charge.</>
                       : <>Your place in <strong>{tournament.name}</strong> is held but not
-                         confirmed. It is confirmed the moment the entry fee is paid.</>}
+                         confirmed. Your entry is confirmed after the fee is verified.</>}
                 </p>
               </div>
             </div>
 
+            {!unconfirmed && (paymentsEnabled || tournament.gpayUpiId) && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs space-y-2">
+                <strong className="text-amber-950">Choose one payment method</strong>
+                <p className="text-amber-900">Razorpay confirms a successful payment automatically. Direct UPI requires a receipt and organiser review. Do not pay through both methods.</p>
+                <div className="flex flex-wrap gap-2">
+                  {paymentsEnabled && (
+                    <button type="button" onClick={() => setPaymentChoice('razorpay')}
+                      disabled={gpayProofPending !== false || isPaying}
+                      className={`rounded-lg border px-3 py-2 font-semibold disabled:opacity-50 ${paymentChoice === 'razorpay' ? 'border-emerald-700 bg-emerald-100 text-emerald-950' : 'border-amber-300 bg-white text-amber-950'}`}>
+                      Razorpay checkout
+                    </button>
+                  )}
+                  {tournament.gpayUpiId && (
+                    <button type="button" onClick={() => setPaymentChoice('upi')}
+                      disabled={isPaying}
+                      className={`rounded-lg border px-3 py-2 font-semibold disabled:opacity-50 ${paymentChoice === 'upi' ? 'border-blue-700 bg-blue-100 text-blue-950' : 'border-amber-300 bg-white text-amber-950'}`}>
+                      Direct UPI and receipt
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             {!unconfirmed && registration && tournament.gpayUpiId && (
-              <GPayPaymentProof registration={registration} tournament={tournament}
-                onPendingChange={setGpayProofPending} />
+              <div className={paymentChoice === 'upi' ? '' : 'hidden'}>
+                <GPayPaymentProof registration={registration} tournament={tournament}
+                  onPendingChange={setGpayProofPending} />
+              </div>
+            )}
+
+            {!unconfirmed && paymentsEnabled === false && !tournament.gpayUpiId && (
+              <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950">
+                Online payment is unavailable. Contact the organiser to settle this entry fee.
+              </p>
             )}
 
             {paymentError && !unconfirmed && (
@@ -308,7 +343,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
               >
                 {unconfirmed ? 'Close' : 'Pay Later'}
               </button>
-              {!unconfirmed && gpayProofPending === false && (
+              {!unconfirmed && paymentChoice === 'razorpay' && paymentsEnabled && gpayProofPending === false && (
               <button
                 type="button"
                 onClick={() => registration?.id && startPayment(registration.id)}
@@ -318,7 +353,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                 {isPaying
                   ? <Loader2 className="w-4 h-4 animate-spin" />
                   : <CreditCard className="w-4 h-4 text-[#D4A72C]" />}
-                <span>{isPaying ? 'Processing…' : `Pay ₹${fee.toLocaleString('en-IN')}`}</span>
+                <span>{isPaying ? 'Processing…' : `Open Razorpay · ₹${fee.toLocaleString('en-IN')}`}</span>
               </button>
               )}
             </div>
@@ -333,7 +368,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
 
             <p className="text-[10px] text-center text-gray-400">
               You can close this and pay later from your dashboard. Your entry will
-              not be included in the draw until the fee is paid.
+              not be included in the draw until the fee is verified.
             </p>
           </div>
         ) : step === 'done' ? (

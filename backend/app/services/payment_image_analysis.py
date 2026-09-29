@@ -19,6 +19,17 @@ from fastapi import HTTPException
 logger = logging.getLogger("uvicorn.error")
 MAX_RECEIPT_PIXELS = 12_000_000
 VISION_ENDPOINT = "https://vision.googleapis.com/v1/images:annotate"
+_UPI_ID = re.compile(r"(?<![\w@])([A-Za-z0-9._-]{2,100}@[A-Za-z0-9.-]{2,100})(?![\w@])")
+_UPI_PHONE = re.compile(r"(?<!\d)([6-9][0-9]{9})(?!\d)")
+_DESTINATION_LABEL = re.compile(
+    r"^\s*(?:(?:paid|sent|transferred)\s+to|payee|recipient|receiver|beneficiary|to)\b"
+    r"(?:\s+(?:upi\s*id|vpa|mobile(?:\s+(?:no|number))?|phone(?:\s+(?:no|number))?))?"
+    r"\s*[:\-–]?\s*(.*)$", re.I,
+)
+_OTHER_FIELD = re.compile(
+    r"^\s*(?:from|paid\s+by|sender|payer|transaction|txn|utr|reference|amount|date|time|status)\b",
+    re.I,
+)
 
 
 def image_dhash(content: bytes, mime_type: str) -> str | None:
@@ -62,7 +73,40 @@ def _amounts_from_text(text: str) -> list[int]:
     return list(dict.fromkeys(amounts))
 
 
-def compare_receipt_text(text: str, reference: str, expected_paise: int) -> dict:
+def _destination_identifier(text: str, expected_payee: str) -> tuple[str | None, bool | None]:
+    """Compare only an explicitly labelled destination of the same ID type.
+
+    A receipt can contain the sender's VPA, a support address, and masked
+    numbers. None of those is evidence that the money went to another payee.
+    Ambiguous or unreadable destinations are left for bank-credit review.
+    """
+    expected = (expected_payee or "").strip().lower()
+    pattern = _UPI_ID if "@" in expected else _UPI_PHONE
+    if not expected or ("@" in expected and not _UPI_ID.fullmatch(expected)) or (
+        "@" not in expected and not _UPI_PHONE.fullmatch(expected)
+    ):
+        return None, None
+
+    lines = text.splitlines()
+    candidates: set[str] = set()
+    for index, line in enumerate(lines):
+        label = _DESTINATION_LABEL.match(line)
+        if not label:
+            continue
+        fragments = [label.group(1)]
+        if index + 1 < len(lines) and not _OTHER_FIELD.match(lines[index + 1]):
+            fragments.append(lines[index + 1])
+        for fragment in fragments:
+            candidates.update(match.group(1).lower() for match in pattern.finditer(fragment))
+
+    if len(candidates) != 1:
+        return None, None
+    found = next(iter(candidates))
+    return found, found == expected
+
+
+def compare_receipt_text(text: str, reference: str, expected_paise: int,
+                         expected_payee: str = "") -> dict:
     """Only label a mismatch when the OCR found an unambiguous value."""
     normalized = re.sub(r"[^A-Za-z0-9]", "", text).upper()
     visible_reference = reference in normalized
@@ -81,20 +125,24 @@ def compare_receipt_text(text: str, reference: str, expected_paise: int) -> dict
         detected = candidate[:80] if 6 <= len(candidate) <= 80 else None
     amounts = _amounts_from_text(text)
     amount_match = True if expected_paise in amounts else (False if len(amounts) == 1 else None)
+    payee_read, payee_matches = _destination_identifier(text, expected_payee)
     return {
         "referenceRead": reference if visible_reference else detected,
         "referenceMatches": True if visible_reference else (False if detected else None),
         "amountPaiseRead": amounts[0] if len(amounts) == 1 else None,
         "amountMatches": amount_match,
+        "payeeRead": payee_read,
+        "payeeMatches": payee_matches,
     }
 
 
 async def analyze_receipt_image(content: bytes, mime_type: str,
                                 reference: str, expected_paise: int,
-                                similar_count: int) -> dict:
+                                similar_count: int, expected_payee: str = "") -> dict:
     result = {"scanStatus": "not_configured", "similarImageCount": similar_count,
               "referenceRead": None, "referenceMatches": None,
-              "amountPaiseRead": None, "amountMatches": None}
+              "amountPaiseRead": None, "amountMatches": None,
+              "payeeRead": None, "payeeMatches": None}
     if mime_type == "application/pdf":
         result["scanStatus"] = "pdf_not_scanned"
         return result
@@ -118,7 +166,8 @@ async def analyze_receipt_image(content: bytes, mime_type: str,
         if not text.strip():
             result["scanStatus"] = "unreadable"
             return result
-        result.update(compare_receipt_text(text, reference, expected_paise))
+        result.update(compare_receipt_text(text, reference, expected_paise,
+                                           expected_payee))
         result["scanStatus"] = "scanned"
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
         # A provider outage must never mark an entry paid or silently approve

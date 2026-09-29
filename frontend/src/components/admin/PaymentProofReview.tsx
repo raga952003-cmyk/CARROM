@@ -41,7 +41,12 @@ export const PaymentProofReview: React.FC<Props> = ({ tournament, onChanged }) =
     if (busyId) return;
     const signals = proof.imageAnalysis;
     const flagged = !!signals && (signals.similarImageCount > 0
-      || signals.referenceMatches === false || signals.amountMatches === false);
+      || signals.referenceMatches === false || signals.amountMatches === false
+      || signals.payeeMatches === false);
+    if (decision === 'approved' && signals?.payeeMatches === false) {
+      setError('This receipt names a different recipient. Reject the proof; the entry cannot be approved from this payment.');
+      return;
+    }
     const reconsidered = proof.status === 'rejected' && decision === 'approved';
     const note = (notes[proof.id] || (decision === 'approved' && !flagged && !reconsidered ? 'Verified in receiving account' : '')).trim();
     if (note.length < 5) {
@@ -89,7 +94,7 @@ export const PaymentProofReview: React.FC<Props> = ({ tournament, onChanged }) =
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="font-bold text-blue-950">GPay payment proofs {pending.length > 0 ? `(${pending.length} awaiting review)` : ''}</h3>
-          <p className="text-xs text-blue-800">Check the transaction reference and exact amount in the receiving account; a receipt alone does not prove payment. Approving a verified payment also approves the entry. Rejected proofs can be corrected if the credit is later confirmed.</p>
+          <p className="text-xs text-blue-800">Check the exact recipient, transaction reference and amount in the tournament receiving account; a receipt alone does not prove payment. A receipt naming another payee cannot be approved. Approving a verified payment also approves the entry.</p>
         </div>
         <button type="button" onClick={() => void load()} disabled={loading || !!busyId}
           className="rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-xs font-bold text-blue-900 disabled:opacity-50">Refresh proofs</button>
@@ -132,9 +137,18 @@ export const PaymentProofReview: React.FC<Props> = ({ tournament, onChanged }) =
                   Text check: the visible amount appears to be ₹{((proof.imageAnalysis.amountPaiseRead || 0) / 100).toFixed(2)}, different from the entry fee. Verify the credit.
                 </p>
               )}
+              {proof.imageAnalysis.payeeMatches === false && (
+                <p className="rounded-lg border border-red-300 bg-red-50 p-2 font-semibold text-red-900">
+                  Wrong recipient detected: the receipt names {proof.imageAnalysis.payeeRead || 'another UPI ID'}, not {proof.payeeUpiId}. Reject this proof. The same amount sent elsewhere is not payment for this entry.
+                </p>
+              )}
+              {proof.imageAnalysis.scanStatus === 'scanned' && proof.imageAnalysis.payeeMatches == null && (
+                <p className="text-amber-900">The recipient could not be read reliably. Confirm the credit in the tournament receiving account before deciding.</p>
+              )}
               {proof.imageAnalysis.scanStatus === 'scanned'
                 && proof.imageAnalysis.referenceMatches === true
                 && proof.imageAnalysis.amountMatches === true
+                && proof.imageAnalysis.payeeMatches === true
                 && proof.imageAnalysis.similarImageCount === 0 && (
                   <p className="text-emerald-800">Receipt text matches the submitted details. Verify the actual credit before approval.</p>
                 )}
@@ -158,11 +172,11 @@ export const PaymentProofReview: React.FC<Props> = ({ tournament, onChanged }) =
           <label className="flex items-start gap-2 font-semibold text-blue-950">
             <input type="checkbox" checked={!!confirmed[proof.id]}
               onChange={event => setConfirmed(current => ({ ...current, [proof.id]: event.target.checked }))} />
-            I found this exact transaction reference and amount in the receiving account.
+            I found this exact transaction reference and amount credited to the tournament receiving account ({proof.payeeUpiId}).
           </label>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => void review(proof, 'approved')}
-              disabled={!!busyId || !proof.fileUrl || !confirmed[proof.id]}
+              disabled={!!busyId || !proof.fileUrl || !confirmed[proof.id] || proof.imageAnalysis?.payeeMatches === false}
               className="rounded-lg bg-emerald-700 px-3 py-2 font-bold text-white disabled:opacity-50">{busyId === proof.id ? 'Saving…' : proof.status === 'rejected' ? 'Correct rejection & approve entry' : 'Approve payment & entry'}</button>
             {proof.status === 'pending' && <button type="button" onClick={() => void review(proof, 'rejected')} disabled={!!busyId}
               className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 font-bold text-red-800 disabled:opacity-50">Reject proof</button>}

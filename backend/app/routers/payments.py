@@ -265,7 +265,8 @@ async def payment_config(profile=Depends(get_user_profile)):
     that moving from test to live is a server environment change and not a
     rebuild. It also means the bundle can never carry a live key by accident.
     """
-    configured = razorpay_client.razorpay_configured()
+    configured = (razorpay_client.checkout_enabled()
+                  and razorpay_client.webhook_configured())
     return {
         "enabled": configured,
         # Withheld unless the pair is complete: a key_id with no secret behind
@@ -300,6 +301,12 @@ async def create_payment_order(registration_id: str, profile=Depends(get_user_pr
             status_code=503,
             detail="Online payment is not configured for this event. "
                    "Please contact the organisers to pay your entry fee.",
+        )
+
+    if not razorpay_client.checkout_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Razorpay test payments are disabled for tournament entry fees. Use the verified UPI option or contact the organisers.",
         )
 
     # No webhook, no order. This refuses money rather than risking losing it.
@@ -487,6 +494,12 @@ async def _settle_payment(admin_db, payment: Dict[str, Any], razorpay_payment_id
     unconfirmed, which an organiser can fix, rather than a confirmed entry with
     no money behind it, which they cannot.
     """
+    if not razorpay_client.checkout_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Razorpay test payments cannot confirm tournament entries in this environment.",
+        )
+
     # Already settled: return what we have. This is the idempotency guarantee
     # the webhook retries and the double-tapped browser both rely on.
     #

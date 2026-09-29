@@ -47,7 +47,7 @@ UNPROBEABLE = {"008_drop_city_default", "009_stop_timer_on_finish",
 RPC_PROBED = {"007_apply_board_result_sets", "022_auto_approve_settled_registrations",
               "023_atomic_manual_entry_payment", "024_payment_proof_image_analysis",
               "025_payment_proof_review_access", "026_payment_proof_reconsideration",
-              "027_registration_draw_atomicity"}
+              "027_registration_draw_atomicity", "028_receipt_payee_review_guard"}
 
 PAYLOAD_KEYS = {
     "status", "pending_migrations", "migrations", "env", "database_client",
@@ -175,6 +175,9 @@ def test_complete_schema_is_ok():
     check("the 027 probe checks the draw RPC and roster trigger",
           any(name == "registration_draw_atomicity_ready"
               for name, _ in h.db.rpc_calls), h.db.rpc_calls)
+    check("the 028 probe checks the receipt approval trigger",
+          any(name == "payment_proof_payee_guard_ready"
+              for name, _ in h.db.rpc_calls), h.db.rpc_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +286,27 @@ def test_missing_registration_draw_guard_is_pending():
     payload = fresh_health(h)
     check("missing checked draw RPC reports migration 027",
           payload.get("pending_migrations") == ["027_registration_draw_atomicity"], payload)
+
+
+def test_missing_receipt_payee_guard_is_pending():
+    h = Harness()
+    with_schema(h)
+    h.db.payment_proof_payee_guard_ready = False
+    payload = fresh_health(h)
+    check("disabled receipt approval trigger reports migration 028",
+          payload.get("pending_migrations") == ["028_receipt_payee_review_guard"], payload)
+
+    original_rpc = h.db.rpc
+
+    def without_readiness(name, params=None):
+        if name == "payment_proof_payee_guard_ready":
+            raise PostgrestError("Could not find payment_proof_payee_guard_ready", "PGRST202")
+        return original_rpc(name, params)
+
+    h.db.rpc = without_readiness
+    payload = fresh_health(h)
+    check("missing receipt approval guard reports migration 028",
+          payload.get("pending_migrations") == ["028_receipt_payee_review_guard"], payload)
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +428,7 @@ SUITES = [
     ("missing proof review access RPC", test_missing_proof_review_access_rpc_is_pending),
     ("missing proof reconsideration RPC", test_missing_proof_reconsideration_rpc_is_pending),
     ("missing registration draw guard", test_missing_registration_draw_guard_is_pending),
+    ("missing receipt payee guard", test_missing_receipt_payee_guard_is_pending),
     ("unprobeable migrations", test_unprobeable_migrations_are_listed_not_claimed),
     ("cached paths", test_cached_paths_carry_the_list),
     ("every migration accounted for", test_every_migration_is_accounted_for),

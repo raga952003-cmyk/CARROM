@@ -150,13 +150,16 @@ def setup(entry_fee=500.0, configure=True, webhook=True):
     # every later suite's /api/health reports.
     h._rzp_orig = (rzp.create_order, rzp.fetch_payment)
     h._settings_orig = (settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET,
-                        settings.RAZORPAY_WEBHOOK_SECRET)
+                        settings.RAZORPAY_WEBHOOK_SECRET, settings.API_ENV,
+                        settings.ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT)
     rzp.create_order = fake.create_order
     rzp.fetch_payment = fake.fetch_payment
 
     settings.RAZORPAY_KEY_ID = KEY_ID if configure else ""
     settings.RAZORPAY_KEY_SECRET = KEY_SECRET if configure else ""
     settings.RAZORPAY_WEBHOOK_SECRET = WEBHOOK_SECRET if webhook else ""
+    settings.API_ENV = "test"
+    settings.ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT = True
 
     organiser = h.make_user("Org Anne", role="admin")
     player = h.make_user("Pat Player", role="player")
@@ -172,7 +175,8 @@ def setup(entry_fee=500.0, configure=True, webhook=True):
 def teardown(h):
     rzp.create_order, rzp.fetch_payment = h._rzp_orig
     (settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET,
-     settings.RAZORPAY_WEBHOOK_SECRET) = h._settings_orig
+     settings.RAZORPAY_WEBHOOK_SECRET, settings.API_ENV,
+     settings.ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT) = h._settings_orig
 
 
 def register(h, tid, player):
@@ -820,6 +824,83 @@ def test_mode_is_reported():
               (health.get("payments") or {}).get("mode") == "live", health.get("payments"))
     finally:
         settings.RAZORPAY_KEY_ID = KEY_ID
+        teardown(h)
+
+
+def test_test_mode_requires_development_opt_in():
+    h, fake, org, player, tid = setup()
+    try:
+        reg = body(register(h, tid, player))
+        order_response = h.post("/api/payments/registrations/%s/order" % reg["id"],
+                                {}, user_id=player)
+        check("test opt-in setup can create a simulated order",
+              order_response.status_code == 200, detail(order_response))
+        order_id = body(order_response).get("orderId")
+
+        settings.ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT = False
+        config = body(h.get("/api/payments/config", user_id=player))
+        health = body(h.get("/api/health"))
+        check("test checkout is hidden by default even with both keys",
+              config.get("enabled") is False and not config.get("keyId"), config)
+        check("health shows test keys but unavailable checkout",
+              (health.get("payments") or {}).get("mode") == "test"
+              and (health.get("payments") or {}).get("configured") is False
+              and (health.get("payments") or {}).get("checkout_enabled") is False,
+              health.get("payments"))
+        blocked_order = h.post("/api/payments/registrations/%s/order" % reg["id"],
+                               {}, user_id=player)
+        check("test order cannot be reopened without opt-in",
+              blocked_order.status_code == 503 and fake.create_calls == 1,
+              detail(blocked_order))
+
+        fake.pay(order_id, "pay_test_disabled")
+        callback = h.post("/api/payments/verify", {
+            "razorpay_order_id": order_id,
+            "razorpay_payment_id": "pay_test_disabled",
+            "razorpay_signature": sign_callback(order_id, "pay_test_disabled"),
+        }, user_id=player)
+        check("test payment cannot settle after opt-in is removed",
+              callback.status_code == 503
+              and next(row for row in h.db.rows("registrations")
+                       if row["id"] == reg["id"])["payment_status"] == "pending",
+              detail(callback))
+        raw = webhook_event("payment.captured", order_id, "pay_test_disabled", 50000)
+        webhook = h.client.post(
+            "/api/payments/webhook", content=raw,
+            headers={"x-razorpay-signature": sign_webhook(raw),
+                     "content-type": "application/json"},
+        )
+        check("signed test webhook cannot settle while opt-in is disabled",
+              webhook.status_code == 503
+              and next(row for row in h.db.rows("registrations")
+                       if row["id"] == reg["id"])["payment_status"] == "pending",
+              detail(webhook))
+
+        settings.ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT = True
+        settings.API_ENV = "production"
+        prod_config = body(h.get("/api/payments/config", user_id=player))
+        prod_order = h.post("/api/payments/registrations/%s/order" % reg["id"],
+                            {}, user_id=player)
+        prod_callback = h.post("/api/payments/verify", {
+            "razorpay_order_id": order_id,
+            "razorpay_payment_id": "pay_test_disabled",
+            "razorpay_signature": sign_callback(order_id, "pay_test_disabled"),
+        }, user_id=player)
+        prod_webhook = h.client.post(
+            "/api/payments/webhook", content=raw,
+            headers={"x-razorpay-signature": sign_webhook(raw),
+                     "content-type": "application/json"},
+        )
+        check("production ignores an accidental test opt-in",
+              prod_config.get("enabled") is False
+              and prod_order.status_code == 503
+              and prod_callback.status_code == 503
+              and prod_webhook.status_code == 503
+              and next(row for row in h.db.rows("registrations")
+                       if row["id"] == reg["id"])["payment_status"] == "pending",
+              (prod_config, detail(prod_order), detail(prod_callback),
+               detail(prod_webhook)))
+    finally:
         teardown(h)
 
 
@@ -1668,6 +1749,7 @@ SUITES = [
     ("malformed signature", test_a_malformed_signature_is_rejected_not_raised),
     ("half-configured server", test_half_configured_server_is_treated_as_off),
     ("mode reporting", test_mode_is_reported),
+    ("test payment mode gate", test_test_mode_requires_development_opt_in),
     ("rupees to paise", test_rupees_to_paise),
     ("fee change", test_fee_change_does_not_move_an_existing_entry),
     ("without migration 015", test_entry_without_the_migration_falls_back_to_the_current_fee),

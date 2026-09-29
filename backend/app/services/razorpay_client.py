@@ -88,6 +88,21 @@ def is_live_mode() -> bool:
     return str(getattr(settings, "RAZORPAY_KEY_ID", "")).startswith("rzp_live_")
 
 
+def checkout_enabled() -> bool:
+    """Whether this key pair is allowed to create or settle entry payments.
+
+    Test-mode captures do not move real money, so they must not approve live
+    tournament entries. Even an accidental opt-in in production is ignored.
+    """
+    if not razorpay_configured():
+        return False
+    if is_live_mode():
+        return True
+    return (str(settings.RAZORPAY_KEY_ID).startswith("rzp_test_")
+            and str(settings.API_ENV).strip().lower() in ("development", "local", "test")
+            and bool(settings.ALLOW_TEST_RAZORPAY_IN_DEVELOPMENT))
+
+
 def _auth() -> tuple:
     return (settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
 
