@@ -3,7 +3,7 @@ from app.database import get_db, get_admin_db
 from app.models.tournament import (
     TournamentCreateSchema, TournamentUpdateSchema, TournamentRulesSchema,
     RegistrationCreateSchema, ManualMatchSchema,
-    TournamentCancelSchema,
+    TournamentCancelSchema, _valid_gpay_destination,
 )
 from app.utils.security import get_user_profile, verify_admin, get_optional_profile
 from app.utils.serializers import (
@@ -51,6 +51,28 @@ import logging
 import secrets
 
 logger = logging.getLogger("uvicorn.error")
+
+
+def _require_paid_tournament_upi(tournament: Dict[str, Any]) -> None:
+    """Keep a direct payment route available if Razorpay rejects an order.
+
+    The Razorpay configuration probe cannot guarantee that the provider will
+    authenticate the next request. A paid tournament therefore needs its own
+    explicit receiving UPI ID before registration is published. An unreadable
+    or legacy malformed destination is not a safe fallback.
+    """
+    if rupees_to_paise(tournament.get("entry_fee")) <= 0:
+        return
+    try:
+        destination = _valid_gpay_destination(tournament.get("gpay_upi_id"))
+    except ValueError:
+        destination = None
+    if not destination:
+        raise HTTPException(
+            status_code=409,
+            detail="Set a valid tournament UPI ID or GPay number before opening paid "
+                   "registration. Players need this fallback if Razorpay is unavailable.",
+        )
 
 
 def _private_tournament_ids(admin_db, tournament_rows, viewer) -> set:
@@ -768,6 +790,33 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
             update_dict["rules"] = merged
         if any(key in update_dict for key in _TOURNAMENT_DATE_FIELDS):
             _validate_tournament_dates({**before, **update_dict})
+
+        # A paid event already accepting entries must keep its direct UPI
+        # fallback. This also catches a fee increase from free to paid. Leave
+        # unrelated edits on old events with no UPI untouched so the organiser
+        # can still repair them by adding the receiving ID.
+        if ({"entry_fee", "gpay_upi_id"} & set(update_dict)) and \
+                canonical_tournament_status(before.get("status")) != "draft":
+            proposed = {**before, **update_dict}
+            _require_paid_tournament_upi(proposed)
+            # A fee change to zero affects new registrations, not the saved
+            # fee on existing entries. Keep their fallback while they still
+            # have a positive unpaid fee snapshot.
+            if "gpay_upi_id" in update_dict and not proposed.get("gpay_upi_id") \
+                    and before.get("gpay_upi_id"):
+                outstanding = admin_db.table("registrations").select(
+                    "id,fee_paise,payment_status,status"
+                ).eq("tournament_id", id).execute().data or []
+                if any(row.get("status") != "rejected"
+                       and row.get("payment_status") not in ("paid", "waived")
+                       and (int(row.get("fee_paise")) if row.get("fee_paise") is not None
+                            else rupees_to_paise(before.get("entry_fee"))) > 0
+                       for row in outstanding):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Unpaid entries still owe their saved fee. Keep the "
+                               "tournament UPI ID until those entries are settled or waived.",
+                    )
 
         if "category" in update_dict and update_dict["category"] != before.get("category"):
             registrations = admin_db.table("registrations").select("id").eq(
@@ -1691,6 +1740,7 @@ async def open_registration(id: str, admin = Depends(verify_admin)):
         _validate_tournament_dates(t)
         if date.fromisoformat(str(t["registration_end_date"])[:10]) < registration_calendar_today():
             raise HTTPException(status_code=409, detail="Registration end date has passed. Update the tournament dates before publishing.")
+        _require_paid_tournament_upi(t)
         assert_entry_list_not_drawn(admin_db, t)
         return _lifecycle_move(admin_db, admin, t, "registration_open", verb="open_registration")
     except HTTPException:

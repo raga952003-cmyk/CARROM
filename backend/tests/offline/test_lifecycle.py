@@ -112,6 +112,95 @@ def row_of(h, tid):
     return rows[0] if rows else {}
 
 
+def test_paid_registration_requires_upi_fallback():
+    h = Harness()
+    owner = h.make_user("Payment Fallback Owner", "admin")
+    payload = tournament_payload("knockout")
+    payload["entryFee"] = 1
+    made = h.post("/api/tournaments", payload, user_id=owner)
+    if not check("a paid draft can be prepared before payment setup",
+                 made.status_code == 200, detail(made)):
+        return
+    tid = body(made)["id"]
+
+    refused = verb(h, tid, "open-registration", {}, owner)
+    check("a paid event cannot publish without a direct UPI fallback",
+          refused.status_code == 409 and "UPI" in detail(refused), detail(refused))
+    check("refused publication leaves the event a draft",
+          status_of(h, tid) == "draft", status_of(h, tid))
+
+    configured = h.put("/api/tournaments/%s" % tid,
+                       {"gpayUpiId": "club@okbank"}, user_id=owner)
+    check("the organiser can configure the fallback on a draft",
+          configured.status_code == 200, detail(configured))
+    opened = verb(h, tid, "open-registration", {}, owner)
+    check("paid registration opens with a configured UPI recipient",
+          opened.status_code == 200 and status_of(h, tid) == "registration_open",
+          detail(opened))
+
+    removed = h.put("/api/tournaments/%s" % tid,
+                    {"gpayUpiId": None}, user_id=owner)
+    check("an open paid event cannot lose its UPI fallback",
+          removed.status_code == 409 and row_of(h, tid).get("gpay_upi_id") == "club@okbank",
+          detail(removed))
+    edited = h.put("/api/tournaments/%s" % tid,
+                   {"name": "Fallback Cup"}, user_id=owner)
+    check("unrelated edits remain available after registration opens",
+          edited.status_code == 200, detail(edited))
+    h.db.seed("registrations", [{
+        "id": "saved-fee-entry", "tournament_id": tid,
+        "status": "pending", "payment_status": "pending", "fee_paise": 100,
+    }])
+    now_free = h.put("/api/tournaments/%s" % tid,
+                     {"entryFee": 0}, user_id=owner)
+    check("the organiser may make future entries free",
+          now_free.status_code == 200, detail(now_free))
+    still_due = h.put("/api/tournaments/%s" % tid,
+                      {"gpayUpiId": None}, user_id=owner)
+    check("a saved unpaid fee keeps the UPI fallback after a free fee edit",
+          still_due.status_code == 409 and
+          row_of(h, tid).get("gpay_upi_id") == "club@okbank", detail(still_due))
+    h.db.table("registrations").update({"payment_status": "waived"}).eq(
+        "id", "saved-fee-entry").execute()
+    no_longer_due = h.put("/api/tournaments/%s" % tid,
+                          {"gpayUpiId": None}, user_id=owner)
+    check("UPI can be cleared once a free event has no unpaid fee snapshots",
+          no_longer_due.status_code == 200 and
+          row_of(h, tid).get("gpay_upi_id") is None, detail(no_longer_due))
+
+    legacy = Harness()
+    legacy_owner = legacy.make_user("Legacy Payment Owner", "admin")
+    legacy_tid = legacy.seed_tournament(
+        legacy_owner, status="registration_open", entry_fee=1, gpay_upi_id=None,
+    )
+    legacy_edit = legacy.put("/api/tournaments/%s" % legacy_tid,
+                             {"name": "Legacy Cup Updated"}, user_id=legacy_owner)
+    check("a legacy open event can still be edited to repair its UPI setup",
+          legacy_edit.status_code == 200, detail(legacy_edit))
+    legacy_fee = legacy.put("/api/tournaments/%s" % legacy_tid,
+                            {"entryFee": 2}, user_id=legacy_owner)
+    check("a legacy paid event cannot increase fees without a UPI fallback",
+          legacy_fee.status_code == 409, detail(legacy_fee))
+    repaired = legacy.put("/api/tournaments/%s" % legacy_tid,
+                          {"gpayUpiId": "9876543210"}, user_id=legacy_owner)
+    check("a legacy open event can add its missing UPI recipient",
+          repaired.status_code == 200 and
+          row_of(legacy, legacy_tid).get("gpay_upi_id") == "9876543210",
+          detail(repaired))
+
+    free_legacy = Harness()
+    free_owner = free_legacy.make_user("Legacy Free Owner", "admin")
+    free_tid = free_legacy.seed_tournament(
+        free_owner, status="registration_open", entry_fee=1, gpay_upi_id=None,
+    )
+    free_update = free_legacy.put("/api/tournaments/%s" % free_tid,
+                                  {"entryFee": 0}, user_id=free_owner)
+    check("a legacy paid event without UPI can become free",
+          free_update.status_code == 200 and
+          float(row_of(free_legacy, free_tid).get("entry_fee")) == 0,
+          detail(free_update))
+
+
 def create(h, admin, fmt="knockout", entrants=4, draw=False):
     """
     A draft tournament with `entrants` approved singles players, through the
@@ -1257,6 +1346,7 @@ def test_india_midnight_sets_registration_day():
 
 
 SUITES = [
+    ("paid registration UPI fallback", test_paid_registration_requires_upi_fallback),
     ("registration closing date", test_registration_deadline_is_inclusive_and_cannot_be_forced),
     ("India midnight boundary", test_india_midnight_sets_registration_day),
     ("full lifecycle", test_full_lifecycle),

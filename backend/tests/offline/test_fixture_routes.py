@@ -408,6 +408,7 @@ def test_paid_import_waits_for_settlement():
     admin = h.make_user("Paid Import Organiser", "admin")
     payload = tournament_payload("round_robin", boards=2)
     payload["entryFee"] = 500
+    payload["gpayUpiId"] = "fixture-test@okbank"
     created = h.post("/api/tournaments", payload, user_id=admin)
     if not check("a paid tournament can be created for import checks",
                  created.status_code == 200, detail(created)):

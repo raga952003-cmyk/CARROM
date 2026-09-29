@@ -71,6 +71,17 @@ export class PaymentDismissedError extends Error {
   }
 }
 
+/** An order or checkout script failed before the payment window opened. */
+export class PaymentNotStartedError extends Error {
+  readonly checkoutOpened = false;
+  readonly requiresSignIn: boolean;
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'Razorpay checkout could not start.');
+    this.name = 'PaymentNotStartedError';
+    this.requiresSignIn = cause instanceof ApiError && cause.status === 401;
+  }
+}
+
 /**
  * Money left the account but this app could not get confirmation recorded.
  *
@@ -246,14 +257,19 @@ export const paymentService = {
     payment: PaymentRecord;
     registration: Registration;
   }> {
-    const [order] = await Promise.all([
-      this.createOrder(registrationId),
-      loadCheckoutScript(),
-    ]);
+    let order: PaymentOrder;
+    try {
+      [order] = await Promise.all([
+        this.createOrder(registrationId),
+        loadCheckoutScript(),
+      ]);
+    } catch (error) {
+      throw new PaymentNotStartedError(error);
+    }
 
     const Razorpay = (window as any).Razorpay;
     if (!Razorpay) {
-      throw new Error('The payment window is unavailable. Please try again.');
+      throw new PaymentNotStartedError(new Error('The payment window is unavailable.'));
     }
 
     return new Promise((resolve, reject) => {

@@ -48,6 +48,12 @@ export const EditTournamentModal: React.FC<EditTournamentModalProps> = ({
       setSaveError('Enter a valid GPay UPI ID or 10-digit UPI phone number.');
       return;
     }
+    const receivingUpi = gpayUpiId.trim() || null;
+    const previousUpi = tournament.gpayUpiId?.trim() || null;
+    if (tournament.entryFee > 0 && tournament.status !== 'draft' && previousUpi && !receivingUpi) {
+      setSaveError('Keep a receiving UPI ID on this paid tournament so players have a payment fallback.');
+      return;
+    }
     setSaving(true);
     setSaveError('');
     try {
@@ -57,7 +63,7 @@ export const EditTournamentModal: React.FC<EditTournamentModalProps> = ({
         category,
         format,
         prizePool,
-        gpayUpiId: gpayUpiId.trim() || null
+        ...(receivingUpi !== previousUpi ? { gpayUpiId: receivingUpi } : {})
       });
       onClose();
     } catch (error) {
@@ -147,12 +153,15 @@ export const EditTournamentModal: React.FC<EditTournamentModalProps> = ({
 
           {tournament.entryFee > 0 && (
             <div>
-              <label className="block font-bold text-gray-700 mb-1">Tournament GPay UPI ID</label>
+              <label className="block font-bold text-gray-700 mb-1">Tournament receiving UPI ID</label>
               <input type="text" value={gpayUpiId} maxLength={100}
                 onChange={e => setGpayUpiId(e.target.value)}
                 placeholder="example@upi or 10-digit UPI number"
                 className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#0B5D3B]" />
-              <p className="mt-1 text-[10px] text-gray-600">Players can submit a payment proof for organiser review.</p>
+              <p className="mt-1 text-[10px] text-gray-600">Players use this exact account if Razorpay is unavailable, then submit a receipt for organiser review. Verify the account belongs to this tournament before saving.</p>
+              {!tournament.gpayUpiId && (
+                <p className="mt-1 font-semibold text-amber-800">Direct UPI is currently unavailable for this tournament. Add the receiving ID to enable it.</p>
+              )}
             </div>
           )}
         </div>

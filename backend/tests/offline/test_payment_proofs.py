@@ -20,6 +20,7 @@ from app.services.payment_image_analysis import (  # noqa: E402
     image_dhash, compare_receipt_text,
 )
 import app.services.payment_image_analysis as image_analysis  # noqa: E402
+import app.services.razorpay_client as razorpay_client  # noqa: E402
 from app.config import settings  # noqa: E402
 
 
@@ -76,6 +77,49 @@ def submit(h, user_id, reference, content=PNG, registration_id=REG_ID):
         data={"transaction_reference": reference},
         files={"file": ("receipt.png", io.BytesIO(content), "image/png")},
     )
+
+
+def test_razorpay_auth_failure_keeps_direct_upi_available():
+    h = Harness()
+    owner = h.make_user("Fallback Owner", role="admin")
+    payer = h.make_user("Fallback Payer")
+    tid = h.seed_tournament(owner, status="registration_open", entry_fee=100,
+                            gpay_upi_id="club@okbank")
+    h.db.seed("registrations", [{
+        "id": REG_ID, "tournament_id": tid, "type": "singles",
+        "player_id": payer, "team_id": None,
+        "status": "pending", "payment_status": "pending", "fee_paise": 10000,
+    }])
+    h.db.storage = Storage()
+    original_rpc = h.db.rpc
+
+    def proof_rpc(name, params=None):
+        if name == "payment_reference_claimed":
+            return RpcResult(False)
+        return original_rpc(name, params)
+
+    h.db.rpc = proof_rpc
+
+    async def reject_order(**_kwargs):
+        raise razorpay_client.RazorpayError("Authentication failed", status=401)
+
+    with patch.object(razorpay_client, "razorpay_configured", return_value=True), \
+            patch.object(razorpay_client, "checkout_enabled", return_value=True), \
+            patch.object(razorpay_client, "webhook_configured", return_value=True), \
+            patch.object(razorpay_client, "create_order", reject_order):
+        refused = h.post("/api/payments/registrations/%s/order" % REG_ID,
+                         {}, user_id=payer)
+
+    check("provider authentication failure creates no charge or order",
+          refused.status_code == 502 and not h.db.rows("payments"))
+    direct = submit(h, payer, "876543210987")
+    check("player may submit UPI receipt after provider rejects order",
+          direct.status_code == 200
+          and direct.json().get("status") == "pending_review"
+          and direct.json().get("proof", {}).get("payeeUpiId") == "club@okbank")
+    check("UPI fallback waits for receiving-bank review",
+          h.db.rows("registrations")[0]["payment_status"] == "pending"
+          and h.db.rows("registrations")[0]["status"] == "pending")
 
 
 def test_reconsideration():
@@ -213,6 +257,13 @@ def main():
         return base_rpc(name, params)
 
     h.db.rpc = reference_rpc
+
+    for unsafe_payee in (None, "not-an-upi"):
+        h.db.tables["tournaments"][0]["gpay_upi_id"] = unsafe_payee
+        unavailable = submit(h, player, "123456789012")
+        check("no proof is accepted with unconfigured payee %r" % unsafe_payee,
+              unavailable.status_code == 409 and not storage.uploads)
+    h.db.tables["tournaments"][0]["gpay_upi_id"] = "9876543210"
 
     forbidden = submit(h, stranger, "123456789012")
     check("stranger cannot submit proof", forbidden.status_code == 403
@@ -492,6 +543,7 @@ def main():
           and unavailable["referenceMatches"] is None)
 
     test_reconsideration()
+    test_razorpay_auth_failure_keeps_direct_upi_available()
 
     for label, passed in RESULTS.items():
         print(("PASS" if passed else "FAIL") + " payment proof: " + label)

@@ -35,7 +35,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   isOpen,
   onClose
 }) => {
-  const { createTournament, publishTournament } = useTournament();
+  const { createTournament, updateTournament, publishTournament } = useTournament();
   const notify = useNotify();
   // Kept beside the buttons as well as in a toast: this form is long, and the
   // organiser pressing Publish is looking at the bottom of it.
@@ -107,6 +107,11 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
       setSaveError('Enter a valid GPay UPI ID or 10-digit UPI phone number.');
       return;
     }
+    if (publishImmediately && entryFee > 0 && !gpayUpiId.trim()) {
+      setActiveTab('basic');
+      setSaveError('Add the tournament receiving UPI ID before opening paid registration. Players need it if Razorpay is unavailable.');
+      return;
+    }
     setSaving(true);
 
     const rules: TournamentRules = {
@@ -125,6 +130,13 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
     };
 
     try {
+      if (createdId) {
+        // A prior publish attempt may have saved the draft before failing.
+        // Keep the receiving account in that existing draft on retry.
+        await updateTournament(createdId, {
+          gpayUpiId: entryFee > 0 ? gpayUpiId.trim() || null : null
+        });
+      }
       const newId = createdId ?? await createTournament({
         name,
         description: description || 'Official Carrom Championship tournament featuring automated scoring, fixtures, and standings.',
@@ -375,12 +387,12 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
 
               {entryFee > 0 && (
                 <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3.5">
-                  <label className="block text-xs font-bold text-emerald-950 mb-1">Tournament GPay UPI ID (optional)</label>
+                  <label className="block text-xs font-bold text-emerald-950 mb-1">Tournament receiving UPI ID (required before publishing)</label>
                   <input type="text" value={gpayUpiId} maxLength={100}
                     onChange={e => setGpayUpiId(e.target.value)}
                     placeholder="example@upi or 10-digit UPI number"
                     className="w-full text-xs px-3 py-2 border border-emerald-200 rounded-lg bg-white" />
-                  <p className="mt-1 text-[11px] text-emerald-800">Players can pay this tournament account and upload a receipt. An organiser must verify the money arrived before approving the proof.</p>
+                  <p className="mt-1 text-[11px] text-emerald-800">Players can use this account when Razorpay is unavailable. They upload a receipt, and an organiser verifies the credit before approving the entry. You can save a draft without an ID, but cannot open paid registration until one is set.</p>
                 </div>
               )}
 

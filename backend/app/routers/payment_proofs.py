@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.database import get_admin_db
+from app.models.tournament import _valid_gpay_destination
 from app.services.access_control import require_tournament_access
 from app.services.audit_service import record_audit
 from app.services.payment_image_analysis import image_dhash, analyze_receipt_image
@@ -103,8 +104,15 @@ async def submit_payment_proof(
         )
     if tournament.get("status") in ("completed", "cancelled"):
         raise HTTPException(status_code=409, detail="This tournament no longer accepts payments.")
-    if not tournament.get("gpay_upi_id"):
-        raise HTTPException(status_code=409, detail="GPay payment is not offered for this tournament.")
+    try:
+        receiving_upi = _valid_gpay_destination(tournament.get("gpay_upi_id"))
+    except ValueError:
+        receiving_upi = None
+    if not receiving_upi:
+        raise HTTPException(
+            status_code=409,
+            detail="A valid tournament UPI receiving ID is not configured. Contact the organiser before paying.",
+        )
     fee = entry.get("fee_paise")
     if fee is None:
         fee = round(float(tournament.get("entry_fee") or 0) * 100)
@@ -146,7 +154,7 @@ async def submit_payment_proof(
             logger.error("Receipt similarity check unavailable: %s", type(exc).__name__)
             raise HTTPException(status_code=503, detail="Payment proof image checking needs database migration 024.") from exc
     analysis = await analyze_receipt_image(content, mime, reference, int(fee),
-                                           len(similar), tournament["gpay_upi_id"])
+                                           len(similar), receiving_upi)
 
     proof_id = str(uuid.uuid4())
     path = f"{entry['tournament_id']}/{registration_id}/{proof_id}.{extension}"
@@ -161,7 +169,7 @@ async def submit_payment_proof(
         "tournament_id": entry["tournament_id"], "submitted_by": profile["id"],
         "transaction_reference": reference, "content_sha256": digest,
         "image_dhash": visual_hash, "image_analysis": analysis,
-        "payee_upi_id": tournament["gpay_upi_id"],
+        "payee_upi_id": receiving_upi,
         "object_path": path, "mime_type": mime,
         "content_size_bytes": len(content), "amount_paise": int(fee),
     }

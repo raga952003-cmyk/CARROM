@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { findMyMatches, opponentOf } from '../../utils/myMatches';
 import { groupMatches, resultSummary, outcomeFor, finishedIsProvisional, MatchGroupKey } from '../../utils/matchGroups';
-import { paymentService, PaymentDismissedError, PaymentUnconfirmedError } from '../../services/paymentService';
+import { paymentService, PaymentDismissedError, PaymentNotStartedError, PaymentUnconfirmedError } from '../../services/paymentService';
 import { 
   Trophy, 
   Calendar, 
@@ -33,6 +33,7 @@ import { NextMatchCard } from './NextMatchCard';
 import { GPayPaymentProof } from './GPayPaymentProof';
 import { KnockoutBracketView } from '../common/KnockoutBracketView';
 import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
+import { validTournamentUpiDestination } from '../../utils/upiDestination';
 
 export const PlayerDashboard: React.FC = () => {
   const { 
@@ -62,6 +63,7 @@ export const PlayerDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'my_matches' | 'schedule' | 'standings' | 'knockout' | 'poster'>('my_matches');
 
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
+  const receivingUpi = validTournamentUpiDestination(currentTournament?.gpayUpiId);
 
   // Check if current user is registered in current tournament
   const userRegistration = currentTournament?.registrations?.find(r => 
@@ -97,9 +99,27 @@ export const PlayerDashboard: React.FC = () => {
   const [feeError, setFeeError] = useState('');
   const [paymentPendingConfirmation, setPaymentPendingConfirmation] = useState<string | null>(null);
   const [onlinePaymentsAvailable, setOnlinePaymentsAvailable] = useState(false);
+  const [razorpayFailedForEntry, setRazorpayFailedForEntry] = useState<string | null>(null);
   const [gpayProofPendingByEntry, setGpayProofPendingByEntry] = useState<Record<string, boolean | null>>({});
   const gpayProofPending = userRegistration?.id
     ? gpayProofPendingByEntry[userRegistration.id] : undefined;
+  const checkoutAvailableForEntry = onlinePaymentsAvailable &&
+    razorpayFailedForEntry !== userRegistration?.id;
+  const paymentInstructions = !userRegistration || !currentTournament
+    ? ''
+    : paymentPendingConfirmation === userRegistration.id
+      ? 'Payment confirmation is pending. Do not pay again; contact the organiser if it does not update.'
+      : gpayProofPending === true
+        ? 'A payment or receipt is already recorded for this entry. Do not pay again.'
+        : receivingUpi && gpayProofPending !== false
+          ? 'Checking earlier payments and receipts before offering another payment.'
+          : checkoutAvailableForEntry && receivingUpi
+            ? 'Choose one: Razorpay below, or direct UPI with a receipt in the section below. Do not pay twice.'
+            : checkoutAvailableForEntry
+              ? 'Razorpay confirms a successful payment automatically.'
+              : receivingUpi
+                ? 'Razorpay checkout is unavailable. Use the exact tournament UPI ID below and upload the receipt for organiser review.'
+                : 'Contact the organiser to settle the entry fee.';
 
   React.useEffect(() => {
     paymentService.getConfig()
@@ -120,16 +140,36 @@ export const PlayerDashboard: React.FC = () => {
     setFeeError('');
     try {
       await paymentService.payForRegistration(registrationId);
-      await refreshTournaments();
+      // Checkout has already been verified. A later dashboard refresh failure
+      // must never be mistaken for a payment failure and offer a second fee.
+      setPaymentPendingConfirmation(registrationId);
+      try {
+        await refreshTournaments();
+      } catch {
+        setFeeError('Your payment was verified, but the dashboard could not refresh. Do not pay again; reload the page or contact the organiser.');
+      }
     } catch (e: any) {
       // A dismissed window is not a failure worth reporting -- they changed
       // their mind and the entry is exactly as it was.
       if (e instanceof PaymentUnconfirmedError || e?.paid) {
         setPaymentPendingConfirmation(registrationId);
         setFeeError(e?.message || 'Payment received. Please wait for confirmation; do not pay again.');
-        await refreshTournaments();
+        try {
+          await refreshTournaments();
+        } catch {
+          // The charge still needs review even if the page cannot refresh.
+        }
       } else if (!(e instanceof PaymentDismissedError || e?.dismissed)) {
-        setFeeError(e?.message || 'The payment could not be completed. Please try again.');
+        setRazorpayFailedForEntry(registrationId);
+        setFeeError(e instanceof PaymentNotStartedError && e.requiresSignIn
+          ? 'Your sign-in could not be verified. Sign in again before making a payment. If an earlier attempt was debited, do not pay again; contact the organiser.'
+          : e instanceof PaymentNotStartedError
+            ? receivingUpi
+              ? 'Razorpay checkout could not start. You can use the exact tournament UPI ID below after checking that no earlier attempt debited your account. Upload the receipt for organiser review.'
+              : 'Razorpay checkout could not start. Contact the organiser to arrange payment.'
+            : receivingUpi
+              ? 'Razorpay could not complete this attempt. Check your bank account first. If any amount was debited, do not pay again; contact the organiser. Otherwise, use the exact tournament UPI ID below and upload your receipt for review.'
+              : 'Razorpay could not complete this attempt. If any amount was debited, do not pay again. Contact the organiser for help.');
       }
     } finally {
       setPayingFee(false);
@@ -454,17 +494,11 @@ export const PlayerDashboard: React.FC = () => {
                         return (
                           <div className="flex flex-col items-end gap-1 shrink-0">
                             <span className="text-[10px] text-amber-100 max-w-[17rem] text-right">
-                              {onlinePaymentsAvailable && currentTournament.gpayUpiId
-                                ? 'Choose one: Razorpay below, or direct UPI with a receipt in the section below. Do not pay twice.'
-                                : onlinePaymentsAvailable
-                                  ? 'Razorpay confirms a successful payment automatically.'
-                                  : currentTournament.gpayUpiId
-                                    ? 'Use the exact UPI ID below and upload the receipt for organiser review.'
-                                    : 'Contact the organiser to settle the entry fee.'}
+                              {paymentInstructions}
                             </span>
-                            {onlinePaymentsAvailable && paymentPendingConfirmation !== userRegistration.id &&
+                            {checkoutAvailableForEntry && paymentPendingConfirmation !== userRegistration.id &&
                              currentTournament.status !== 'completed' &&
-                             (!currentTournament.gpayUpiId || gpayProofPending === false) ? (
+                             (!receivingUpi || gpayProofPending === false) ? (
                             <button
                               onClick={() => settleEntryFee(userRegistration.id)}
                               disabled={payingFee}
@@ -482,11 +516,11 @@ export const PlayerDashboard: React.FC = () => {
                             ) : (
                               <span className="text-[10px] text-amber-300/90 max-w-[16rem] text-right">
                                 {gpayProofPending === true
-                                  ? 'Your GPay proof is awaiting review. Do not pay again.'
+                                  ? 'A payment or receipt is already recorded for this entry. Do not pay again.'
                                   : paymentPendingConfirmation === userRegistration.id
                                     ? 'Payment confirmation is pending. Do not pay again.'
-                                    : currentTournament.gpayUpiId && gpayProofPending !== false
-                                      ? 'Checking GPay proof status before opening another payment.'
+                                    : receivingUpi && gpayProofPending !== false
+                                      ? 'Checking earlier payments and receipts before opening another payment.'
                                       : 'Online payment is unavailable. Contact the organiser to settle the entry fee.'}
                               </span>
                             )}
@@ -528,8 +562,9 @@ export const PlayerDashboard: React.FC = () => {
                 )}
               </div>
 
-              {userRegistration && currentTournament.gpayUpiId && paymentPendingConfirmation !== userRegistration.id && (
-                <GPayPaymentProof registration={userRegistration} tournament={currentTournament}
+              {userRegistration && receivingUpi && paymentPendingConfirmation !== userRegistration.id && (
+                <GPayPaymentProof key={userRegistration.id} registration={userRegistration} tournament={currentTournament}
+                  requiresBankCheck={razorpayFailedForEntry === userRegistration.id}
                   onPendingChange={pending => setGpayProofPendingByEntry(current => ({
                     ...current, [userRegistration.id]: pending,
                   }))} />

@@ -13,9 +13,10 @@ import {
 import confetti from 'canvas-confetti';
 import { Tournament, Player, Team, Registration } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
-import { paymentService, PaymentDismissedError, PaymentUnconfirmedError } from '../../services/paymentService';
+import { paymentService, PaymentDismissedError, PaymentNotStartedError, PaymentUnconfirmedError } from '../../services/paymentService';
 import { GPayPaymentProof } from './GPayPaymentProof';
 import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
+import { validTournamentUpiDestination } from '../../utils/upiDestination';
 
 interface RegistrationFormModalProps {
   tournament: Tournament;
@@ -76,15 +77,16 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   const [unconfirmed, setUnconfirmed] = useState(false);
   const [gpayProofPending, setGpayProofPending] = useState<boolean | null>(false);
   const [paymentChoice, setPaymentChoice] = useState<'razorpay' | 'upi' | null>(null);
+  const [razorpayAttemptFailed, setRazorpayAttemptFailed] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Whether this server can take money at all. Null while unknown, so the
-  // form does not promise an online payment before the answer arrives, and
-  // does not refuse one either.
+  // Whether Razorpay checkout is available. Direct UPI is configured for
+  // each tournament independently and remains available when checkout fails.
   const [paymentsEnabled, setPaymentsEnabled] = useState<boolean | null>(null);
 
   const fee = Number(tournament.entryFee) || 0;
   const hasFee = fee > 0;
+  const receivingUpi = validTournamentUpiDestination(tournament.gpayUpiId);
 
   useEffect(() => {
     if (!isOpen || !hasFee) return;
@@ -92,16 +94,25 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
     paymentService
       .getConfig()
       .then(config => { if (!cancelled) setPaymentsEnabled(!!config.enabled); })
-      // A config call that fails is not worth an error on the form: fall back
-      // to the pay-at-venue wording, which is what the app did before online
-      // payment existed and is always a truthful thing to say.
+      // If checkout configuration cannot be loaded, show the tournament's
+      // direct UPI instructions instead of promising Razorpay.
       .catch(() => { if (!cancelled) setPaymentsEnabled(false); });
     return () => { cancelled = true; };
   }, [isOpen, hasFee]);
 
   useEffect(() => {
-    if (isOpen) setPaymentChoice(null);
+    if (isOpen) {
+      setPaymentChoice(null);
+      setRazorpayAttemptFailed(false);
+    }
   }, [isOpen, tournament.id]);
+
+  useEffect(() => {
+    if (isOpen && step === 'payment' && paymentsEnabled === false &&
+        receivingUpi && !unconfirmed) {
+      setPaymentChoice('upi');
+    }
+  }, [isOpen, step, paymentsEnabled, receivingUpi, unconfirmed]);
 
   if (!isOpen) return null;
 
@@ -119,8 +130,8 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   const startPayment = async (registrationId: string) => {
     if (gpayProofPending !== false) {
       setPaymentError(gpayProofPending
-        ? 'Your GPay proof is awaiting review. Do not pay again.'
-        : 'Checking GPay proof status before opening another payment.');
+        ? 'A payment or receipt is already recorded for this entry. Do not pay again.'
+        : 'Checking earlier payments and receipts before opening another payment.');
       return;
     }
     setIsPaying(true);
@@ -132,7 +143,9 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
       celebrate();
       // The entry is approved now, so the dashboard and the organiser's list
       // are both stale.
-      refreshTournaments();
+      void refreshTournaments().catch(() => {
+        // The verified payment remains complete even if the list is stale.
+      });
     } catch (e: any) {
       if (e instanceof PaymentDismissedError || e?.dismissed) {
         // They closed the window. Not an error -- the entry is saved and
@@ -144,7 +157,20 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
         setUnconfirmed(true);
         setPaymentError(e?.message || '');
       } else {
-        setPaymentError(e?.message || 'The payment could not be completed. Please try again.');
+        // Hide the failed checkout and make configured UPI visible. A failure
+        // after checkout opened can still have a delayed bank debit.
+        setPaymentsEnabled(false);
+        setRazorpayAttemptFailed(true);
+        if (receivingUpi) setPaymentChoice('upi');
+        setPaymentError(e instanceof PaymentNotStartedError && e.requiresSignIn
+          ? 'Your sign-in could not be verified. Sign in again before making a payment. If an earlier attempt was debited, do not pay again; contact the organiser.'
+          : e instanceof PaymentNotStartedError
+            ? receivingUpi
+              ? 'Razorpay checkout could not start. You can use the exact tournament UPI ID below after checking that no earlier attempt debited your account. Upload the receipt for organiser review.'
+              : 'Razorpay checkout could not start. Contact the organiser to arrange payment.'
+            : receivingUpi
+              ? 'Razorpay could not complete this attempt. Check your bank account first. If any amount was debited, do not pay again; contact the organiser. Otherwise, use the exact tournament UPI ID below and upload your receipt for review.'
+              : 'Razorpay could not complete this attempt. If any amount was debited, do not pay again. Contact the organiser for help.');
       }
       setStep('payment');
     } finally {
@@ -204,7 +230,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
       }
 
       setRegistration(created);
-      if (tournament.gpayUpiId) setGpayProofPending(null);
+      if (receivingUpi) setGpayProofPending(null);
 
       // The server decides whether anything is owed -- it may have waived the
       // fee, or the organiser may have entered this player themselves. Only a
@@ -232,8 +258,8 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
   const registrationClosed = isRegistrationDeadlinePassed(tournament.registrationEndDate);
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-xs flex items-start sm:items-center justify-center p-2 sm:p-4 animate-in fade-in duration-150">
-      <div className="relative bg-white rounded-2xl sm:rounded-3xl max-w-lg w-full p-4 sm:p-6 shadow-2xl border border-gray-100 overflow-hidden">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-xs flex items-start justify-center p-2 sm:p-4 animate-in fade-in duration-150">
+      <div className="relative my-auto bg-white rounded-2xl sm:rounded-3xl max-w-lg w-full p-4 sm:p-6 shadow-2xl border border-gray-100 overflow-hidden">
 
         {/* Close Button */}
         <button
@@ -280,10 +306,19 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
               </div>
             </div>
 
-            {!unconfirmed && (paymentsEnabled || tournament.gpayUpiId) && (
+            {paymentError && !unconfirmed && (
+              <div role="alert" className="p-3 bg-red-50 text-red-800 text-xs font-semibold rounded-xl border border-red-200 flex items-start gap-2">
+                <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-px" />
+                <span>{paymentError}</span>
+              </div>
+            )}
+
+            {!unconfirmed && (paymentsEnabled || receivingUpi) && (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs space-y-2">
                 <strong className="text-amber-950">Choose one payment method</strong>
-                <p className="text-amber-900">Razorpay confirms a successful payment automatically. Direct UPI requires a receipt and organiser review. Do not pay through both methods.</p>
+                <p className="text-amber-900">{paymentsEnabled
+                  ? 'Razorpay confirms a successful payment automatically. Direct UPI requires a receipt and organiser review. Choose one method and do not pay twice.'
+                  : 'Razorpay checkout is unavailable. Pay only the exact tournament UPI ID shown below, then upload the transaction reference and receipt. An organiser must verify the credit.'}</p>
                 <div className="flex flex-wrap gap-2">
                   {paymentsEnabled && (
                     <button type="button" onClick={() => setPaymentChoice('razorpay')}
@@ -292,7 +327,7 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                       Razorpay checkout
                     </button>
                   )}
-                  {tournament.gpayUpiId && (
+                  {receivingUpi && (
                     <button type="button" onClick={() => setPaymentChoice('upi')}
                       disabled={isPaying}
                       className={`rounded-lg border px-3 py-2 font-semibold disabled:opacity-50 ${paymentChoice === 'upi' ? 'border-blue-700 bg-blue-100 text-blue-950' : 'border-amber-300 bg-white text-amber-950'}`}>
@@ -303,24 +338,18 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
               </div>
             )}
 
-            {!unconfirmed && registration && tournament.gpayUpiId && (
+            {!unconfirmed && registration && receivingUpi && (
               <div className={paymentChoice === 'upi' ? '' : 'hidden'}>
-                <GPayPaymentProof registration={registration} tournament={tournament}
-                  onPendingChange={setGpayProofPending} />
+                <GPayPaymentProof key={registration.id} registration={registration} tournament={tournament}
+                  onPendingChange={setGpayProofPending}
+                  requiresBankCheck={razorpayAttemptFailed} />
               </div>
             )}
 
-            {!unconfirmed && paymentsEnabled === false && !tournament.gpayUpiId && (
+            {!unconfirmed && paymentsEnabled === false && !receivingUpi && (
               <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950">
                 Online payment is unavailable. Contact the organiser to settle this entry fee.
               </p>
-            )}
-
-            {paymentError && !unconfirmed && (
-              <div className="p-3 bg-red-50 text-red-800 text-xs font-semibold rounded-xl border border-red-200 flex items-start gap-2">
-                <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-px" />
-                <span>{paymentError}</span>
-              </div>
             )}
 
             <div className="bg-gray-50 p-4 rounded-2xl border border-gray-200 text-left text-xs space-y-2">
@@ -361,8 +390,8 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
             {gpayProofPending !== false && !unconfirmed && (
               <p className="text-xs text-center font-semibold text-amber-800">
                 {gpayProofPending
-                  ? 'Your GPay proof is awaiting review. Do not pay again.'
-                  : 'Checking GPay proof status before opening another payment.'}
+                  ? 'A payment or receipt is already recorded for this entry. Do not pay again.'
+                  : 'Checking earlier payments and receipts before opening another payment.'}
               </p>
             )}
 
@@ -628,18 +657,20 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                   {paymentsEnabled === null
                     ? 'Checking…'
                     : paymentsEnabled
-                      ? 'Pay now to confirm'
-                      : 'Payable at venue'}
+                      ? 'Choose payment after saving'
+                      : receivingUpi
+                        ? 'Direct UPI after saving'
+                        : 'Arrange payment with organiser'}
                 </span>
               </div>
             )}
 
-            {hasFee && paymentsEnabled && (
+            {hasFee && (paymentsEnabled || receivingUpi) && (
               <p className="text-[10px] text-gray-500 flex items-start gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-px" />
                 <span>
-                  Your entry is saved first, then the payment window opens. Your place is
-                  confirmed once the fee is paid — you can also pay later from your dashboard.
+                  Your entry is saved first. Then choose an available payment method. Direct UPI
+                  requires a receipt and organiser verification. You can also pay later from your dashboard.
                 </span>
               </p>
             )}
@@ -665,8 +696,8 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
                 <span>
                   {isSubmitting
                     ? 'Submitting...'
-                    : hasFee && paymentsEnabled
-                      ? `Continue to Pay ₹${fee.toLocaleString('en-IN')}`
+                    : hasFee && (paymentsEnabled || receivingUpi)
+                      ? 'Save Entry and Choose Payment'
                       : 'Confirm & Submit Entry'}
                 </span>
               </button>

@@ -1,34 +1,57 @@
 import React, { useEffect, useState } from 'react';
 import { Registration, Tournament } from '../../types/tournament';
 import { PaymentProof, paymentProofService } from '../../services/paymentProofService';
+import { paymentService } from '../../services/paymentService';
+import { validTournamentUpiDestination } from '../../utils/upiDestination';
 
 interface GPayPaymentProofProps {
   registration: Registration;
   tournament: Tournament;
   onPendingChange?: (pending: boolean | null) => void;
+  requiresBankCheck?: boolean;
 }
 
 /** A receipt starts a review; it never marks the registration as paid. */
-export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration, tournament, onPendingChange }) => {
+export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration, tournament, onPendingChange, requiresBankCheck = false }) => {
   const [proofs, setProofs] = useState<PaymentProof[]>([]);
   const [loading, setLoading] = useState(true);
+  const [statusKnown, setStatusKnown] = useState(false);
+  const [providerPaymentRecorded, setProviderPaymentRecorded] = useState(false);
+  const [providerAttemptExists, setProviderAttemptExists] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [reference, setReference] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [recipientConfirmed, setRecipientConfirmed] = useState(false);
+  const [noEarlierDebitConfirmed, setNoEarlierDebitConfirmed] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
   useEffect(() => {
+    setNoEarlierDebitConfirmed(false);
+  }, [registration.id, requiresBankCheck]);
+
+  useEffect(() => {
     let active = true;
     setLoading(true);
+    setStatusKnown(false);
+    setNoEarlierDebitConfirmed(false);
     setError('');
     onPendingChange?.(null);
-    paymentProofService.listForRegistration(registration.id)
-      .then(rows => {
+    Promise.all([
+      paymentProofService.listForRegistration(registration.id),
+      paymentService.listForRegistration(registration.id),
+    ])
+      .then(([rows, payments]) => {
         if (active) {
+          const alreadyRecorded = payments.some(payment => payment.status === 'paid' || payment.status === 'refund_due') ||
+            rows.some(proof => proof.status === 'approved');
+          const earlierAttempt = payments.some(payment =>
+            payment.status === 'created' || payment.status === 'failed' || payment.status === 'refunded');
           setProofs(rows);
-          onPendingChange?.(rows.some(proof => proof.status === 'pending'));
+          setProviderPaymentRecorded(alreadyRecorded);
+          setProviderAttemptExists(earlierAttempt);
+          setStatusKnown(true);
+          onPendingChange?.(alreadyRecorded || rows.some(proof => proof.status === 'pending'));
         }
       })
       .catch(err => {
@@ -43,11 +66,24 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
 
   const refreshStatus = async () => {
     setLoading(true);
+    setStatusKnown(false);
+    setNoEarlierDebitConfirmed(false);
     setError('');
+    onPendingChange?.(null);
     try {
-      const rows = await paymentProofService.listForRegistration(registration.id);
+      const [rows, payments] = await Promise.all([
+        paymentProofService.listForRegistration(registration.id),
+        paymentService.listForRegistration(registration.id),
+      ]);
+      const alreadyRecorded = payments.some(payment => payment.status === 'paid' || payment.status === 'refund_due') ||
+        rows.some(proof => proof.status === 'approved');
+      const earlierAttempt = payments.some(payment =>
+        payment.status === 'created' || payment.status === 'failed' || payment.status === 'refunded');
       setProofs(rows);
-      onPendingChange?.(rows.some(proof => proof.status === 'pending'));
+      setProviderPaymentRecorded(alreadyRecorded);
+      setProviderAttemptExists(earlierAttempt);
+      setStatusKnown(true);
+      onPendingChange?.(alreadyRecorded || rows.some(proof => proof.status === 'pending'));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load payment proofs.');
       onPendingChange?.(null);
@@ -59,10 +95,14 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
   const pending = proofs.some(proof => proof.status === 'pending');
   const latest = proofs[0];
   const amount = (registration.feePaise ?? Math.round(Number(tournament.entryFee || 0) * 100)) / 100;
+  const receivingUpi = validTournamentUpiDestination(tournament.gpayUpiId);
+  const bankCheckRequired = requiresBankCheck || providerAttemptExists;
+  const mayShowUpi = statusKnown && !providerPaymentRecorded && !pending &&
+    (!bankCheckRequired || noEarlierDebitConfirmed);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (submitting || pending || !file) return;
+    if (submitting || !mayShowUpi || !file) return;
     if (!recipientConfirmed) {
       setError('Confirm that you paid the exact tournament UPI recipient shown here.');
       return;
@@ -95,23 +135,38 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
     }
   };
 
-  if (!tournament.gpayUpiId || registration.paymentStatus !== 'pending' || registration.status === 'rejected' ||
+  if (!receivingUpi || registration.paymentStatus !== 'pending' || registration.status === 'rejected' ||
       tournament.status === 'completed' || tournament.status === 'cancelled') return null;
 
   return (
     <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-xs text-blue-950 space-y-3">
       <div>
         <h4 className="font-bold text-sm">Direct UPI payment · ₹{amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })}</h4>
-        <p className="mt-1">Send payment to this tournament's UPI ID: <strong className="select-all break-all">{tournament.gpayUpiId}</strong></p>
-        <p className="mt-1 font-semibold text-red-800">Check the recipient before paying. Sending the same amount to any other UPI ID does not pay this tournament.</p>
-        <p className="mt-1 text-blue-800">Use this method only if you are not paying through Razorpay. Upload the receipt and transaction reference after paying. An identical receipt or reused transaction ID is rejected; similar screenshots are flagged for review. Your entry stays pending until an organiser checks the actual credit in the receiving account.</p>
+        {mayShowUpi ? (
+          <>
+            <p className="mt-1">Send payment to this tournament's UPI ID: <strong className="select-all break-all">{receivingUpi}</strong></p>
+            <p className="mt-1 font-semibold text-red-800">Check the recipient before paying. Sending the same amount to any other UPI ID does not pay this tournament.</p>
+            <p className="mt-1 text-blue-800">Use this method only if Razorpay did not debit your account. Upload the receipt and transaction reference after paying. An identical receipt or reused transaction ID is rejected; similar screenshots are flagged for review. Your entry stays pending until an organiser checks the actual credit in the receiving account.</p>
+          </>
+        ) : null}
         <button type="button" onClick={() => void refreshStatus()} disabled={loading || submitting}
           className="mt-2 rounded-lg border border-blue-300 bg-white px-3 py-1.5 font-semibold text-blue-900 disabled:opacity-50">
           Refresh proof status
         </button>
       </div>
 
-      {loading ? <p>Loading payment proof status…</p> : latest && (
+      {!statusKnown && <p className="font-semibold text-amber-900">Previous payment status is not confirmed. Do not send another payment until the check succeeds.</p>}
+      {providerPaymentRecorded && statusKnown && <p className="font-semibold text-amber-900">A payment is already recorded for this entry. Do not pay again; contact the organiser if your entry has not updated.</p>}
+      {pending && statusKnown && <p className="font-semibold text-amber-900">Your receipt is awaiting review. Do not pay again.</p>}
+      {bankCheckRequired && statusKnown && !providerPaymentRecorded && !pending && (
+        <label className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-2 font-semibold text-amber-950">
+          <input type="checkbox" checked={noEarlierDebitConfirmed}
+            onChange={event => setNoEarlierDebitConfirmed(event.target.checked)} />
+          I checked my bank account and no Razorpay amount was debited for this entry. If it was debited, I will contact the organiser instead of paying again.
+        </label>
+      )}
+
+      {loading ? <p>Checking existing payments and receipts…</p> : latest && (
         <div className="rounded-lg bg-white border border-blue-100 p-2">
           <strong>Latest proof: {latest.status === 'pending' ? 'awaiting review' : latest.status}</strong>
           <span className="ml-2">Reference {latest.transactionReference}</span>
@@ -120,7 +175,7 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
         </div>
       )}
 
-      {!loading && !pending && (
+      {!loading && mayShowUpi && (
         <form onSubmit={submit} className="space-y-2">
           <label className="block font-semibold">UPI transaction reference
             <input type="text" value={reference} onChange={e => setReference(e.target.value)}
@@ -135,7 +190,7 @@ export const GPayPaymentProof: React.FC<GPayPaymentProofProps> = ({ registration
           <label className="flex items-start gap-2 font-semibold text-blue-950">
             <input type="checkbox" checked={recipientConfirmed}
               onChange={event => setRecipientConfirmed(event.target.checked)} />
-            I checked that the recipient of this payment is exactly {tournament.gpayUpiId}.
+            I checked that the recipient of this payment is exactly {receivingUpi}.
           </label>
           <button type="submit" disabled={submitting || !file || !recipientConfirmed}
             className="rounded-lg bg-blue-800 px-3 py-2 font-bold text-white disabled:opacity-50">
