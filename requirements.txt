@@ -31,3 +31,17 @@ passlib[bcrypt]>=1.7.4
 openpyxl>=3.1.0
 python-multipart>=0.0.6
 httpx>=0.24.0
+
+# Pillow. Imported at STARTUP, not lazily: app.main includes the
+# payment_proofs router, which imports services/payment_image_analysis, which
+# does `from PIL import Image` at module level. Absent, the whole serverless
+# function dies on import and EVERY route answers
+# 500 FUNCTION_INVOCATION_FAILED -- /api/health included, which is what made
+# it look like an auth or environment problem rather than a missing package.
+#
+# It was added to backend/requirements.txt and not to this one. THIS is the
+# file Vercel installs from -- vercel.json declares the function at
+# api/index.py and the platform resolves requirements from the project root.
+# backend/requirements.txt is the local/dev list and its own header claims to
+# be the deployed one; that comment is wrong and the two must be kept in step.
+Pillow>=10.4.0,<13

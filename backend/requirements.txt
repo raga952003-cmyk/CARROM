@@ -1,7 +1,18 @@
-# Vercel installs from this file. Anything imported at runtime must be named
-# here even if it arrives locally as somebody else's transitive dependency —
-# email-validator did exactly that, so EmailStr worked on this machine and the
-# serverless function crashed on import.
+# NOT the file Vercel installs from. That is ../requirements.txt, at the
+# project root, which is where the platform resolves dependencies for the
+# function vercel.json declares at api/index.py.
+#
+# This header used to claim the opposite, and it cost a production outage:
+# Pillow was added here for the payment-proof image analysis and not to the
+# root file, so on Vercel `from PIL import Image` raised at import, app.main
+# never loaded, and EVERY route answered 500 FUNCTION_INVOCATION_FAILED --
+# /api/health included, which made a missing package look like an auth or
+# environment fault.
+#
+# So: anything imported at runtime must be named in BOTH files, even if it
+# arrives locally as somebody else's transitive dependency. email-validator
+# did exactly that once, so EmailStr worked on this machine and the
+# serverless function crashed on import. Keep the two lists in step.
 fastapi>=0.100.0
 uvicorn>=0.22.0
 pydantic[email]>=2.0.0
