@@ -56,7 +56,10 @@ async def signup(data: SignUpSchema):
     """Create a player account through Supabase's email-confirmation flow."""
     supabase = get_db()
     if not supabase:
-        raise HTTPException(status_code=500, detail="Database client not configured.")
+        raise HTTPException(
+            status_code=503,
+            detail=_unconfigured_detail(),
+        )
 
     _role_for_signup(data.role)
     try:
@@ -83,11 +86,36 @@ async def signup(data: SignUpSchema):
         logger.error("Signup failed: %s", e)
         raise HTTPException(status_code=400, detail="Could not create account. Check your details and try again.")
 
+def _unconfigured_detail() -> str:
+    """
+    Which Supabase variable is absent, rather than "not configured".
+
+    Sign-in answered a bare 500 with this sentence and no further detail, and
+    /auth/me answered another 500 from a different file for the same reason.
+    From the browser both are just "500", which is the least useful thing a
+    deployment can say about a variable somebody forgot to set.
+    """
+    missing = [name for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY")
+               if not getattr(settings, name, "")]
+    if not missing:
+        return ("Sign-in is unavailable: the database client could not be "
+                "created. Check the server log.")
+    return (
+        f"Sign-in is not available: {', '.join(missing)} "
+        f"{'is' if len(missing) == 1 else 'are'} not set on this server. "
+        "An organiser needs to set it in the deployment's environment "
+        "variables and redeploy."
+    )
+
+
 @router.post("/login")
 async def login(data: LoginSchema):
     supabase = get_db()
     if not supabase:
-        raise HTTPException(status_code=500, detail="Database client not configured.")
+        raise HTTPException(
+            status_code=503,
+            detail=_unconfigured_detail(),
+        )
     
     try:
         # Sign in via Supabase Auth
@@ -411,7 +439,10 @@ async def refresh_session(data: RefreshSchema):
     """
     supabase = get_db()
     if not supabase:
-        raise HTTPException(status_code=500, detail="Database client not configured.")
+        raise HTTPException(
+            status_code=503,
+            detail=_unconfigured_detail(),
+        )
 
     try:
         result = supabase.auth.refresh_session(data.refresh_token)

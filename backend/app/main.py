@@ -64,6 +64,34 @@ if not logging.getLogger("uvicorn.error").handlers:
 # for a variable that a redeploy can fix. So they are logged, and reported by
 # /api/health, where a person can see them without reading logs at all.
 _startup_logger = logging.getLogger("uvicorn.error")
+
+# The Supabase credentials, checked by name at startup.
+#
+# Without SUPABASE_URL and SUPABASE_ANON_KEY nobody can sign in at all:
+# get_db() returns None and /auth/login answers 500 "Database client not
+# configured", while /auth/me falls past local verification and
+# get_user_client raises ValueError -- another bare 500. Two opaque 500s in
+# the browser console, and nothing anywhere saying which variable is absent.
+#
+# A deployment cannot fix this for itself, so the least it can do is name the
+# problem in the first line of its log rather than leaving it to be inferred
+# from a stack trace.
+_MISSING_SUPABASE = [
+    name for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY",
+                      "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_JWT_SECRET")
+    if not getattr(settings, name, "")
+]
+if _MISSING_SUPABASE:
+    _startup_logger.error(
+        "NOT CONFIGURED: %s %s not set. Sign-in will fail with 500 until "
+        "%s present in this environment. On a hosted deployment set them in "
+        "the platform's environment variables and REDEPLOY -- they are read "
+        "at start-up, so adding them to a running deployment changes nothing.",
+        ", ".join(_MISSING_SUPABASE),
+        "is" if len(_MISSING_SUPABASE) == 1 else "are",
+        "it is" if len(_MISSING_SUPABASE) == 1 else "they are",
+    )
+
 if settings.API_ENV == "development":
     _startup_logger.warning(
         "CORS is wide open: ENV is '%s', so any origin may call this API with "

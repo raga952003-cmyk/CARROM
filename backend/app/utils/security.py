@@ -118,7 +118,10 @@ def get_current_user(token: str = Depends(get_access_token)):
     try:
         client = get_user_client(token)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # 503, not 500. The server is not broken; it is unconfigured, and the
+        # difference matters to whoever is looking at the log: one is a bug to
+        # find, the other is a variable to set. Carries the variable name.
+        raise HTTPException(status_code=503, detail=str(e))
 
     try:
         res = client.auth.get_user(token)

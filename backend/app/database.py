@@ -52,7 +52,18 @@ def get_user_client(access_token: str) -> Client:
     one user's token into another user's concurrent request.
     """
     if not settings.SUPABASE_URL or not settings.SUPABASE_ANON_KEY:
-        raise ValueError("Supabase client not configured.")
+        # Name the variable. This surfaced as a bare 500 on /auth/me with
+        # nothing in the browser console but the status code, and the same
+        # cause produced a second bare 500 on /auth/login -- two opaque
+        # failures that took a read of three files to connect.
+        missing = ", ".join(
+            name for name, value in (("SUPABASE_URL", settings.SUPABASE_URL),
+                                     ("SUPABASE_ANON_KEY", settings.SUPABASE_ANON_KEY))
+            if not value)
+        raise ValueError(
+            f"Supabase client not configured: {missing} is not set in this "
+            "environment. On a hosted deployment, set it in the platform's "
+            "environment variables and redeploy.")
 
     client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
     client.postgrest.auth(access_token)
