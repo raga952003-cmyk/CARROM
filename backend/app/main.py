@@ -1,8 +1,11 @@
+import ast
 import logging
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import settings
 from app.routers import (
     auth,
@@ -112,6 +115,97 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Database errors stop at the edge, sanitised.
+#
+# 63 handlers across the routers end in `except Exception as e: raise
+# HTTPException(..., detail=str(e))`. When `e` came from PostgREST, `str(e)`
+# is the driver's own payload dict, so the API answered an anonymous caller
+# with the Postgres error message, its SQLSTATE, and the offending value:
+#
+#   GET /api/tournaments/not-a-uuid
+#   500 {"detail": "{'message': 'invalid input syntax for type uuid:
+#        \"not-a-uuid\"', 'code': '22P02', 'hint': None, 'details': None}"}
+#
+# Two faults in one response. It leaks the storage layer to whoever asks, and
+# 500 is the wrong answer: nothing is broken -- the caller mistyped a URL. A
+# well-formed id that matches no row already returns a clean 404, so the two
+# spellings of "no such tournament" disagreed purely on whether the string
+# happened to parse as a UUID.
+#
+# Fixed here, once, rather than at 63 call sites: those handlers are doing the
+# right thing by refusing to swallow the error, and rewriting each one is a
+# larger and riskier edit than intercepting the response they produce. Only
+# details that actually parse as a driver payload are touched -- a handler
+# that raises 400 with a deliberate message ("Cannot confirm a drawn knockout
+# match") passes through untouched, which is why this matches on structure
+# rather than on status code.
+_PG_INVALID_TEXT = "22P02"       # invalid text representation -- malformed uuid/int
+_PG_RAISE_EXCEPTION = "P0001"    # a deliberate RAISE EXCEPTION in our own SQL
+
+
+def _driver_payload(detail):
+    """The driver's error dict if `detail` is one, else None.
+
+    PostgREST stringifies to a Python dict repr. literal_eval parses only
+    literals, so a detail that merely looks dict-ish cannot execute anything.
+    """
+    if not isinstance(detail, str) or not detail.startswith("{"):
+        return None
+    try:
+        parsed = ast.literal_eval(detail)
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None
+    if isinstance(parsed, dict) and "message" in parsed and "code" in parsed:
+        return parsed
+    return None
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _sanitise_database_errors(request: Request, exc: StarletteHTTPException):
+    payload = _driver_payload(exc.detail)
+    if payload is None:
+        return await http_exception_handler(request, exc)
+
+    code = str(payload.get("code"))
+
+    # P0001 is not a leak -- it is this application talking.
+    #
+    # 27 migrations enforce business rules with RAISE EXCEPTION, and the text
+    # they raise is written for the organiser: "A GPay proof is awaiting
+    # review", "This bank or UPI reference is already recorded". Postgres
+    # reports every one of them as SQLSTATE P0001, which is exactly how an
+    # authored message is distinguishable from a driver internal. An earlier
+    # version of this handler flattened them all to "The database rejected
+    # this request.", which told a desk collecting an entry fee nothing about
+    # why it was refused -- three offline suites caught it. Those messages
+    # pass through with their status untouched.
+    if code == _PG_RAISE_EXCEPTION:
+        return await http_exception_handler(
+            request,
+            StarletteHTTPException(
+                status_code=exc.status_code,
+                detail=str(payload.get("message") or "").strip()
+                or "The database rejected this request.",
+            ),
+        )
+
+    # Everything below here is the driver, not us. The real text is not
+    # discarded -- it goes to the log, where the people who need it can see it
+    # and the caller cannot.
+    logging.getLogger("uvicorn.error").warning(
+        "database error on %s %s: %s", request.method, request.url.path, payload,
+    )
+
+    if code == _PG_INVALID_TEXT:
+        status, message = 404, "Not found."
+    else:
+        status, message = exc.status_code, "The database rejected this request."
+
+    return await http_exception_handler(
+        request, StarletteHTTPException(status_code=status, detail=message),
+    )
+
 
 # Mount all endpoint domain routers
 app.include_router(auth.router, prefix="/api")
