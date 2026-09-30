@@ -923,8 +923,21 @@ def test_a_wrong_winner_can_be_corrected():
     reasons = " | ".join(e.get("reason") or "" for e in h.db.tables.get("score_audit_logs", []))
     check("the reopen is on the record with its reason",
           "clicked by mistake" in reasons, reasons[:200])
-    check("and so is the override of a confirmed board",
-          "OVERRIDE" in reasons, reasons[:200])
+    # NOT "OVERRIDE ..." any more, and correctly so.
+    #
+    # That prefix is written when a board is corrected while still LOCKED --
+    # a silent rewrite of a confirmed game, which is the thing worth marking.
+    # Here the organiser reopened the result first, which releases the locks
+    # precisely so the boards can be corrected, so by the time this write
+    # lands there is no confirmed board to override. The reopen is the record,
+    # and it is checked immediately above.
+    #
+    # The prefix itself is still covered, on the flow that produces it:
+    # test_reopen, "the override is written into the score history", which
+    # corrects a locked board with no reopen in front of it.
+    check("and the correction that followed the reopen is on the record too",
+          "clicked by mistake" in reasons and "reopened for correction" in reasons,
+          reasons[:200])
 
 
 def test_correcting_a_classic_board_is_idempotent():

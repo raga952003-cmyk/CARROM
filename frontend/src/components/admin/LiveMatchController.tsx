@@ -77,6 +77,18 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   // person who could not fix it, and found that out from a 403.
   const canReopen = role === 'admin' && (access ? access.canManage : false);
 
+  // Whether this admin may actually SCORE this tournament.
+  //
+  // The access record was read here for canReopen and nothing else: every
+  // other control -- Start, Pause, Confirm, Add Board, the tie-break panel,
+  // Remove unplayed, the per-board edit buttons -- was gated on bare
+  // `role === 'admin'`. An admin with no access to this tournament, or one
+  // granted a role that does not include scoring, was shown the whole
+  // scorekeeper interface and every write answered 403. The fixtures toolbar
+  // already solves exactly this, banner included (FixtureScheduleView,
+  // `canManage`); this screen never got the same treatment.
+  const canScore = role === 'admin' && (access ? access.canScore : false);
+
   const rules = tournament.rules || ({} as any);
   const totalSets = Math.max(1, match.numberOfSets || rules.numberOfSets || 1);
   const boardsPerSet = rules.boardsPerSet || match.maxBoards || 8;
@@ -254,7 +266,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const needsDecidingBoard = setBoards.length >= boardsPerSet
     && setBoards.every(board => board.status === 'completed')
     && setPoints.player1 === setPoints.player2;
-  const canAddBoard = role === 'admin' && !match.resultConfirmed
+  const canAddBoard = canScore && !match.resultConfirmed
     && (rules.setWinnerRule === 'target_points' || rules.scoringMode === 'official_icf'
       ? needsDecidingBoard
       : totalSets === 1);
@@ -489,18 +501,31 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         </button>
 
         <div className="flex items-center space-x-2">
-          {role === 'admin' ? (
+          {canScore ? (
             <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-[#D4A72C] text-[#202522] shadow-xs">
               <ShieldAlert className="w-3.5 h-3.5" />
               Official Admin Scorekeeper Mode
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-700">
-              Player Live Spectator Mode (Read-Only)
+              {role === 'admin'
+                ? 'Read-Only — no scorer access to this tournament'
+                : 'Player Live Spectator Mode (Read-Only)'}
             </span>
           )}
         </div>
       </div>
+
+      {/* An admin who cannot score here gets told why, rather than a screen
+          with its controls quietly missing. Same shape as the fixtures
+          toolbar, which has said this for a while. */}
+      {role === 'admin' && !canScore && (
+        <div className="px-4 py-2 text-[11px] text-gray-600 bg-gray-50 border border-gray-200 rounded-xl">
+          Scoring this match belongs to whoever runs this tournament. Ask them
+          for scorer access from the Access tab; until then this screen follows
+          the match but cannot record on it.
+        </div>
+      )}
 
       {/* Main Scoreboard & Live Timer Hero Card */}
       <div className="bg-white rounded-2xl border border-gray-200/80 shadow-md overflow-hidden">
@@ -674,7 +699,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         )}
 
         {/* A level match needs a human, and this is where they are asked. */}
-        {match.tieBreakRequired && !match.resultConfirmed && role === 'admin' && (
+        {match.tieBreakRequired && !match.resultConfirmed && canScore && (
           <div className="mx-4 mb-3 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
             <div className="flex items-start gap-2 mb-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
@@ -722,7 +747,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         )}
 
         {/* Action Controls Footer */}
-        {role === 'admin' && (
+        {canScore && (
           <div className="bg-[#F8F6F0] p-4 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center space-x-2">
               {!isLive ? (
@@ -878,7 +903,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             {/* Add Board has no undo, and under remaining-coins scoring an
                 unplayed board leaves the match permanently undecided, so
                 there has to be a way back. */}
-            {role === 'admin' && totalSets === 1 && !match.resultConfirmed && hasUnplayedTail && (
+            {canScore && totalSets === 1 && !match.resultConfirmed && hasUnplayedTail && (
               <button
                 onClick={() => setIsRemoveBoardsModalOpen(true)}
                 disabled={!!busy}
@@ -898,7 +923,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
         {/* Once the result is confirmed the server refuses every board write,
             so the buttons below are locked and this says what unlocks them. */}
-        {role === 'admin' && match.resultConfirmed && (
+        {canReopen && match.resultConfirmed && (
           <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-700">
             <span className="flex items-center gap-1.5">
               <AlertCircle className="w-3.5 h-3.5 text-gray-500 shrink-0" />
@@ -1022,7 +1047,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                   </div>
 
                   {/* Admin Actions */}
-                  {role === 'admin' && (
+                  {canScore && (
                     <div className="flex items-center space-x-2 self-end sm:self-auto">
                       {!isBoardCompleted ? (
                         <button

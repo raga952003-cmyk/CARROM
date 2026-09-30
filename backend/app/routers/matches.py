@@ -1123,6 +1123,25 @@ async def submit_board(
                 "queen_claimed_by": data.queen_claimed_by,
                 "queen_covered": data.queen_covered,
                 "completed_at": datetime.utcnow().isoformat(),
+                # Locked, exactly as the remaining-coins branch above does it.
+                #
+                # update_board's confirmed-board guard is `if pb.get("locked")
+                # and not override`, keyed purely on this flag -- and the
+                # classic branch never set it. So the protection the scoring
+                # screen describes ("re-submitting would quietly rewrite a
+                # played game") applied to remaining-coins tournaments only.
+                # Probed side by side on identical matches: the remaining-coins
+                # board answered 409 to a plain PUT, the classic board accepted
+                # it and rewrote 15-4 to 0-25 with no override, no reason, and
+                # an audit row recording it as an ordinary correction rather
+                # than an override.
+                #
+                # The degraded-schema strip below pops every
+                # _BOARD_DETAIL_COLUMNS key, these three included, so a
+                # deployment without migration 005 is unaffected.
+                "locked": True,
+                "confirmed_by": admin["id"],
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
             }
 
         # Recompute the match from the board set as it will be after this write.
@@ -1495,6 +1514,33 @@ async def reopen_match(id: str, data: MatchReopenSchema, admin = Depends(verify_
             "winner_name": None,
         }
         res = admin_db.table("matches").update(reopened).eq("id", id).execute()
+
+        # The boards are no longer confirmed either.
+        #
+        # This route exists to "take a confirmed result back so its boards can
+        # be corrected", and a locked board refuses correction without an
+        # override and a reason. Reopening therefore has to release the lock,
+        # or it does not do the one thing it is for.
+        #
+        # It never used to, and the workflow only worked by accident: the
+        # classic scoring path was not setting `locked` at all, so classic
+        # boards were correctable because they were never protected. Locking
+        # them -- which is what stops a played board being silently rewritten
+        # -- turned reopen into a dead end, and twelve reopen invariants said
+        # so immediately. Releasing the lock here is the half that was missing.
+        #
+        # Guarded on board_detail_available for the same reason every other
+        # write of these columns is: they arrive with migration 005.
+        if board_detail_available(admin_db):
+            try:
+                admin_db.table("boards").update({
+                    "locked": False,
+                    "confirmed_by": None,
+                    "confirmed_at": None,
+                }).eq("match_id", id).execute()
+            except Exception as e:
+                logger.warning(
+                    "Reopened match %s but could not release its board locks: %s", id, e)
 
         # If the tournament was already finished, it is not any more.
         #

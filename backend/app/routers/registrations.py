@@ -180,11 +180,68 @@ async def waive_fee(id: str, body: FeeWaiver, admin=Depends(verify_admin)):
     return serialize_registration(updated[0], include_contact=True)
 
 
+def _refuse_reject_with_confirmed_results(admin_db, registration_id: str) -> None:
+    """
+    An entrant with results played cannot simply be un-entered.
+
+    The points table is built from registrations that are still 'approved'
+    (standings._participants_for), and calculate_points_table drops any match
+    whose two sides are not both in that pool. So rejecting somebody mid-event
+    does not just remove them -- it removes every match they played, and takes
+    their OPPONENTS' results with it.
+
+    Probed: a three-player round robin, all three matches confirmed. Rejecting
+    Cara returned 200 with no warning, and Bob -- an uninvolved third party --
+    went from 2 played / 1 won / 2 points to 1 / 0 / 0. He lost a match he had
+    actually won, which is enough to move him across a qualifying cut.
+
+    Refused rather than repaired here, mirroring the fixture routes, which
+    already refuse a destructive operation when result_confirmed holds. The
+    deeper fix is for the table to stop deriving its pool from live
+    registration status, so an entrant can be withdrawn without rewriting
+    anybody else's record; that is a larger change than this guard.
+    """
+    # Loaded here rather than taken from the caller: _authorise_registration
+    # returns None, so passing "the row it already read" silently handed this
+    # an empty dict and the guard returned without checking anything.
+    rows = admin_db.table("registrations").select(
+        "tournament_id, player_id, team_id").eq("id", registration_id).execute().data or []
+    if not rows:
+        return
+    registration = rows[0]
+
+    tournament_id = registration.get("tournament_id")
+    participant = registration.get("player_id") or registration.get("team_id")
+    if not tournament_id or not participant:
+        return
+
+    played = admin_db.table("matches").select(
+        "match_number, player1_id, player2_id, result_confirmed"
+    ).eq("tournament_id", tournament_id).eq("result_confirmed", True).execute().data or []
+
+    theirs = [m for m in played
+              if participant in (m.get("player1_id"), m.get("player2_id"))]
+    if not theirs:
+        return
+
+    numbers = ", ".join("#%s" % m.get("match_number") for m in theirs[:5])
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"This entrant has {len(theirs)} confirmed result(s) ({numbers}). "
+            "Rejecting them would take those matches out of the points table "
+            "and change their opponents' standings too. Reopen and void the "
+            "results first if the entry really must be removed."
+        ),
+    )
+
+
 @router.post("/{id}/reject")
 async def reject_registration(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
         _authorise_registration(admin_db, id, admin)
+        _refuse_reject_with_confirmed_results(admin_db, id)
 
         registration = _set_status(id, "rejected", admin_db, actor=admin)
         if registration.get("payment_status") == "paid":

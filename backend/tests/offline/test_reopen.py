@@ -408,7 +408,12 @@ def test_correction_guards():
           m["status"] == "completed" and m["winner_id"] == p1, m)
 
     for score, label in ((999, "an impossible score"), (-1, "a negative score")):
-        r = h.put("/api/matches/%s/boards/2?reason=Slip" % mid,
+        # override: the board is confirmed, and a confirmed board needs one.
+        # Classic boards used not to be locked at all, so this correction
+        # landed without it; they are locked now, the same as every other
+        # mode, and "a locked board still needs an override" above is the
+        # contract. This case is testing something else, so it supplies one.
+        r = h.put("/api/matches/%s/boards/2?reason=Slip&override=true" % mid,
                   {**classic_fix(2, "player1"), "player1Score": score}, user_id=admin)
         check("an out-of-range correction is refused with a readable reason",
               r.status_code == 422 and "{" not in detail(r),
@@ -422,8 +427,10 @@ def test_correction_guards():
     check("correcting a board that does not exist is a 404", r.status_code == 404,
           "%s %s" % (r.status_code, detail(r)))
 
-    r = h.put("/api/matches/%s/boards/2?reason=Slip" % mid, classic_fix(2, "player2"),
-              user_id=admin)
+    # override: board 2 is confirmed. What this case is about is what happens
+    # to the MATCH when the deciding board changes hands, not the lock.
+    r = h.put("/api/matches/%s/boards/2?reason=Slip&override=true" % mid,
+              classic_fix(2, "player2"), user_id=admin)
     check("a correction that takes the deciding board away is accepted",
           r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
     m = match_row(h, mid)
@@ -451,8 +458,9 @@ def test_correction_guards():
     real_rpc = h.db.rpc
     h.db.rpc = lambda name, params=None: _MissingFunction(name)
     try:
-        r = h.put("/api/matches/%s/boards/1?reason=Recount" % mid, classic_fix(1, "player2"),
-                  user_id=admin)
+        # override for the same reason as above: board 1 is confirmed.
+        r = h.put("/api/matches/%s/boards/1?reason=Recount&override=true" % mid,
+                  classic_fix(1, "player2"), user_id=admin)
     finally:
         h.db.rpc = real_rpc
     check("a correction still lands when the transactional RPC is missing",
@@ -461,7 +469,8 @@ def test_correction_guards():
     m = match_row(h, mid)
     check("the fallback writes the board, the history and the match together",
           b1["player2_score"] == 10 and m["winner_id"] == p2 and m["status"] == "completed"
-          and any(s.get("reason") == "Recount" for s in score_history(h, mid, 1)),
+          and any("Recount" in (s.get("reason") or "")
+                      for s in score_history(h, mid, 1)),
           {"board": (b1["player1_score"], b1["player2_score"]),
            "match": (m.get("winner_id"), m.get("status")),
            "history": [s.get("reason") for s in score_history(h, mid, 1)]})
