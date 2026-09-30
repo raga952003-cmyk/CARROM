@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
   ChevronLeft, Check, RotateCw, Target, Grid3x3, Trophy,
-  Play, Timer, ArrowRight, Loader2, Calendar, Layers, Users,
+  Play, Timer, ArrowRight, Loader2, Calendar, Layers, Users, UserX,
 } from 'lucide-react';
 import { Tournament, Match } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
+import { WalkoverModal } from './WalkoverModal';
 import { MatchTimer } from './MatchTimer';
 
 type Step = 'intro' | 'spin' | 'result' | 'winner' | 'choice' | 'ready';
@@ -43,6 +44,15 @@ export const MatchTossControl: React.FC<MatchTossControlProps> = ({
   const [winnerId, setWinnerId] = useState<string>('');
   const [choice, setChoice] = useState<Choice>('strike');
   const [busy, setBusy] = useState(false);
+  // A no-show is settled here, not after a toss nobody threw.
+  //
+  // AdminDashboard renders this screen INSTEAD of LiveMatchController while a
+  // match still needs its toss, and the Walkover button lives in that other
+  // screen's footer. So an organiser whose player had not turned up had to
+  // record a toss first -- inventing a coin result, a winner and a choice for
+  // a match that was never played -- purely to reach the control that says
+  // nobody played it. The invented toss then sat in the record as fact.
+  const [isWalkoverOpen, setIsWalkoverOpen] = useState(false);
   const [error, setError] = useState('');
 
   const sides = [
@@ -121,6 +131,22 @@ export const MatchTossControl: React.FC<MatchTossControlProps> = ({
         <span className="ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-50 text-emerald-800 border border-emerald-200">
           {match.status}
         </span>
+      </div>
+
+      {/* Before the toss, because this is when an organiser finds out. */}
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center justify-between gap-3 bg-gray-50/60">
+        <span className="text-[11px] text-gray-600">
+          Somebody not here? A walkover needs no toss.
+        </span>
+        <button
+          type="button"
+          onClick={() => setIsWalkoverOpen(true)}
+          className="px-3 py-1.5 bg-white hover:bg-gray-100 text-gray-700 text-[11px] font-bold rounded-lg border border-gray-300 inline-flex items-center gap-1.5 shrink-0"
+          title="A player did not arrive, retired, or conceded"
+        >
+          <UserX className="w-3.5 h-3.5 text-gray-500" />
+          <span>Walkover</span>
+        </button>
       </div>
 
       {/* Stepper — hidden on the intro screen, as in the flow */}
@@ -415,6 +441,20 @@ export const MatchTossControl: React.FC<MatchTossControlProps> = ({
           </div>
         )}
       </div>
+
+      {isWalkoverOpen && (
+        <WalkoverModal
+          match={match}
+          onClose={() => setIsWalkoverOpen(false)}
+          onDone={() => {
+            setIsWalkoverOpen(false);
+            // Settled: there is nothing to toss for and nothing to score, so
+            // leave the match rather than dropping into the scoring screen.
+            refreshTournaments();
+            onBack();
+          }}
+        />
+      )}
     </div>
   );
 };
