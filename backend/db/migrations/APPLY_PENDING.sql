@@ -1,5 +1,20 @@
 -- =============================================================================
--- Carrom Arena — pending migrations, combined
+-- !! STALE. THIS BUNDLE STOPS AT 016. DO NOT TRUST IT AS "everything pending".
+--
+-- Migrations 017 through 029 were added after this file was last rebuilt and
+-- are NOT in it -- the secure data API, the duplicate-charge ledger, atomic
+-- draw and schedule, the whole GPay payment-proof chain, atomic match delete,
+-- registration/draw atomicity, the receipt payee guard, and the official
+-- carrom score columns. An operator who pastes this file and stops will be
+-- missing all of them, and /api/health cannot see several of them to say so.
+--
+-- Apply the individual files in numeric order instead, or rebuild this bundle.
+-- Left in place rather than deleted because 013 and 014 still need to be run
+-- in THAT order and this file is the only thing that records why.
+-- =============================================================================
+
+-- =============================================================================
+-- Carrom Arena — pending migrations, combined (as of 016)
 --
 -- Everything the database may still be missing, in one paste. All three parts
 -- are idempotent: running this twice is harmless, and running it when some of

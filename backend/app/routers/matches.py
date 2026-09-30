@@ -2297,3 +2297,159 @@ async def update_match_fixture(
     except Exception as e:
         logger.error("Updating match %s failed: %s", id, e)
         raise HTTPException(status_code=400, detail=str(e))
+
+def _missing_set_tie_breaks(error: Exception) -> bool:
+    """Whether this failure is the 029 column not being there yet."""
+    text = str(error).lower()
+    return "set_tie_breaks" in text and any(
+        m in text for m in ("does not exist", "42703", "pgrst204", "schema cache"))
+
+
+@router.post("/{id}/sets/{set_number}/tie-break")
+async def resolve_set_tie_break(
+    id: str,
+    set_number: int,
+    data: TieBreakSchema,
+    admin = Depends(verify_admin),
+):
+    """
+    Record the umpire's sudden-death ruling on ONE game of a match.
+
+    The AICF 21-point / six-board age-group variant settles a level sixth
+    board by sudden death rather than by playing a seventh. That distinction
+    is not cosmetic: a seventh board would manufacture coins and move net
+    score difference, which is the league's tie-break, so the ruling is stored
+    against the game instead of being scored as play.
+
+    Distinct from POST /{id}/tie-break, which rules on a whole MATCH that
+    finished level. This rules on one game inside a match that is still
+    running, and the match carries on: the next game's first board opens.
+
+    `matches.set_tie_breaks` is the store, keyed by game number as a string,
+    and `summarise_sets` reads exactly this shape -- method 'sudden_death'
+    plus a winnerId that is one of the two players -- to mark the game
+    complete (scoring_engine, "validated_decision").
+    """
+    admin_db = get_admin_db()
+    try:
+        match, tb_tournament = _authorise_match_with_tournament(
+            admin_db, id, admin, "match.confirm")
+
+        if match.get("result_confirmed"):
+            raise HTTPException(
+                status_code=409,
+                detail="This result is already confirmed. Reopen it before ruling on a game.",
+            )
+
+        p1, p2 = match.get("player1_id"), match.get("player2_id")
+        if data.winner_id not in (p1, p2):
+            raise HTTPException(
+                status_code=422,
+                detail="The winner must be one of the two players in this match.",
+            )
+        if not (data.reason or "").strip():
+            raise HTTPException(
+                status_code=422,
+                detail=("A reason is required: a game decided without one cannot be "
+                        "explained later."),
+            )
+
+        rules = (tb_tournament or {}).get("rules") or {}
+        total_sets, _per_set = set_layout(match, rules)
+        if set_number < 1 or set_number > total_sets:
+            raise HTTPException(
+                status_code=422,
+                detail=f"This match has {total_sets} game(s); there is no game {set_number}.",
+            )
+
+        boards = admin_db.table("boards").select("*").eq(
+            "match_id", id).order("board_number").execute().data or []
+
+        # Only a game the engine says is actually waiting on a ruling. Without
+        # this the route is "award any game to anyone" -- the same hole the
+        # match-level tie-break had, where a decided match could be handed to
+        # the player who lost it.
+        waiting = next(
+            (row for row in summarise_sets(match, boards, rules)
+             if row.get("setNumber") == set_number),
+            None,
+        )
+        if not waiting or not waiting.get("needsSetTieBreak"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Game {set_number} is not waiting on a sudden-death ruling. "
+                    "A game is only decided this way when it is level at the point "
+                    "limit with every board played."
+                ),
+            )
+
+        existing = match.get("set_tie_breaks")
+        decisions = dict(existing) if isinstance(existing, dict) else {}
+        decisions[str(set_number)] = {
+            "method": "sudden_death",
+            "winnerId": data.winner_id,
+            "winnerName": match.get("player1_name") if data.winner_id == p1
+                          else match.get("player2_name"),
+            "reason": data.reason.strip(),
+            "decidedBy": admin.get("id"),
+            "decidedByName": admin.get("name"),
+            "decidedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Written before the recompute, so apply_set_results reads the ruling
+        # it is meant to act on rather than the state before it.
+        decided_match = {**match, "set_tie_breaks": decisions}
+        updated = apply_set_results(decided_match, boards, rules)
+
+        patch = {
+            "set_tie_breaks": decisions,
+            "player1_sets_won": updated.get("player1SetsWon", 0),
+            "player2_sets_won": updated.get("player2SetsWon", 0),
+            "tie_break_required": bool(updated.get("tieBreakRequired")),
+        }
+        if updated.get("winnerId"):
+            patch.update({
+                "winner_id": updated.get("winnerId"),
+                "winner_name": updated.get("winnerName"),
+                "status": "completed",
+                "match_completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+        try:
+            admin_db.table("matches").update(patch).eq("id", id).execute()
+        except Exception as e:
+            if not _missing_set_tie_breaks(e):
+                raise
+            raise HTTPException(
+                status_code=503,
+                detail=("matches.set_tie_breaks is missing. Apply "
+                        "db/migrations/029_official_score_finishes_and_set_ties.sql, "
+                        "then record the ruling again."),
+            )
+
+        # The match carries on: open the next game's first board. Guarded on
+        # 'pending' so a board already in play or already scored is untouched.
+        if set_number < total_sets and not updated.get("winnerId"):
+            admin_db.table("boards").update({"status": "in_progress"}).eq(
+                "match_id", id).eq("set_number", set_number + 1).eq(
+                "board_number", 1).eq("status", "pending").execute()
+
+        record_audit(
+            admin_db, actor=admin, action="match.set_tie_break",
+            entity_type="match", entity_id=id,
+            new_state={"setNumber": set_number,
+                       "winnerId": data.winner_id,
+                       "reason": data.reason.strip()},
+            request_context={"setsWon": [patch["player1_sets_won"],
+                                         patch["player2_sets_won"]]},
+        )
+
+        fresh = (admin_db.table("matches").select("*").eq(
+            "id", id).execute().data or [{**match, **patch}])[0]
+        return serialize_match(fresh)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Set tie-break on match %s failed: %s", id, e)
+        raise HTTPException(status_code=400, detail=str(e))

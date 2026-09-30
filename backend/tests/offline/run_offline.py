@@ -22,6 +22,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 import trace as trace_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +30,10 @@ BACKEND = os.path.abspath(os.path.join(HERE, "..", ".."))
 for path in (BACKEND, HERE):
     if path not in sys.path:
         sys.path.insert(0, path)
+
+# A suite that raised rather than reporting. Distinct from a failure
+# count so the summary can say which happened.
+CRASHED = -1
 
 FAST = "--fast" in sys.argv
 NO_COVER = "--no-cover" in sys.argv
@@ -101,8 +106,34 @@ def main():
         print("\n" + "#" * 78)
         print("# %s" % label)
         print("#" * 78)
-        module = __import__(module_name)
-        code = module.main()
+        # A suite that raises must not take the run down with it.
+        #
+        # Every suite counts its own failures and returns a code; that is the
+        # contract. But a suite can also raise -- an assert outside the check()
+        # helper, an import error, a route returning 404 to a bare `assert
+        # response.status_code == 200`. That exception used to propagate
+        # straight out of main(), and the run DIED at that point: the suites
+        # after it never executed and no summary was printed at all. Observed
+        # with test_official_carrom asserting on a route that did not exist
+        # yet -- unit, scenario, integration, system and end-to-end passed,
+        # and then payments, acceptance, health, lifecycle, reopen,
+        # qualifiers, fixtures and payment_proofs silently did not run. CI
+        # went red saying nothing whatever about the other eight.
+        #
+        # Caught, counted as a failure, and the run carries on. A crash is
+        # strictly worse news than a failed assertion, so it is reported at
+        # least as loudly -- with its traceback, which is the thing you need.
+        try:
+            module = __import__(module_name)
+            code = module.main()
+        except BaseException as exc:                       # noqa: BLE001
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            print()
+            print("!! %s CRASHED -- it did not finish, so its checks "
+                  "did not all run." % module_name)
+            traceback.print_exc()
+            code = CRASHED
         results.append((label, code))
 
     counts = {}
@@ -167,9 +198,16 @@ def main():
     print("=" * 78)
     failures = 0
     for label, code in results:
-        print("  %-58s %s" % (label, "PASS" if code == 0 else
-                              "%d INVARIANT(S) VIOLATED" % code))
-        failures += code
+        if code == CRASHED:
+            state = "CRASHED - did not finish"
+        elif code == 0:
+            state = "PASS"
+        else:
+            state = "%d INVARIANT(S) VIOLATED" % code
+        print("  %-58s %s" % (label, state))
+        # A crash counts as one failure rather than -1, which would otherwise
+        # cancel out a real violation elsewhere and hand back a green exit.
+        failures += 1 if code == CRASHED else code
     print("\n  elapsed: %.1fs" % (time.time() - started))
     return failures
 

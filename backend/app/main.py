@@ -129,6 +129,10 @@ _COLUMN_PROBES = (
     ("012_lifecycle", "tournaments", "champion_id"),
     ("015_payments", "payments", "razorpay_order_id"),
     ("020_gpay_payment_proofs", "payment_proofs", "transaction_reference"),
+    # 029 adds two board columns and one match column. Probed on the board
+    # side: it is the one a scorer hits on every single submission, so if
+    # only half the migration landed this is the half worth knowing about.
+    ("029_official_score_finishes_and_set_ties", "boards", "finish_type"),
 )
 
 # Migrations that leave nothing PostgREST can see. Reporting one of these as
