@@ -10,6 +10,47 @@ ENV_FILE = BACKEND_DIR / ".env"
 
 load_dotenv(ENV_FILE)
 
+def _resolved_env() -> str:
+    """
+    Which environment this process is in, preferring what the platform knows.
+
+    ENV is read first, so an explicit setting always wins. When it is absent
+    the old default was "development" -- and a deployment that nobody
+    remembered to set it on therefore ran with allow_origins=["*"] AND
+    allow_credentials=True, which lets any website on the internet call this
+    API with a signed-in user's cookies. Observed in production: /api/health
+    reporting env "development" on the live host.
+
+    Vercel sets VERCEL=1 on every deployment and VERCEL_ENV to
+    production | preview | development, so the platform already knows the
+    answer. Defaulting to development is only right on a laptop.
+    """
+    explicit = (os.getenv("ENV") or "").strip()
+    if explicit:
+        return explicit
+    if os.getenv("VERCEL"):
+        return "production" if os.getenv("VERCEL_ENV") == "production" else "preview"
+    return "development"
+
+
+def _platform_origin() -> str:
+    """
+    The deployment's own URL, when the platform tells us and nobody else has.
+
+    Only used as a CORS fallback. On Vercel the app and this API are the same
+    origin -- vercel.json rewrites /api/* to the function and everything else
+    to index.html -- so the site itself never needs CORS at all. This is for
+    the canonical production domain calling a preview, and for making the
+    allow-list non-empty so the posture is "restricted" rather than a
+    wildcard.
+    """
+    for name in ("VERCEL_PROJECT_PRODUCTION_URL", "VERCEL_URL"):
+        host = (os.getenv(name) or "").strip()
+        if host:
+            return host if host.startswith("http") else f"https://{host}"
+    return ""
+
+
 class Settings(BaseSettings):
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
@@ -17,7 +58,7 @@ class Settings(BaseSettings):
     SUPABASE_JWT_SECRET: str = os.getenv("SUPABASE_JWT_SECRET", "")
     
     API_PORT: int = int(os.getenv("PORT", 8000))
-    API_ENV: str = os.getenv("ENV", "development")
+    API_ENV: str = _resolved_env()
 
     # Server-side only. The browser calls /api/ai/* instead, so the key is
     # never inlined into the frontend bundle.
@@ -68,7 +109,15 @@ class Settings(BaseSettings):
     ).strip().lower() in ("1", "true", "yes", "on")
 
     def cors_origin_list(self) -> list[str]:
-        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        listed = [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+        if listed:
+            return listed
+        # Nothing configured: fall back to the deployment's own origin rather
+        # than an empty list. Same-origin requests do not consult CORS at all,
+        # so the site works either way -- but an empty list reads as "somebody
+        # forgot" and this at least names the host the API belongs to.
+        own = _platform_origin()
+        return [own] if own else []
 
     class Config:
         env_file = str(ENV_FILE)
