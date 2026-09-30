@@ -93,10 +93,30 @@ def _official_game_points(boards, set_number: int, board_number: int, winner: st
                and b.get("status") == "completed")
 
 
-def _validate_official_observation(winner, coins_with, coins, queen_by, covered_by):
+def _validate_official_observation(
+    winner, coins_with, coins, queen_by, covered_by,
+    finish_type="normal", special_finish_extra_point=False,
+    p1_penalty=0, p2_penalty=0,
+):
     """ICF boards have one winner and credit only opposing men still on board."""
     if winner not in ("player1", "player2"):
         raise HTTPException(status_code=422, detail="Choose who finished and won this board.")
+    if finish_type not in ("normal", "own_last_coin_queen_left"):
+        raise HTTPException(status_code=422, detail="Choose a valid board finish type.")
+    if finish_type == "own_last_coin_queen_left":
+        if coins_with not in (None, "none") or coins != 0:
+            raise HTTPException(status_code=422, detail=(
+                "For the queen-left final-coin finish, record no opposing coins remaining."))
+        if (queen_by or "none") != "none" or (covered_by or "none") != "none":
+            raise HTTPException(status_code=422, detail=(
+                "The queen must still be on the board for this special finish."))
+        if p1_penalty or p2_penalty:
+            raise HTTPException(status_code=422, detail=(
+                "Record the demanded improper-stroke point using the special finish option."))
+        return
+    if special_finish_extra_point:
+        raise HTTPException(status_code=422, detail=(
+            "An extra point applies only to the queen-left improper-stroke finish."))
     opponent = "player2" if winner == "player1" else "player1"
     if coins_with != opponent:
         raise HTTPException(status_code=422, detail=(
@@ -635,6 +655,11 @@ async def update_board(
         # scoring, silently re-scored under the classic formula.
         corrected_rules = ((tournament_row or {}).get("rules") or {})
         corrected_mode = scoring_mode(corrected_rules)
+        if corrected_mode != "official_icf" and (
+                data.finish_type not in (None, "normal")
+                or data.special_finish_extra_point):
+            raise HTTPException(status_code=422, detail=(
+                "Special board finishes are available only under federation scoring."))
         if corrected_mode == "official_icf":
             if not board_detail_available(admin_db):
                 raise HTTPException(status_code=503, detail=(
@@ -667,6 +692,10 @@ async def update_board(
                     restated("coins_remaining", "coins_remaining"),
                     restated("queen_pocketed_by", "queen_pocketed_by") or data.queen_claimed_by,
                     restated("queen_covered_by", "queen_covered_by"),
+                    restated("finish_type", "finish_type", "normal"),
+                    restated("special_finish_extra_point", "special_finish_extra_point", False),
+                    restated("p1_penalty", "p1_penalty", 0),
+                    restated("p2_penalty", "p2_penalty", 0),
                 )
             outcome = board_result(
                 winner=restated("board_winner", "board_winner", "none"),
@@ -677,6 +706,9 @@ async def update_board(
                 queen_pocketed_by=restated("queen_pocketed_by", "queen_pocketed_by")
                                   or data.queen_claimed_by,
                 queen_covered_by=restated("queen_covered_by", "queen_covered_by"),
+                finish_type=restated("finish_type", "finish_type", "normal"),
+                special_finish_extra_point=restated(
+                    "special_finish_extra_point", "special_finish_extra_point", False),
                 p1_penalty=restated("p1_penalty", "p1_penalty", 0) or 0,
                 p2_penalty=restated("p2_penalty", "p2_penalty", 0) or 0,
                 game_points_before=(
@@ -784,6 +816,12 @@ async def update_board(
                 "p2_penalty": restated("p2_penalty", "p2_penalty", 0) or 0,
                 "scoring_warnings": outcome["warnings"] or None,
             })
+            if corrected_mode == "official_icf":
+                board_patch.update({
+                    "finish_type": restated("finish_type", "finish_type", "normal"),
+                    "special_finish_extra_point": restated(
+                        "special_finish_extra_point", "special_finish_extra_point", False),
+                })
 
         if corrected_mode == "official_icf" and data.status != "completed":
             # To correct an earlier game score, first roll back later boards
@@ -951,6 +989,10 @@ async def submit_board(
 
         rules = ((tournament_row or {}).get("rules") or {})
         mode = scoring_mode(rules)
+        if mode != "official_icf" and (
+                data.finish_type != "normal" or data.special_finish_extra_point):
+            raise HTTPException(status_code=422, detail=(
+                "Special board finishes are available only under federation scoring."))
         if mode == "official_icf" and not board_detail_available(admin_db):
             raise HTTPException(status_code=503, detail=(
                 "Official carrom scoring needs board detail migration 005."))
@@ -986,6 +1028,8 @@ async def submit_board(
                     data.board_winner, data.coins_remaining_with, data.coins_remaining,
                     data.queen_pocketed_by or data.queen_claimed_by,
                     data.queen_covered_by,
+                    data.finish_type, data.special_finish_extra_point,
+                    data.p1_penalty, data.p2_penalty,
                 )
             outcome = board_result(
                 winner=data.board_winner or "none",
@@ -999,6 +1043,8 @@ async def submit_board(
                 coins_remaining=data.coins_remaining,
                 queen_pocketed_by=data.queen_pocketed_by or data.queen_claimed_by,
                 queen_covered_by=data.queen_covered_by,
+                finish_type=data.finish_type,
+                special_finish_extra_point=data.special_finish_extra_point,
                 p1_penalty=data.p1_penalty or 0,
                 p2_penalty=data.p2_penalty or 0,
                 game_points_before=(
@@ -1037,6 +1083,8 @@ async def submit_board(
                 "coins_remaining": data.coins_remaining,
                 "queen_pocketed_by": data.queen_pocketed_by or data.queen_claimed_by,
                 "queen_covered_by": data.queen_covered_by,
+                "finish_type": data.finish_type,
+                "special_finish_extra_point": data.special_finish_extra_point,
                 "queen_status": outcome["queen_status"],
                 "queen_awarded_to": outcome["queen_awarded_to"],
                 "base_points": outcome["base_points"],

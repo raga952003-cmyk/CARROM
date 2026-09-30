@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS public.matches (
     player2_board_wins INTEGER DEFAULT 0 NOT NULL,
     player1_total_points INTEGER DEFAULT 0 NOT NULL,
     player2_total_points INTEGER DEFAULT 0 NOT NULL,
+    set_tie_breaks JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(set_tie_breaks) = 'object'),
     next_match_id UUID REFERENCES public.matches(id) ON DELETE SET NULL,
     next_match_slot TEXT CHECK (next_match_slot IN ('player1', 'player2')),
     bracket_position JSONB, -- { "round": 1, "matchIndex": 0 }
@@ -132,6 +133,11 @@ CREATE TABLE IF NOT EXISTS public.boards (
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed')),
     player1_score INTEGER DEFAULT 0 NOT NULL,
     player2_score INTEGER DEFAULT 0 NOT NULL,
+    finish_type TEXT NOT NULL DEFAULT 'normal' CHECK (finish_type IN ('normal', 'own_last_coin_queen_left')),
+    special_finish_extra_point BOOLEAN NOT NULL DEFAULT false,
+    CONSTRAINT special_finish_extra_point_requires_finish CHECK (
+        NOT special_finish_extra_point OR finish_type = 'own_last_coin_queen_left'
+    ),
     queen_claimed_by TEXT DEFAULT 'none' CHECK (queen_claimed_by IN ('player1', 'player2', 'none')),
     queen_covered BOOLEAN DEFAULT false NOT NULL,
     fouls_player1 INTEGER DEFAULT 0 NOT NULL,

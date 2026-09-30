@@ -203,9 +203,11 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   }
   const invalidOfficialEntry = usesOfficialRules && (
     obs.winner === 'none' ||
-    obs.coinsRemainingWith !== (obs.winner === 'player1' ? 'player2' : 'player1') ||
-    obs.coinsRemaining < 0 || obs.coinsRemaining > 9 ||
-    (obs.queenCoveredBy !== 'none' && obs.queenCoveredBy !== obs.queenPocketedBy)
+    (obs.finishType === 'own_last_coin_queen_left'
+      ? obs.queenPocketedBy !== 'none' || obs.queenCoveredBy !== 'none'
+      : obs.coinsRemainingWith !== (obs.winner === 'player1' ? 'player2' : 'player1') ||
+        obs.coinsRemaining < 0 || obs.coinsRemaining > 9 ||
+        (obs.queenCoveredBy !== 'none' && obs.queenCoveredBy !== obs.queenPocketedBy))
   );
 
   const decided = match.status === 'completed' || !!match.winnerId;
@@ -404,6 +406,8 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                     p1Score: preview.p1,
                     p2Score: preview.p2,
                     boardWinner: obs.winner,
+                    finishType: obs.finishType || 'normal',
+                    specialFinishExtraPoint: !!obs.specialFinishExtraPoint,
                     coinsRemainingWith: obs.coinsRemainingWith,
                     coinsRemaining: obs.coinsRemaining,
                     queenPocketedBy: obs.queenPocketedBy,

@@ -494,6 +494,8 @@ def board_result(
     coins_remaining: Optional[int] = None,
     queen_pocketed_by: Optional[str] = "none",
     queen_covered_by: Optional[str] = "none",
+    finish_type: str = "normal",
+    special_finish_extra_point: bool = False,
     p1_penalty: int = 0,
     p2_penalty: int = 0,
     game_points_before: int = 0,
@@ -525,6 +527,7 @@ def board_result(
     warnings: List[str] = []
     winner = winner if winner in SIDES else "none"
     loser = _opponent(winner)
+    special_finish = official and finish_type == "own_last_coin_queen_left"
 
     # ---- base points: the coins the loser still has on the board ----------
     #
@@ -541,7 +544,16 @@ def board_result(
         for s in SIDES
     }
 
-    if winner == "none":
+    if special_finish and winner in SIDES:
+        # Law 107: pocketing one's final carromman while the Queen is still
+        # on the board loses the board. The opponent receives three points,
+        # or one if already on 22 or more entering this board. An improper
+        # stroke can add one further point when the opponent demands it.
+        # The losing side has no men left, so the usual remaining-men formula
+        # would incorrectly award zero.
+        base = (1 if game_points_before >= 22 else 3) + int(
+            bool(special_finish_extra_point))
+    elif winner == "none":
         base = 0
     elif coins_remaining_with in SIDES:
         # The umpire named who still has coins on the board.
@@ -603,6 +615,8 @@ def board_result(
 
     queen_side = None
     queen_bonus = 0
+    if special_finish:
+        warnings.append("Law 107: the player who pocketed their final coin left the queen on the board")
     if queen_status == "covered" and pocketed_by in SIDES:
         if official:
             # ICF Laws 53-54: the queen is credited only to the board winner,
@@ -719,6 +733,13 @@ def summarise_sets(
     """
     total_sets, per_set = set_layout(match, rules)
     set_rule = _rule(rules or {}, "setWinnerRule", "set_winner_rule", "total_points")
+    age_group_sudden_death = (
+        scoring_mode(rules) == "official_icf"
+        and set_rule == "target_points"
+        and int(_rule(rules or {}, "targetScore", "target_score", 25)) == 21
+        and per_set == 6
+    )
+    set_tie_breaks = _field(match, "setTieBreaks", "set_tie_breaks", {}) or {}
     p1_id = _field(match, "player1Id", "player1_id")
     p2_id = _field(match, "player2Id", "player2_id")
     p1_name = _field(match, "player1Name", "player1_name")
@@ -759,9 +780,26 @@ def summarise_sets(
         expected = max(len(members), per_set)
         if set_rule != "target_points":
             complete = done > 0 and done >= expected
-        needs_extra_board = (set_rule == "target_points" and not complete
-                             and done >= per_set and p1 == p2
-                             and all(b.get("status") == "completed" for b in members))
+        tied_at_limit = (set_rule == "target_points" and not complete
+                         and done >= per_set and p1 == p2
+                         and all(b.get("status") == "completed" for b in members))
+        # The AICF 21-point/six-board age-group variant resolves a level game
+        # by tie-break/sudden death. It is a ruling on this game, not a seventh
+        # ordinary board: a full extra board would manufacture score and alter
+        # net score difference. Older 25/8 games retain their deciding board.
+        needs_set_tie_break = (age_group_sudden_death and tied_at_limit
+                               and len(members) == per_set)
+        decision = (set_tie_breaks.get(str(set_number))
+                    if isinstance(set_tie_breaks, dict) else None)
+        validated_decision = None
+        if needs_set_tie_break and isinstance(decision, dict) \
+                and decision.get("method") == "sudden_death" \
+                and decision.get("winnerId") in (p1_id, p2_id):
+            validated_decision = decision
+            complete = True
+            needs_set_tie_break = False
+        needs_extra_board = tied_at_limit and not (
+            age_group_sudden_death and len(members) == per_set)
 
         winner_id = winner_name = None
         if complete:
@@ -769,7 +807,10 @@ def summarise_sets(
             # Winning most boards and scoring most points can disagree — three
             # narrow boards against one landslide — and different associations
             # settle that differently.
-            if set_rule == "board_wins":
+            if validated_decision:
+                winner_id = validated_decision["winnerId"]
+                winner_name = p1_name if winner_id == p1_id else p2_name
+            elif set_rule == "board_wins":
                 w1 = sum(1 for b in members
                          if b.get("status") == "completed"
                          and _board_winner_of(b) == "player1")
@@ -780,10 +821,11 @@ def summarise_sets(
             else:
                 lead1, lead2 = p1, p2
 
-            if lead1 > lead2:
-                winner_id, winner_name = p1_id, p1_name
-            elif lead2 > lead1:
-                winner_id, winner_name = p2_id, p2_name
+            if winner_id is None:
+                if lead1 > lead2:
+                    winner_id, winner_name = p1_id, p1_name
+                elif lead2 > lead1:
+                    winner_id, winner_name = p2_id, p2_name
 
         rows.append({
             "setNumber": set_number,
@@ -791,6 +833,8 @@ def summarise_sets(
             "boardsCompleted": done,
             "boardsExpected": expected,
             "needsExtraBoard": needs_extra_board,
+            "needsSetTieBreak": needs_set_tie_break,
+            "tieBreakResult": validated_decision,
             "player1Points": p1,
             "player2Points": p2,
             "winnerId": winner_id,
@@ -892,9 +936,12 @@ def apply_set_results(
         updated["winnerName"] = None
         updated["status"] = match.get("status", "live")
         updated["matchCompletedAt"] = None
+        needs_set_tie = any(s["needsSetTieBreak"] for s in sets)
         needs_extra = any(s["needsExtraBoard"] for s in sets)
-        updated["tieBreakRequired"] = needs_extra
-        if needs_extra:
+        updated["tieBreakRequired"] = needs_set_tie or needs_extra
+        if needs_set_tie:
+            updated["tieBreakRule"] = "sudden_death"
+        elif needs_extra:
             updated["tieBreakRule"] = "additional_board"
 
     return updated

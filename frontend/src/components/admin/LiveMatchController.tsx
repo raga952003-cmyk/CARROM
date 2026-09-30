@@ -330,6 +330,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
 
       setObservation({
         winner: currentBoard.boardWinner || 'none',
+        finishType: currentBoard.finishType || 'normal',
+        specialFinishExtraPoint: currentBoard.specialFinishExtraPoint || false,
         queenPocketedBy: currentBoard.queenPocketedBy || currentBoard.queenClaimedBy || 'none',
         queenCoveredBy: currentBoard.queenCoveredBy || 'none',
         coinsRemainingWith: currentBoard.coinsRemainingWith || 'none',
@@ -370,6 +372,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             p1Score: preview.p1,
             p2Score: preview.p2,
             boardWinner: observation.winner,
+            finishType: observation.finishType || 'normal',
+            specialFinishExtraPoint: !!observation.specialFinishExtraPoint,
             coinsRemainingWith: observation.coinsRemainingWith,
             coinsRemaining: observation.coinsRemaining,
             queenPocketedBy: observation.queenPocketedBy,
@@ -422,6 +426,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
             player1Score: preview!.p1,
             player2Score: preview!.p2,
             boardWinner: observation.winner,
+            finishType: observation.finishType || 'normal',
+            specialFinishExtraPoint: !!observation.specialFinishExtraPoint,
             coinsRemainingWith: observation.coinsRemainingWith,
             coinsRemaining: observation.coinsRemaining,
             queenPocketedBy: observation.queenPocketedBy,
@@ -964,6 +970,9 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                         {isBoardCompleted ? (
                           <span className="text-emerald-800 font-semibold">
                             Winner: {boardWinner} · Diff: {Math.abs(board.player1Score - board.player2Score)} pts
+                            {board.finishType === 'own_last_coin_queen_left' && (
+                              <> · Queen left on board{board.specialFinishExtraPoint ? ' · extra point' : ''}</>
+                            )}
                           </span>
                         ) : isBoardInProgress ? (
                           <span className="text-amber-700">Currently in play</span>
@@ -1237,6 +1246,9 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                   !!busy
                   || (isEditAuditModalOpen && !auditReason.trim())
                   || (!isEditAuditModalOpen && classicFormIsEmpty)
+                  || (rules.scoringMode === 'official_icf'
+                    && observation.finishType === 'own_last_coin_queen_left'
+                    && observation.winner === 'none')
                 }
                 title={
                   isEditAuditModalOpen && !auditReason.trim()

@@ -193,9 +193,69 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
   const set = (patch: Partial<BoardObservation>) => onChange({ ...value, ...patch });
   const result = previewBoard(value, rules,
     { player1: match.player1Name, player2: match.player2Name }, priorGamePoints);
+  const specialFinish = rules.scoringMode === 'official_icf'
+    && value.finishType === 'own_last_coin_queen_left';
+  const finalCoinBy: Side = value.winner === 'player1' ? 'player2'
+    : value.winner === 'player2' ? 'player1' : 'none';
+  const chooseFinishType = (finishType: 'normal' | 'own_last_coin_queen_left') =>
+    set({
+      finishType,
+      specialFinishExtraPoint: false,
+      winner: 'none',
+      queenPocketedBy: 'none',
+      queenCoveredBy: 'none',
+      coinsRemainingWith: 'none',
+      coinsRemaining: 0,
+      p1Penalty: 0,
+      p2Penalty: 0,
+    });
 
   return (
     <div className="space-y-3 text-xs">
+      {rules.scoringMode === 'official_icf' && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3">
+          <div className="font-bold text-amber-950 mb-2">How did this board finish?</div>
+          <div className="grid grid-cols-2 gap-2">
+            {([
+              ['normal', 'Normal finish'],
+              ['own_last_coin_queen_left', 'Queen left on board'],
+            ] as const).map(([finishType, label]) => (
+              <button key={finishType} type="button" onClick={() => chooseFinishType(finishType)}
+                className={`rounded-lg border px-2 py-2 font-bold ${
+                  (value.finishType || 'normal') === finishType
+                    ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white'
+                    : 'border-amber-200 bg-white text-amber-950'
+                }`}>{label}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {specialFinish ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 space-y-3">
+          <div>
+            <div className="font-bold text-amber-950">Who pocketed their own last coin?</div>
+            <p className="mt-1 text-amber-900">The queen stayed on the board. That player loses; their opponent receives 3 points, or 1 if already on 22 or more game points.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {([['player1', match.player1Name], ['player2', match.player2Name]] as [Side, string][]).map(([side, name]) => (
+              <button key={side} type="button"
+                onClick={() => set({ winner: side === 'player1' ? 'player2' : 'player1' })}
+                className={`rounded-lg border px-2 py-2 font-bold truncate ${
+                  finalCoinBy === side
+                    ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white'
+                    : 'border-amber-200 bg-white text-amber-950'
+                }`}>{name}</button>
+            ))}
+          </div>
+          <label className="flex items-start gap-2 text-amber-950">
+            <input type="checkbox" checked={!!value.specialFinishExtraPoint}
+              onChange={e => set({ specialFinishExtraPoint: e.target.checked })}
+              className="mt-0.5" />
+            <span>Improper stroke and the opponent demanded the additional point</span>
+          </label>
+        </div>
+      ) : <>
       <Picker
         label="Finished / Won By"
         icon={<Flame className="w-3.5 h-3.5 text-emerald-700" />}
@@ -292,6 +352,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
           ))}
         </div>
       </div>
+      </>}
 
       {/* The consequence of the answers above, before anything is saved. */}
       <div className="p-3 rounded-xl bg-[#0B5D3B] text-white">
@@ -302,7 +363,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
             <div className="text-2xl font-black tabular-nums">{result.p1}</div>
           </div>
           <div className="text-xs text-emerald-200 text-center shrink-0">
-            base {result.base}
+            {specialFinish ? 'Queen left on board' : `base ${result.base}`}
             {result.queenBonus > 0 && <> · queen +{result.queenBonus}</>}
             {(value.p1Penalty > 0 || value.p2Penalty > 0) && <> · penalties applied</>}
           </div>

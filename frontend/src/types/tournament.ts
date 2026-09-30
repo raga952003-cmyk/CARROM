@@ -99,6 +99,8 @@ export interface BoardScore {
   // The umpire's observations. Each is recorded independently: who won the
   // board says nothing about who took the queen, and vice versa.
   boardWinner?: Side | null;
+  finishType?: 'normal' | 'own_last_coin_queen_left' | null;
+  specialFinishExtraPoint?: boolean | null;
   p1CoinsPocketed?: number | null;
   p2CoinsPocketed?: number | null;
   coinsRemainingWith?: Side | null;

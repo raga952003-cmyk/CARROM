@@ -37,6 +37,8 @@ export interface BoardSubmission {
   p1Score: number;
   p2Score: number;
   boardWinner?: Side;
+  finishType?: 'normal' | 'own_last_coin_queen_left';
+  specialFinishExtraPoint?: boolean;
   p1CoinsPocketed?: number;
   p2CoinsPocketed?: number;
   coinsRemainingWith?: Side;

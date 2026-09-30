@@ -1,5 +1,5 @@
 from pydantic import BaseModel, field_validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from app.models.tournament import BaseCamelModel
 
@@ -22,6 +22,8 @@ class BoardScoreSchema(BaseCamelModel):
     queen_covered_by: Optional[str] = None
     p1_penalty: Optional[int] = None
     p2_penalty: Optional[int] = None
+    finish_type: Optional[Literal["normal", "own_last_coin_queen_left"]] = None
+    special_finish_extra_point: Optional[bool] = None
 
     queen_claimed_by: Optional[str] = "none"  # "player1", "player2", "none"
     queen_covered: Optional[bool] = False
@@ -84,6 +86,8 @@ class ScoreSubmitSchema(BaseCamelModel):
     queen_covered_by: Optional[str] = None      # may be the opponent
     p1_penalty: Optional[int] = 0
     p2_penalty: Optional[int] = 0
+    finish_type: Literal["normal", "own_last_coin_queen_left"] = "normal"
+    special_finish_extra_point: bool = False
 
     # Legacy spelling, still accepted.
     queen_claimed_by: Optional[str] = "none"  # "player1", "player2", "none"

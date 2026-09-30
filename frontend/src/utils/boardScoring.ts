@@ -13,6 +13,8 @@ import { Side, TournamentRules } from '../types/tournament';
  */
 export interface BoardObservation {
   winner: Side;
+  finishType?: 'normal' | 'own_last_coin_queen_left';
+  specialFinishExtraPoint?: boolean;
   queenPocketedBy: Side;
   queenCoveredBy: Side;
   coinsRemainingWith: Side;
@@ -23,6 +25,8 @@ export interface BoardObservation {
 
 export const emptyObservation: BoardObservation = {
   winner: 'none',
+  finishType: 'normal',
+  specialFinishExtraPoint: false,
   queenPocketedBy: 'none',
   queenCoveredBy: 'none',
   coinsRemainingWith: 'none',
@@ -65,6 +69,22 @@ export function previewBoard(
 
   if (rules.scoringMode === 'official_icf') {
     const winner = obs.winner;
+    if (obs.finishType === 'own_last_coin_queen_left') {
+      const warnings: string[] = [];
+      if (winner === 'none') warnings.push('Choose who pocketed their last coin while the queen remained on the board.');
+      const base = winner === 'none' ? 0 : (priorGamePoints[winner] >= 22 ? 1 : 3);
+      const extra = obs.specialFinishExtraPoint ? 1 : 0;
+      const points = winner === 'none' ? 0 : base + extra;
+      return {
+        p1: winner === 'player1' ? points : 0,
+        p2: winner === 'player2' ? points : 0,
+        base: points,
+        queenBonus: 0,
+        queenSide: 'none' as Side,
+        queenStatus: 'not_pocketed' as const,
+        warnings,
+      };
+    }
     const loser = winner === 'player1' ? 'player2' : winner === 'player2' ? 'player1' : 'none';
     const validCoins = Number.isInteger(obs.coinsRemaining)
       && obs.coinsRemaining >= 0 && obs.coinsRemaining <= 9;
