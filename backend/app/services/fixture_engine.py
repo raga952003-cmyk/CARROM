@@ -497,8 +497,25 @@ def _separate_groupmates(placeholders: List[Dict[str, Any]]) -> None:
             return
         a, b = bad[0]
         swapped = False
+
+        # Only ever swap two qualifiers of the SAME rank.
+        #
+        # Swapping across ranks moves a runner-up up the seeding, and the
+        # seeding is what decides who gets a bye. Probed after the first
+        # version of this: with 3 groups of 3 and two through, the byes went
+        # to Group B's WINNER and Group C's RUNNER-UP, while Group A #1 and
+        # Group C #1 -- two group winners -- were made to play each other in
+        # round one. Someone who finished second in their group rested into
+        # the semi-final over two who finished first.
+        #
+        # Winner-for-winner and runner-up-for-runner-up leaves every tier
+        # exactly where it was, so the byes stay on the lowest seed numbers
+        # (the winners) and only the pairing inside a tier moves.
+        rank_of_b = (by_seed[b] or {}).get("groupRank")
         for candidate in sorted(by_seed):
             if candidate in (a, b):
+                continue
+            if by_seed[candidate].get("groupRank") != rank_of_b:
                 continue
             # Would moving `candidate` into b's slot leave both pairs clean?
             partner = next((y if x == candidate else x)
@@ -568,6 +585,7 @@ def generate_group_knockout_fixtures(
                 "name": f"Group {label} #{rank}",
                 "seed": (rank - 1) * len(labels) + position + 1,
                 "groupLabel": label,
+                "groupRank": rank,
             })
 
     _separate_groupmates(placeholders)

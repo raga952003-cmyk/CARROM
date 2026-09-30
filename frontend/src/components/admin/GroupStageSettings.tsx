@@ -69,8 +69,16 @@ export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
     while (slots * 2 <= n) slots *= 2;
     return n < 2 ? 0 : slots;
   };
+  // Groups: the engine clamps the per-group cut to the SMALLEST group, because
+  // a group of three cannot send four. Taking groupCount * qualifiersPerGroup
+  // over-promises whenever the groups are uneven -- 10 entrants in 3 groups
+  // (3/3/4) with "top 4" previewed 10 advancing and 9 knockout matches, while
+  // the draw produces 9 and 8.
+  const perGroupActual = sizes.length
+    ? Math.min(qualifiersPerGroup, Math.min(...sizes))
+    : qualifiersPerGroup;
   const qualifiers = useGroups
-    ? Math.min(groupCount * qualifiersPerGroup, expectedEntrants)
+    ? Math.min(perGroupActual * sizes.length, expectedEntrants)
     : bracketSlots(Math.min(knockoutQualifiers, expectedEntrants));
   const knockoutMatches = hasKnockout && qualifiers >= 2 ? qualifiers - 1 : 0;
   const total = leagueMatches + knockoutMatches;
@@ -146,7 +154,9 @@ export const GroupStageSettings: React.FC<GroupStageSettingsProps> = ({
             )}
             <p className="text-[10px] text-gray-500 mt-1">
               {useGroups
-                ? `${groupCount} groups × top ${qualifiersPerGroup} = ${qualifiers} in the bracket.`
+                ? `${sizes.length} groups × top ${perGroupActual} = ${qualifiers} in the bracket.`
+                  + (perGroupActual < qualifiersPerGroup
+                      ? ` Smallest group has only ${Math.min(...sizes)}.` : '')
                 : qualifiers >= 2
                   ? `${qualifiers} enter the bracket; ${qualifiers - 1} knockout matches.`
                   : 'Too few entrants for a knockout.'}

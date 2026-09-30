@@ -1080,6 +1080,89 @@ def test_seeded_knockout_keeps_its_league_table_locked():
           unseeded.status_code == 200, detail(unseeded))
 
 
+
+
+def _opening_and_byes(entrants, groups, per_group):
+    """(same-group opening pairs, qualifiers who got a bye) for one draw."""
+    pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i}
+            for i in range(entrants)]
+    drawn = generate_group_knockout_fixtures(
+        "T", pool, 3, group_count=groups, qualifiers_per_group=per_group)
+    ko = [m for m in drawn if m["stage"] == "knockout"]
+    fed = {m.get("nextMatchId") for m in ko if m.get("nextMatchId")}
+    opening = [m for m in ko if m["id"] not in fed]
+
+    same = [(m["player1Name"], m["player2Name"]) for m in opening
+            if str(m["player1Name"]).startswith("Group ")
+            and str(m["player2Name"]).startswith("Group ")
+            and str(m["player1Name"]).split(" #")[0]
+            == str(m["player2Name"]).split(" #")[0]]
+
+    in_round_one = {n for m in opening for n in (m["player1Name"], m["player2Name"])
+                    if str(n).startswith("Group ")}
+    every_qualifier = {name for m in ko for name in (m["player1Name"], m["player2Name"])
+                       if str(name).startswith("Group ")}
+    return same, sorted(every_qualifier - in_round_one)
+
+
+def test_a_bye_goes_to_a_group_winner_never_a_runner_up():
+    """
+    Separating groupmates must not re-order the tiers.
+
+    The first version of _separate_groupmates swapped placeholders by seed
+    alone, and the seed is what decides who gets a bye. With 3 groups of 3
+    and two through, the byes went to Group B's WINNER and Group C's
+    RUNNER-UP, while Group A #1 and Group C #1 -- two group winners -- were
+    made to play each other in round one. Somebody who finished second in
+    their group rested into the semi-final over two who finished first.
+
+    Swapping only within a rank tier keeps every tier where it was, so the
+    byes stay on the lowest seed numbers, which are the winners.
+    """
+    cases = ((9, 3, 2), (14, 7, 2), (12, 4, 2), (20, 4, 2),
+             (15, 5, 2), (21, 7, 3), (10, 5, 2))
+    for entrants, groups, per_group in cases:
+        ctx = "%d entrants, %d groups, top %d" % (entrants, groups, per_group)
+        same, byes = _opening_and_byes(entrants, groups, per_group)
+
+        check("no qualifier meets a groupmate in the opening round",
+              not same, "%s -> %s" % (ctx, same))
+
+        runners_with_a_bye = [b for b in byes if not b.endswith("#1")]
+        check("a bye never goes to anyone but a group winner",
+              not runners_with_a_bye, "%s -> %s" % (ctx, runners_with_a_bye))
+
+
+def test_separating_groupmates_keeps_every_qualifier_exactly_once():
+    """
+    The swap moves seeds around; it must not lose or duplicate anybody.
+
+    Worth pinning separately: a swap that wrote one placeholder's seed onto
+    another without moving the second would silently drop a qualifier from
+    the bracket, and the draw would still look plausible.
+    """
+    for entrants, groups, per_group in ((9, 3, 2), (14, 7, 2), (16, 4, 4), (12, 3, 2)):
+        ctx = "%d entrants, %d groups, top %d" % (entrants, groups, per_group)
+        pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i}
+                for i in range(entrants)]
+        ko = [m for m in generate_group_knockout_fixtures(
+            "T", pool, 3, group_count=groups, qualifiers_per_group=per_group)
+            if m["stage"] == "knockout"]
+
+        seats = [name for m in ko for name in (m["player1Name"], m["player2Name"])
+                 if str(name).startswith("Group ")]
+        check("every qualifier appears exactly once in the bracket",
+              len(seats) == len(set(seats)), "%s -> %s" % (ctx, sorted(seats)))
+
+        expected = {"Group %s #%d" % (chr(65 + g), r)
+                    for g in range(groups) for r in range(1, per_group + 1)}
+        # The engine clamps per_group to the smallest group, so the expected
+        # set is an upper bound; what matters is that nobody appears who was
+        # never a qualifier.
+        check("no seat names a qualifier the groups cannot supply",
+              set(seats) <= expected, "%s -> %s" % (ctx, sorted(set(seats) - expected)))
+
+
 SUITES = [
     ("groups", test_groups_honour_qualifiers_per_group),
     ("append group knockout", test_append_group_knockout_uses_group_ranks),
@@ -1100,6 +1183,8 @@ SUITES = [
     ("head-to-head decides", test_head_to_head_separates_entrants_no_column_can),
     ("head-to-head cycle", test_a_head_to_head_cycle_falls_back_rather_than_looping),
     ("a cut covering the field", test_a_cut_that_covers_the_field_flags_nobody),
+    ("byes go to group winners", test_a_bye_goes_to_a_group_winner_never_a_runner_up),
+    ("no qualifier is lost", test_separating_groupmates_keeps_every_qualifier_exactly_once),
     ("seeded league result lock", test_seeded_knockout_keeps_its_league_table_locked),
 ]
 

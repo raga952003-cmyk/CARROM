@@ -259,6 +259,14 @@ async def add_knockout_stage(
                         "name": f"Group {label} #{rank}",
                         "seed": (rank - 1) * len(group_labels[category]) + position + 1,
                         "groupLabel": label,
+                        # _separate_groupmates only swaps within a rank tier,
+                        # and needs this to tell the tiers apart. Without it
+                        # every placeholder looks rank-None, the constraint
+                        # matches everything, and a runner-up can be swapped
+                        # into a top seed -- taking the bye that belongs to a
+                        # group winner. The engine's own group draw sets it;
+                        # this path is the other caller.
+                        "groupRank": rank,
                     })
             _separate_groupmates(placeholders)
         else:
