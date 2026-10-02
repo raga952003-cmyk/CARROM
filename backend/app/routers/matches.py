@@ -1851,6 +1851,17 @@ async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_
                 "Recorded, but this database cannot yet mark it as a walkover. "
                 "Apply migration 010 so the result is not mistaken for a played win."
             )
+
+        # A walkover can be the last league result, and then it is what
+        # finishes the league -- so it seeds the bracket, exactly as confirming
+        # a played match does at :1410. Without this the organiser is left to
+        # notice for themselves that the table is final and press Promote by
+        # hand; every other way of ending a league does it for them.
+        if match.get("stage") == "league":
+            promotion = try_auto_promote(admin_db, match["tournament_id"])
+            if promotion and promotion.get("promotedCount"):
+                out["qualifiersPromoted"] = promotion["promotedCount"]
+
         return out
     except HTTPException:
         raise

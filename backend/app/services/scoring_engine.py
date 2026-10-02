@@ -220,10 +220,19 @@ def calculate_points_table(
             "isQualified": False
         }
 
-    # Filter completed & confirmed league matches
+    # Settled league matches: confirmed, or awarded as a walkover.
+    #
+    # Walkovers used to be excluded here, which cost the winner the match
+    # outright -- a no-show handed you two points everywhere in the app except
+    # the one table the top-8 cut is read from. They are counted now, but for
+    # the WIN only; see the zeroing below.
+    def _walkover(m):
+        return bool(m.get("walkover") or m.get("walkoverBy") or m.get("walkover_by"))
+
     league_matches = [
-        m for m in matches 
-        if (m.get("resultConfirmed") or m.get("result_confirmed")) and m.get("stage") == "league"
+        m for m in matches
+        if (m.get("resultConfirmed") or m.get("result_confirmed") or _walkover(m))
+        and m.get("stage") == "league"
     ]
 
     for m in league_matches:
@@ -244,6 +253,17 @@ def calculate_points_table(
         pts1 = m.get("player1TotalPoints", 0) if "player1TotalPoints" in m else m.get("player1_total_points", 0)
         pts2 = m.get("player2TotalPoints", 0) if "player2TotalPoints" in m else m.get("player2_total_points", 0)
         winner_id = m.get("winnerId") or m.get("winner_id")
+
+        # A walkover awards the match, not the boards.
+        #
+        # record_walkover writes a plausible scoreline (a 3-board match is
+        # given 2-0) so the fixture does not read as 0-0 on screen. Those
+        # boards were never played, and board difference is the first numeric
+        # tie-break -- counting them lets a no-show move the cut between two
+        # entrants who both turned up. The match row keeps its scoreline for
+        # display; the table takes the result and none of the digits.
+        if _walkover(m):
+            b_wins1 = b_wins2 = pts1 = pts2 = 0
 
         s1["boardWins"] += b_wins1
         s1["boardLosses"] += b_wins2

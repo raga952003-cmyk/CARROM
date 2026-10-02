@@ -23,11 +23,41 @@ RANK_LABEL = re.compile(r"League Rank #(\d+)")
 GROUP_LABEL = re.compile(r"Group ([A-Z]+) #(\d+)")
 
 
+def is_walkover(match: Dict[str, Any]) -> bool:
+    """Whether this match was awarded rather than played.
+
+    Either column answers it: a database without migration 010's walkover_by
+    still carries the flag itself.
+    """
+    return bool(match.get("walkover") or match.get("walkoverBy")
+                or match.get("walkover_by"))
+
+
+def league_match_is_settled(match: Dict[str, Any]) -> bool:
+    """Whether this league match is waiting on anybody.
+
+    A confirmed result is the normal case. A WALKOVER is a result too, signed
+    or not -- nobody played, so there is nothing to sign off. This is the same
+    rule `_match_is_finished` applies in routers/tournaments.py, and it is
+    written down twice only because the two live in different layers.
+
+    They used to disagree, and the disagreement was expensive. /complete
+    accepted a walkover; this function did not. So a single no-show in the
+    league left `league_is_complete` false FOREVER: the points table skipped
+    the match, the winner scored nothing for it, and POST /standings/{id}/
+    promote refused with "The league is not finished (189/190 results
+    confirmed)" -- with no way out, because /promote's `force` is disabled by
+    design and the walkover route refuses to touch an already-completed match.
+    One no-show, and the knockout could never be seeded.
+    """
+    return bool(match.get("result_confirmed") or is_walkover(match))
+
+
 def league_is_complete(matches: List[Dict[str, Any]]) -> Tuple[bool, int, int]:
-    """(complete, confirmed_count, total_count) over the league stage."""
+    """(complete, settled_count, total_count) over the league stage."""
     league = [m for m in matches if m.get("stage") == "league"]
-    confirmed = [m for m in league if m.get("result_confirmed")]
-    return (bool(league) and len(confirmed) == len(league), len(confirmed), len(league))
+    settled = [m for m in league if league_match_is_settled(m)]
+    return (bool(league) and len(settled) == len(league), len(settled), len(league))
 
 
 def knockout_has_started(matches: List[Dict[str, Any]]) -> bool:
