@@ -1,0 +1,238 @@
+"""
+Defects found by auditing the whole flow, each pinned so it cannot come back.
+
+Every case here is a bug that was live in this application and is now fixed.
+The full suite passed both BEFORE and AFTER each fix, because nothing covered
+the behaviour -- which is the reason this file exists. A failure here means a
+fix has been undone, not merely refactored.
+
+  1. A walkover left the league incomplete forever, so the knockout could
+     never be seeded and the winner scored nothing for the match.
+     (qualification.py, scoring_engine.py)
+  2. ...and it must still not contribute boards nobody played to the
+     tie-break the qualifying cut is read on. (scoring_engine.py)
+  3. Removing an entrant rewrote every opponent's standings. The reject
+     guard missed walkovers and unplayed fixtures, and DELETE
+     /players/{id} checked nothing at all.
+     (entry_integrity.py, registrations.py, players.py)
+  4. A cancelled or completed tournament stayed fully playable. (matches.py)
+  5. A singles-only tournament accepted doubles entries. (tournaments.py)
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+from harness import Harness                                     # noqa: E402
+from app.services.qualification import league_is_complete       # noqa: E402
+from app.services.scoring_engine import calculate_points_table  # noqa: E402
+
+RESULTS = {}
+MATCH_ID = "22222222-2222-2222-2222-222222222222"
+
+
+def check(label, cond, example=""):
+    slot = RESULTS.setdefault(label, [0, 0, []])
+    slot[1] += 1
+    if not cond:
+        slot[0] += 1
+        if len(slot[2]) < 3:
+            slot[2].append(str(example)[:300])
+    return bool(cond)
+
+
+def detail(r):
+    try:
+        return str(r.json().get("detail"))
+    except Exception:
+        return r.text[:200]
+
+
+def _tid(t):
+    return t["id"] if isinstance(t, dict) else t
+
+
+def _league(entrants=20, walkover_at=None):
+    """A finished round robin; optionally one match awarded, not played."""
+    parts = [{"id": "p%d" % i, "name": "Player %d" % i}
+             for i in range(1, entrants + 1)]
+    matches, n = [], 0
+    for i in range(1, entrants + 1):
+        for j in range(i + 1, entrants + 1):
+            n += 1
+            matches.append({
+                "id": "m%d" % n, "stage": "league", "match_number": n,
+                "player1_id": "p%d" % i, "player2_id": "p%d" % j,
+                "player1_board_wins": 2, "player2_board_wins": 1,
+                "player1_total_points": 20, "player2_total_points": 10,
+                "winner_id": "p%d" % i, "result_confirmed": True,
+                "status": "completed",
+            })
+    if walkover_at is not None:
+        matches[walkover_at].update({
+            "result_confirmed": False, "walkover": True, "walkover_by": "admin",
+            "player1_board_wins": 2, "player2_board_wins": 0,
+            "player1_total_points": 0, "player2_total_points": 0,
+        })
+    return parts, matches
+
+
+def test_walkover_completes_the_league():
+    """One no-show must not leave the league unfinishable."""
+    _parts, matches = _league(20, walkover_at=0)
+    complete, settled, total = league_is_complete(matches)
+    check("a walkover counts as a finished league match",
+          complete and settled == total == 190,
+          "%s %d/%d" % (complete, settled, total))
+
+    _p2, played = _league(20)
+    c2, s2, t2 = league_is_complete(played)
+    check("an all-played league still reads complete",
+          c2 and s2 == t2 == 190, "%s %d/%d" % (c2, s2, t2))
+
+    # The opposite error would be just as bad: an unplayed fixture must
+    # still block completion, or this "fix" would seed a bracket early.
+    _p3, pending = _league(20)
+    pending[5]["result_confirmed"] = False
+    pending[5]["status"] = "scheduled"
+    c3, s3, _t3 = league_is_complete(pending)
+    check("an unplayed fixture still blocks completion",
+          (not c3) and s3 == 189, "%s %d" % (c3, s3))
+
+
+def test_walkover_awards_the_match_but_not_the_boards():
+    parts, matches = _league(20, walkover_at=0)
+    rules = {"pointsForWin": 2, "pointsForLoss": 0, "pointsForDraw": 1}
+    by = {r["participantName"]: r
+          for r in calculate_points_table(matches, parts, rules)}
+    winner, loser = by["Player 1"], by["Player 2"]
+
+    check("the walkover winner is awarded the match",
+          (winner["played"], winner["won"], winner["points"]) == (19, 19, 38),
+          (winner["played"], winner["won"], winner["points"]))
+    check("the walkover adds no boards to the winner",
+          (winner["boardWins"], winner["boardLosses"]) == (36, 18),
+          (winner["boardWins"], winner["boardLosses"]))
+    check("the walkover adds no board losses to the loser",
+          (loser["boardWins"], loser["boardLosses"]) == (36, 18),
+          (loser["boardWins"], loser["boardLosses"]))
+    check("the walkover does not move NSD",
+          winner["scoreDiff"] == 180, winner["scoreDiff"])
+
+    # Counterfactual: the same match PLAYED must move the digits, or every
+    # assertion above could be passing because the match was dropped again.
+    played = [dict(m) for m in matches]
+    played[0].update({"walkover": False, "walkover_by": None,
+                      "result_confirmed": True})
+    by2 = {r["participantName"]: r
+           for r in calculate_points_table(played, parts, rules)}
+    check("the same match PLAYED does move the digits",
+          by2["Player 1"]["boardWins"] == 38
+          and by2["Player 2"]["boardLosses"] == 20,
+          (by2["Player 1"]["boardWins"], by2["Player 2"]["boardLosses"]))
+
+
+def _delete_case(over):
+    h = Harness()
+    admin = h.make_user("Org", role="admin")
+    anita, bala = h.make_user("Anita"), h.make_user("Bala")
+    h.seed_match(_tid(h.seed_tournament(admin)), anita, bala, **over)
+    return h.delete("/api/players/%s" % anita, user_id=admin)
+
+
+def test_deleting_a_player_cannot_rewrite_other_peoples_results():
+    cases = [
+        ({"status": "live", "result_confirmed": False}, 409,
+         "an entrant with a fixture still to play"),
+        ({"status": "completed", "result_confirmed": True}, 409,
+         "an entrant with a confirmed result"),
+        ({"status": "completed", "result_confirmed": False,
+          "walkover": True, "walkover_by": "x"}, 409,
+         "an entrant with a WALKOVER"),
+        ({"status": "cancelled", "result_confirmed": False}, 200,
+         "an entrant whose only match was cancelled"),
+    ]
+    for over, want, what in cases:
+        r = _delete_case(over)
+        check("DELETE /players and %s" % what, r.status_code == want,
+              "%s %s" % (r.status_code, detail(r)))
+
+    h = Harness()
+    admin = h.make_user("Org", role="admin")
+    solo = h.make_user("Solo")
+    r = h.delete("/api/players/%s" % solo, user_id=admin)
+    check("DELETE /players still allows a player with no matches",
+          r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
+
+
+def test_a_closed_tournament_is_not_playable():
+    for status, want in (("in_progress", 200), ("cancelled", 409),
+                         ("completed", 409)):
+        h = Harness()
+        admin = h.make_user("Org", role="admin")
+        a, b = h.make_user("Anita"), h.make_user("Bala")
+        h.seed_match(_tid(h.seed_tournament(admin, status=status)), a, b)
+
+        r = h.post("/api/matches/%s/boards/1/submit" % MATCH_ID,
+                   json={"p1Score": 25, "p2Score": 10}, user_id=admin)
+        check("submitting a board respects tournament state (%s)" % status,
+              r.status_code == want, "%s %s" % (r.status_code, detail(r)))
+
+        r = h.post("/api/matches/%s/walkover" % MATCH_ID,
+                   json={"winnerId": a, "reason": "no show"}, user_id=admin)
+        check("recording a walkover respects tournament state (%s)" % status,
+              r.status_code == want, "%s %s" % (r.status_code, detail(r)))
+
+
+def test_entry_type_must_match_the_tournament():
+    for category in ("singles", "doubles", "both"):
+        for entry in ("singles", "doubles"):
+            h = Harness()
+            admin = h.make_user("Org", role="admin")
+            p, q = h.make_user("Pat"), h.make_user("Quinn")
+            tid = _tid(h.seed_tournament(admin, category=category,
+                                         status="registration_open"))
+            payload = {"type": entry, "playerId": p}
+            if entry == "doubles":
+                payload["partnerId"] = q
+            r = h.post("/api/tournaments/%s/registrations" % tid,
+                       json=payload, user_id=admin)
+            want = 200 if category in ("both", entry) else 409
+            check("a %s tournament answers a %s entry correctly"
+                  % (category, entry), r.status_code == want,
+                  "%s %s" % (r.status_code, detail(r)))
+
+
+def main():
+    for fn in (test_walkover_completes_the_league,
+               test_walkover_awards_the_match_but_not_the_boards,
+               test_deleting_a_player_cannot_rewrite_other_peoples_results,
+               test_a_closed_tournament_is_not_playable,
+               test_entry_type_must_match_the_tournament):
+        fn()
+
+    total = sum(v[1] for v in RESULTS.values())
+    failed = [(k, v) for k, v in sorted(RESULTS.items()) if v[0]]
+    print("=" * 78)
+    print("regressions (defects found by audit, pinned so they cannot return)")
+    print("=" * 78)
+    print("assertions executed : %d" % total)
+    print("invariants checked  : %d" % len(RESULTS))
+    print("invariants violated : %d" % len(failed))
+    print()
+    if failed:
+        print("FAILURES")
+        print("-" * 78)
+        for label, slot in failed:
+            bad, ran, examples = slot
+            print("  %s" % label)
+            print("     %d of %d cases failed" % (bad, ran))
+            for ex in examples:
+                print("     e.g. %s" % ex)
+            print()
+    return len(failed)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

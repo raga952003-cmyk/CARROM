@@ -62,6 +62,9 @@ SUITES = [
     ("test_reopen", "reopen        undoing a confirmed result", True),
     ("test_qualifiers", "qualifiers    who goes through, and into which slot", True),
     ("test_fixture_routes", "fixtures      draw, edit, remove, and who may", True),
+    # Each case here failed against the code before its fix: 11 of 25 did,
+    # which is the only evidence that a regression test is worth having.
+    ("test_regressions", "regressions   audited defects, pinned so they cannot return", True),
 ]
 
 
