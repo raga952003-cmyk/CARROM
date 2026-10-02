@@ -475,6 +475,62 @@ def test_money_collected_outside_razorpay_can_be_refunded():
           r.status_code == 409 and pay.get("status") == "paid",
           "%s %s" % (r.status_code, detail(r)))
 
+def test_an_unverifiable_token_asks_supabase_instead_of_signing_you_out():
+    """"Cannot verify here" must not be answered as "invalid".
+
+    _verify_locally tried to tell the two apart and could not. python-jose
+    raises "The specified alg value is not allowed", which contains "alg" but
+    NOT "algorithm", so the fallback test matched nothing and the 401 ran
+    instead. Supabase projects now default to ECC (ES256) signing keys, so on
+    such a project every authenticated request answered "Session expired or
+    invalid" straight after a correct sign-in; the client clears its token on
+    401, so the next call said "Missing bearer access token" and the user was
+    signed out on the spot. A rotated or mistyped JWT secret did the same.
+
+    Only a local SUCCESS may skip the round trip. Everything else defers to
+    Supabase, whose answer is final.
+    """
+    import base64
+    import json
+    import time
+    from fastapi import HTTPException
+    from jose import jwt as jose_jwt
+    from app.utils import security
+
+    def b64(obj):
+        return base64.urlsafe_b64encode(
+            json.dumps(obj).encode()).decode().rstrip("=")
+
+    secret = "the-configured-secret"
+    claims = {"sub": "abc", "aud": "authenticated",
+              "exp": int(time.time()) + 3600}
+    expired = dict(claims, exp=int(time.time()) - 10)
+
+    cases = [
+        ("a token signed with the configured secret verifies locally",
+         jose_jwt.encode(claims, secret, algorithm="HS256"), "local"),
+        ("a token signed with a DIFFERENT secret falls back",
+         jose_jwt.encode(claims, "some-other-secret", algorithm="HS256"), "fallback"),
+        ("an ES256 token falls back rather than signing the user out",
+         b64({"alg": "ES256", "typ": "JWT"}) + "." + b64(claims) + ".sig", "fallback"),
+        ("an RS256 token falls back rather than signing the user out",
+         b64({"alg": "RS256", "typ": "JWT"}) + "." + b64(claims) + ".sig", "fallback"),
+        ("an expired token falls back, for Supabase to refuse",
+         jose_jwt.encode(expired, secret, algorithm="HS256"), "fallback"),
+    ]
+
+    previous = security.settings.SUPABASE_JWT_SECRET
+    security.settings.SUPABASE_JWT_SECRET = secret
+    try:
+        for label, token, want in cases:
+            try:
+                got = "local" if security._verify_locally(token) else "fallback"
+            except HTTPException as exc:
+                got = "401:%s" % exc.detail
+            check(label, got == want, "got %r, wanted %r" % (got, want))
+    finally:
+        security.settings.SUPABASE_JWT_SECRET = previous
+
 def main():
     for fn in (test_walkover_completes_the_league,
                test_walkover_awards_the_match_but_not_the_boards,
@@ -485,7 +541,8 @@ def main():
                test_the_table_counts_everyone_who_played,
                test_confirm_keeps_the_winner_the_engine_decided,
                test_a_ruling_cannot_take_a_decided_match_off_its_winner,
-               test_money_collected_outside_razorpay_can_be_refunded):
+               test_money_collected_outside_razorpay_can_be_refunded,
+               test_an_unverifiable_token_asks_supabase_instead_of_signing_you_out):
         fn()
 
     total = sum(v[1] for v in RESULTS.values())

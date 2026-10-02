@@ -49,11 +49,10 @@ def _verify_locally(token: str):
     request -- five of them for one tap of the match timer -- and from a
     serverless function each one costs tens to hundreds of milliseconds.
 
-    Returns None when local verification is not possible (no secret, or a
-    project signing with a key this cannot check), so the caller falls back to
-    asking the server. Returns None is NOT the same as "invalid": a token that
-    is present but fails signature or expiry raises, and must not be retried
-    against the network.
+    Returns the verified user on success, and None whenever this process
+    cannot CONFIRM the token -- no secret, an algorithm it cannot check, a bad
+    signature, an expired token. None means "ask Supabase", and Supabase's
+    answer is final. Only a success here skips the round trip.
 
     The trade-off, stated plainly: a token revoked mid-life stays acceptable
     here until it expires, where the network check would have caught it. Supabase
@@ -81,17 +80,43 @@ def _verify_locally(token: str):
             options={"verify_aud": True, "verify_exp": True, "verify_signature": True},
         )
     except JWTError as e:
-        text = str(e).lower()
-        # An algorithm this secret cannot check at all (a project using
-        # asymmetric signing keys) is "cannot verify here", not "bad token" --
-        # fall back rather than locking every user out.
-        if "algorithm" in text or "unsupported" in text:
-            return None
-        raise HTTPException(
-            status_code=401,
-            detail="Session expired or invalid. Please sign in again.",
-            headers={"WWW-Authenticate": "Bearer"},
+        # "Cannot verify here" is not "invalid", and this could not tell them
+        # apart -- so it locked whole deployments out.
+        #
+        # The intent was already written down: an algorithm this secret cannot
+        # check (a project using asymmetric signing keys) should fall back to
+        # asking Supabase rather than refusing every user. The detection never
+        # fired. python-jose raises "The specified alg value is not allowed",
+        # which contains "alg" but NOT "algorithm", so the test matched nothing
+        # and the 401 below ran instead. Measured, with algorithms=["HS256"]:
+        #
+        #   wrong HS256 secret -> "Signature verification failed."
+        #   ES256-signed token -> "The specified alg value is not allowed"
+        #   RS256-signed token -> "The specified alg value is not allowed"
+        #
+        # and the old test returned False for all three. Supabase projects now
+        # default to ECC (ES256) signing keys, so on such a project EVERY
+        # authenticated request answered "Session expired or invalid. Please
+        # sign in again." immediately after a correct sign-in. The client
+        # clears its token on 401, so the request after that said "Missing
+        # bearer access token" and the user was signed out on the spot. A
+        # rotated or mistyped JWT secret did the same thing.
+        #
+        # Any local failure now falls back to the network check, which is
+        # authoritative: if Supabase accepts the token it is good, and if it
+        # does not, get_current_user raises 401 there. Only a local SUCCESS
+        # short-circuits the round trip.
+        #
+        # The trade, stated plainly: a token this process cannot verify --
+        # expired or tampered included -- now costs one round trip before it is
+        # refused, where it used to be refused here. That is the right price
+        # against signing out every user of a correctly configured deployment
+        # because of the signing algorithm their project happens to use.
+        logger.info(
+            "Local JWT verification could not confirm this token (%s); "
+            "asking Supabase instead.", e,
         )
+        return None
     except Exception:
         return None
 
