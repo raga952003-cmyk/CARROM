@@ -1,3 +1,4 @@
+from app.services.entry_integrity import anywhere, refusal_detail
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.database import get_db, get_admin_db
 from app.models.player import PlayerSchema
@@ -178,11 +179,46 @@ async def update_player(id: str, data: PlayerSchema, admin = Depends(verify_admi
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+def _refuse_delete_with_entries(admin_db, player_id: str) -> None:
+    """
+    Deleting a player deletes their results, and their opponents' results.
+
+    This route calls auth.admin.delete_user, and the cascade runs all the way
+    down: profiles.id references auth.users ON DELETE CASCADE (schema.sql:6)
+    and registrations.player_id references profiles ON DELETE CASCADE
+    (schema.sql:70). The registration goes, and with it the entrant leaves the
+    pool the points table is built from -- so every match they played drops
+    out of their OPPONENTS' records too.
+
+    Measured on the September tournament's shape, 20 entrants with the league
+    complete: deleting one entrant rewrote all 19 other rows, and deleting the
+    4th-placed entrant moved the 9th-placed entrant into the top 8. The only
+    check on this route was the target's ROLE. Nothing asked whether they were
+    playing in anything.
+
+    Rejecting an entry already refuses on the same grounds; this is the other
+    button in the same admin screen, and it was the more destructive one.
+    """
+    detail = refusal_detail(anywhere(admin_db, player_id), "deleting them")
+    if detail:
+        raise HTTPException(status_code=409, detail=detail)
+
+    # Doubles: the match names the TEAM, not the player inside it, so the
+    # pass above cannot see it. Their registrations give the team ids.
+    regs = admin_db.table("registrations").select(
+        "team_id").eq("player_id", player_id).execute().data or []
+    for team_id in {r.get("team_id") for r in regs if r.get("team_id")}:
+        detail = refusal_detail(anywhere(admin_db, team_id), "deleting them")
+        if detail:
+            raise HTTPException(status_code=409, detail=detail)
+
+
 @router.delete("/{id}")
 async def delete_player(id: str, admin = Depends(verify_admin)):
     admin_db = get_admin_db()
     try:
         _assert_target_is_a_player(admin_db, id)
+        _refuse_delete_with_entries(admin_db, id)
 
         # Delete user from Supabase Auth, which cascades to public.profiles
         before = admin_db.table("profiles").select("*").eq("id", id).execute().data

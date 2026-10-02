@@ -1,3 +1,4 @@
+from app.services.entry_integrity import entanglement, refusal_detail
 from fastapi import APIRouter, Depends, HTTPException
 from app.database import get_db, get_admin_db
 from app.utils.security import verify_admin, get_optional_profile
@@ -196,7 +197,10 @@ def _refuse_reject_with_confirmed_results(admin_db, registration_id: str) -> Non
     actually won, which is enough to move him across a qualifying cut.
 
     Refused rather than repaired here, mirroring the fixture routes, which
-    already refuse a destructive operation when result_confirmed holds. The
+    already refuse a destructive operation when result_confirmed holds. It
+    used to look ONLY at result_confirmed, which let a walkover and a fixture
+    still to be played through; services/entry_integrity.py now answers both,
+    and DELETE /api/players/{id} asks the same question. The
     deeper fix is for the table to stop deriving its pool from live
     registration status, so an entrant can be withdrawn without rewriting
     anybody else's record; that is a larger change than this guard.
@@ -215,25 +219,10 @@ def _refuse_reject_with_confirmed_results(admin_db, registration_id: str) -> Non
     if not tournament_id or not participant:
         return
 
-    played = admin_db.table("matches").select(
-        "match_number, player1_id, player2_id, result_confirmed"
-    ).eq("tournament_id", tournament_id).eq("result_confirmed", True).execute().data or []
-
-    theirs = [m for m in played
-              if participant in (m.get("player1_id"), m.get("player2_id"))]
-    if not theirs:
-        return
-
-    numbers = ", ".join("#%s" % m.get("match_number") for m in theirs[:5])
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            f"This entrant has {len(theirs)} confirmed result(s) ({numbers}). "
-            "Rejecting them would take those matches out of the points table "
-            "and change their opponents' standings too. Reopen and void the "
-            "results first if the entry really must be removed."
-        ),
-    )
+    detail = refusal_detail(
+        entanglement(admin_db, tournament_id, participant), "rejecting them")
+    if detail:
+        raise HTTPException(status_code=409, detail=detail)
 
 
 @router.post("/{id}/reject")
