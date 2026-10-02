@@ -979,6 +979,22 @@ async def register_for_tournament(
                         "singles or as part of a team."),
             )
         
+        # The entry must be of a kind this tournament actually runs.
+        #
+        # Nothing compared the two. A tournament created as singles-only took
+        # doubles entries without a murmur -- and the organiser's own UI offers
+        # the "Doubles Team" button regardless of what they chose when they
+        # created the event, so this is reached by clicking, not by crafting a
+        # request. The draw then carries a two-person team through a singles
+        # bracket. 'both' is the permissive setting and is left alone.
+        category = (tournament[0].get("category") or "both")
+        if category != "both" and data.type != category:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"This is a {category}-only tournament, so a "
+                        f"{data.type} entry cannot be accepted."),
+            )
+
         if data.type == "doubles":
             # A partner may be identified three ways: an existing profile id, an
             # existing email, or a name for someone with no account yet.

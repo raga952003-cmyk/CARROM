@@ -158,7 +158,11 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
 
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>(allPlayers[0]?.id || '');
   const [selectedTeamId, setSelectedTeamId] = useState<string>(allTeams[0]?.id || '');
-  const [regType, setRegType] = useState<'singles' | 'doubles'>('singles');
+  // Default to what this tournament actually runs. The server refuses an
+  // entry of the other kind, so starting on it would only produce a 409.
+  const [regType, setRegType] = useState<'singles' | 'doubles'>(
+    tournament.category === 'doubles' ? 'doubles' : 'singles'
+  );
 
   const [addMode, setAddMode] = useState<'select' | 'create'>('select');
   const [newName, setNewName] = useState('');
@@ -863,29 +867,37 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                   {addBlockedReason}
                 </p>
               )}
-              <div>
-                <label className="block font-bold text-gray-700 mb-1">Registration Category</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setRegType('singles')}
-                    className={`py-2 text-center rounded-lg border font-semibold ${
-                      regType === 'singles' ? 'bg-emerald-50 border-[#0B5D3B] text-[#0B5D3B]' : 'border-gray-200'
-                    }`}
-                  >
-                    Singles Player
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setRegType('doubles')}
-                    className={`py-2 text-center rounded-lg border font-semibold ${
-                      regType === 'doubles' ? 'bg-blue-50 border-blue-600 text-blue-700' : 'border-gray-200'
-                    }`}
-                  >
-                    Doubles Team
-                  </button>
+              {/* Only offered when the tournament runs both. The player-facing
+                  form already gated this on category (RegistrationFormModal);
+                  this one did not, so a singles-only event still showed the
+                  organiser a "Doubles Team" button -- which the server now
+                  refuses with a 409. A control that cannot succeed is worse
+                  than no control. */}
+              {tournament.category === 'both' && (
+                <div>
+                  <label className="block font-bold text-gray-700 mb-1">Registration Category</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setRegType('singles')}
+                      className={`py-2 text-center rounded-lg border font-semibold ${
+                        regType === 'singles' ? 'bg-emerald-50 border-[#0B5D3B] text-[#0B5D3B]' : 'border-gray-200'
+                      }`}
+                    >
+                      Singles Player
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRegType('doubles')}
+                      className={`py-2 text-center rounded-lg border font-semibold ${
+                        regType === 'doubles' ? 'bg-blue-50 border-blue-600 text-blue-700' : 'border-gray-200'
+                      }`}
+                    >
+                      Doubles Team
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {regType === 'singles' && (
                 <div>

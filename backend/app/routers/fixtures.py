@@ -16,6 +16,8 @@ from app.routers.tournaments import (
     _select_all,
     _slot_id,
     sets_supported,
+    _claim_generation,
+    _release_generation,
 )
 from app.routers.standings import compute_standings
 from app.services.fixture_engine import (
@@ -110,6 +112,39 @@ async def generate(
     return result
 
 
+def knockout_draw_lock(tournament_id: str):
+    """One knockout draw at a time for a given tournament.
+
+    The route reads the matches, checks `existing_ko`, and only then writes:
+    check-then-act. Two overlapping calls both saw no bracket, and both drew a
+    full one -- two Finals, duplicated match numbers, and once either was
+    played the tournament could not be completed or repaired. The idempotency
+    guard does not help, because a genuine double-click from two tabs carries
+    two different keys and is two distinct requests by design.
+
+    A dependency rather than a try/finally so the handler body is untouched;
+    FastAPI resolves tournament_id from the path and runs the teardown after
+    the response.
+
+    Honest about its reach: _generating is an in-process dict, so this closes
+    the window within one worker and NOT across them -- on a serverless
+    platform two requests can land in separate instances. The durable fix is a
+    uniqueness constraint in the database so a second bracket cannot be
+    written at all; that needs a migration applied against live data and is
+    not something to add blind. This removes the common case (one organiser,
+    one deployment, two clicks) and leaves the rare one.
+    """
+    key = "knockout:%s" % tournament_id
+    if not _claim_generation(key):
+        raise HTTPException(status_code=409, detail=(
+            "A knockout draw for this tournament is already being written. "
+            "Wait for it to finish, then reload to see the bracket."))
+    try:
+        yield
+    finally:
+        _release_generation(key)
+
+
 @router.post("/{tournament_id}/knockout")
 async def add_knockout_stage(
     tournament_id: str,
@@ -119,6 +154,7 @@ async def add_knockout_stage(
                           description="Discard an existing, unplayed knockout stage and redraw it."),
     admin = Depends(verify_admin),
     idempotency_key: str = Depends(get_idempotency_key),
+    _draw_lock = Depends(knockout_draw_lock),
 ):
     """
     Append a knockout bracket to a draw that already has a league.
