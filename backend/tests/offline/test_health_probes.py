@@ -60,6 +60,11 @@ PAYLOAD_KEYS = {
     # The resolved CORS posture. An open or blocking-all deployment is a
     # configuration mistake, and this is where a person can see it.
     "cors",
+    # Which commit is live, and whether a token can be verified without a
+    # network hop. Both were invisible while two auth-shaped reports -- "signed
+    # out immediately" and "unable to create a tournament" -- were being
+    # diagnosed from response timings alone.
+    "build",
 }
 
 

@@ -351,6 +351,48 @@ def _health_payload(pending, rpc_state, idem_state, owner_state,
         # reading startup logs. "open" on a deployed host, or "blocking-all"
         # anywhere, is a deployment that needs a variable changed.
         "cors": _cors_state(),
+        # Which commit is live, and whether auth can verify a token without a
+        # network hop. Both were invisible while two auth-shaped reports were
+        # being diagnosed from response timings alone.
+        "build": _build_state(),
+    }
+
+
+def _build_state() -> dict:
+    """Which build is actually serving, and what auth can do without a hop.
+
+    Added because two separate reports -- "signed out immediately" and "unable
+    to create a tournament" -- could not be told apart from outside. Neither
+    the live commit nor whether token verification was working locally was
+    visible anywhere, so every diagnosis was an inference from timings. No
+    secret or key material is reported: a commit sha, booleans and a count.
+    """
+    import os
+    from app.utils import security
+
+    sha = (os.getenv("VERCEL_GIT_COMMIT_SHA") or "").strip()
+    jwt_secret = bool(getattr(settings, "SUPABASE_JWT_SECRET", None))
+
+    # Does NOT fetch. Reports only what is already cached, so /health stays
+    # cheap and cannot be used to make this deployment hammer Supabase.
+    cached = security._JWKS.get("keys")
+    if cached is None:
+        jwks = "not fetched yet"
+    elif cached:
+        jwks = "%d key(s) cached" % len(cached)
+    else:
+        jwks = "DEGRADED - fetch failed or SUPABASE_URL unset; asymmetric "                "tokens cost a round trip to Supabase on every request"
+
+    return {
+        "commit": sha[:7] if sha else "unknown",
+        "jwt_secret_present": jwt_secret,
+        "jwks": jwks,
+        "local_token_verification": (
+            "HS* and asymmetric" if (jwt_secret and cached) else
+            "HS* only" if jwt_secret else
+            "asymmetric only" if cached else
+            "none - every authenticated request asks Supabase"
+        ),
     }
 
 
