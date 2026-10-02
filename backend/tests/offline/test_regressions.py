@@ -423,6 +423,58 @@ def test_a_ruling_cannot_take_a_decided_match_off_its_winner():
     check("a genuinely level match still accepts a ruling",
           r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
 
+def test_money_collected_outside_razorpay_can_be_refunded():
+    """A UPI receipt is money in hand, so handing it back must be recordable.
+
+    An approved receipt writes its ledger row as 'gpay-proof-<id>' with no
+    razorpay_payment_id (026_payment_proof_reconsideration.sql). Both refund
+    endpoints excluded exactly that shape -- record_manual_refund wanted
+    'manual-', reconcile_refund wanted a razorpay_payment_id -- so a refund
+    handed over in real life could be recorded NOWHERE. The entry kept
+    payment_status='paid' and status='approved', and both the standings pool
+    and fixture generation are built from approved entries.
+    """
+    def case(order_id):
+        h = Harness()
+        admin = h.make_user("Org", role="admin")
+        pat = h.make_user("Pat")
+        tid = _tid(h.seed_tournament(admin, status="registration_open",
+                                     entry_fee=300.0, gpay_upi_id="organiser@upi"))
+        h.db.seed("registrations", [{
+            "id": "reg1", "tournament_id": tid, "player_id": pat,
+            "type": "singles", "status": "approved",
+            "payment_status": "paid", "fee_paise": 30000}])
+        h.db.seed("payments", [{
+            "id": "pay1", "tournament_id": tid, "registration_id": "reg1",
+            "razorpay_order_id": order_id, "razorpay_payment_id": None,
+            "status": "paid", "amount_paise": 30000, "notes": {}}])
+        r = h.post("/api/payments/pay1/record-manual-refund",
+                   json={"reference": "UTR123456", "reason": "withdrew"},
+                   user_id=admin)
+        reg = h.db.table("registrations").select("*").eq("id", "reg1").execute().data[0]
+        pay = h.db.table("payments").select("*").eq("id", "pay1").execute().data[0]
+        return r, pay, reg
+
+    r, pay, reg = case("gpay-proof-abc123")
+    check("a UPI receipt refund can be recorded",
+          r.status_code == 200 and pay.get("status") == "refunded",
+          "%s %s" % (r.status_code, pay.get("status")))
+    check("and the refunded entry leaves the approved pool",
+          reg.get("status") != "approved" and reg.get("payment_status") != "paid",
+          "%s/%s" % (reg.get("status"), reg.get("payment_status")))
+
+    r, pay, _reg = case("manual-desk-1")
+    check("a desk payment refund still records",
+          r.status_code == 200 and pay.get("status") == "refunded",
+          "%s %s" % (r.status_code, pay.get("status")))
+
+    # Over-correction guard: a real Razorpay charge must still go through
+    # reconciliation, which verifies against their API.
+    r, pay, _reg = case("order_realrazorpay")
+    check("a real Razorpay charge is still sent to reconciliation",
+          r.status_code == 409 and pay.get("status") == "paid",
+          "%s %s" % (r.status_code, detail(r)))
+
 def main():
     for fn in (test_walkover_completes_the_league,
                test_walkover_awards_the_match_but_not_the_boards,
@@ -432,7 +484,8 @@ def main():
                test_knockout_is_not_scheduled_during_the_league,
                test_the_table_counts_everyone_who_played,
                test_confirm_keeps_the_winner_the_engine_decided,
-               test_a_ruling_cannot_take_a_decided_match_off_its_winner):
+               test_a_ruling_cannot_take_a_decided_match_off_its_winner,
+               test_money_collected_outside_razorpay_can_be_refunded):
         fn()
 
     total = sum(v[1] for v in RESULTS.values())

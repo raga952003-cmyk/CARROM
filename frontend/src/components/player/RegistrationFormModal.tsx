@@ -107,6 +107,18 @@ export const RegistrationFormModal: React.FC<RegistrationFormModalProps> = ({
     }
   }, [isOpen, tournament.id]);
 
+  // With only one way to pay, choose it.
+  //
+  // The receipt panel is hidden until a method is picked, so when Razorpay is
+  // unavailable -- which is every deployment holding a test key, since
+  // checkout_enabled() refuses those outside development -- the player was
+  // told "pay the UPI ID shown below" directly above a button they still had
+  // to press before anything appeared below it. One option is not a choice.
+  useEffect(() => {
+    if (!isOpen || !hasFee || paymentChoice) return;
+    if (paymentsEnabled === false && receivingUpi) setPaymentChoice('upi');
+  }, [isOpen, hasFee, paymentChoice, paymentsEnabled, receivingUpi]);
+
   useEffect(() => {
     if (isOpen && step === 'payment' && paymentsEnabled === false &&
         receivingUpi && !unconfirmed) {

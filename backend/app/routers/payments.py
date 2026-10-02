@@ -1066,7 +1066,24 @@ async def record_manual_refund(payment_id: str, body: ManualRefundRecord, admin=
         raise HTTPException(status_code=404, detail="Payment not found.")
     payment = rows[0]
     require_tournament_access(db, payment["tournament_id"], admin, "payment.manual_refund")
-    if not str(payment.get("razorpay_order_id") or "").startswith("manual-"):
+    # Money collected OUTSIDE Razorpay, by either route.
+    #
+    # A desk payment writes razorpay_order_id='manual-<...>'; an approved
+    # UPI/GPay receipt writes 'gpay-proof-<proof id>' with no
+    # razorpay_payment_id (026_payment_proof_reconsideration.sql:129-138).
+    # Only the first was accepted here, and reconcile_refund refuses any row
+    # without a razorpay_payment_id -- so a UPI payment could be refunded in
+    # real life and recorded NOWHERE. _repair_refunded_registration never ran,
+    # the entry kept payment_status='paid' and status='approved', and that
+    # matters twice before a draw: standings builds its pool from approved
+    # entries and so does fixture generation. The club had handed the money
+    # back and the ledger still said it held it.
+    #
+    # Both are refunded by hand, so both are recorded here. reconcile_refund
+    # stays Razorpay-only on purpose: it verifies against their API, which
+    # knows nothing about either of these.
+    order_id = str(payment.get("razorpay_order_id") or "")
+    if not order_id.startswith(("manual-", "gpay-proof-")):
         raise HTTPException(status_code=409, detail="Use Razorpay reconciliation for online refunds.")
     if payment.get("status") not in ("paid", "refunded"):
         raise HTTPException(status_code=409, detail="This payment is not recorded as collected.")
