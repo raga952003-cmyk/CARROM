@@ -87,13 +87,23 @@ async def import_excel_file(
 def _find_profile(admin_db, name: str, email: Optional[str],
                   by_email: Dict[str, Any], by_name: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Match an existing player by email first, falling back to name.
+    Match an existing player by email, falling back to name ONLY when the
+    sheet gives no email.
 
-    Email is the reliable key; name matching alone would merge two different
-    people who happen to share a name, so it is only a fallback.
+    Email is the reliable key. Name was a fallback for every row, including
+    rows that carried an email which simply did not match -- and then any
+    existing profile with the same name was registered instead. The sheet's
+    club, city and rating were discarded, nothing was added to `skipped`, and
+    the organiser was told "success" with no warning. The wrong human ended
+    up in the entry list, the draw and the standings, owing the fee, while the
+    person on the sheet had no entry at all.
+
+    An email on the sheet is an explicit claim about WHO this is. If it
+    matches nobody, this is somebody new; guessing from the name would
+    contradict the only identifying detail the organiser supplied.
     """
-    if email and email.lower() in by_email:
-        return by_email[email.lower()]
+    if email:
+        return by_email.get(email.lower())
     if name and name.lower() in by_name:
         return by_name[name.lower()]
     return None
@@ -177,9 +187,18 @@ async def confirm_bulk_import(
     new_payment_status = "pending" if fee_paise > 0 else "waived"
 
     try:
-        existing = admin_db.table("profiles").select("id, name, email").execute().data or []
+        existing = admin_db.table("profiles").select(
+            "id, name, email, role").execute().data or []
         by_email = {(p["email"] or "").lower(): p for p in existing if p.get("email")}
-        by_name = {(p["name"] or "").lower(): p for p in existing if p.get("name")}
+        # Names are matched against PLAYERS only. This select was unfiltered,
+        # so a sheet row naming an organiser matched that admin's profile and
+        # entered them as a competitor -- "Imported 1 singles entry." with the
+        # registration's player_id pointing at another admin's account. An
+        # email still matches whoever owns it, admin included, because an
+        # organiser entering their own event is ordinary and the email says so
+        # explicitly.
+        by_name = {(p["name"] or "").lower(): p for p in existing
+                   if p.get("name") and (p.get("role") or "player") == "player"}
         # Include members of existing doubles teams, not just player_id on a
         # singles registration. Keep this map current as rows in this sheet are
         # inserted so a later row cannot give somebody a second entry.

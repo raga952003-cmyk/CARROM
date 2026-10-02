@@ -158,22 +158,58 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
         }
       }
     } catch (err: any) {
-      console.warn('AI Parsing failed, falling back to local regex split:', err);
-      // Local parsing fallback
+      // Say what the server said, and never invent a roster.
+      //
+      // This swallowed every refusal -- 'Unsupported file format', 'The sheet
+      // has no rows.', 'Could not find a player name column' -- into a
+      // console.warn, then regex-split rawText and showed a normal, fully
+      // pre-ticked preview with no warning at all. rawText comes from
+      // FileReader.readAsText, so for an .xlsx that is binary mojibake: the
+      // organiser was shown invented people with invented ratings
+      // (1500 + random), and Confirm Import created permanent accounts for
+      // them. A parser that cannot read the file has to say so.
+      const reason = (err?.message && String(err.message).trim())
+        || 'The server could not read this file.';
+      // Control characters outside tab and newline mean this was never text.
+      const looksBinary = /[\u0000-\u0008\u000E-\u001F]/.test(rawText.slice(0, 4000));
+      const isTextFile = !fileName || /\.(txt|csv|tsv)$/i.test(fileName);
+
+      if (looksBinary || !isTextFile || !rawText.trim()) {
+        console.warn('Import parsing failed:', err);
+        setErrorMsg(reason);
+        setLoading(false);
+        return;
+      }
+
+      // Plain text the server still refused: offer a local best-effort read,
+      // but say where the rows came from and leave every one UNTICKED, so
+      // nothing can be imported without the organiser looking at it.
       const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-      const fallbackList: ParsedPlayer[] = lines.map((line, idx) => {
+      const fallbackList: ParsedPlayer[] = lines.map((line) => {
         const parts = line.split(/[,;\t]/);
         return {
           type: 'singles' as const,
-          name: parts[0]?.trim() || `Player ${idx + 1}`,
+          name: parts[0]?.trim() || '',
           club: parts[1]?.trim() || 'Independent',
           city: parts[2]?.trim() || undefined,
-          rating: parseInt(parts[3]) || 1500 + Math.floor(Math.random() * 200),
+          // No invented rating. The default is the default, not a dice roll.
+          rating: parseInt(parts[3]) || 1500,
           seed: parts[4] ? parseInt(parts[4]) : null,
-          selected: true
+          selected: false
         };
-      });
+      }).filter(p => p.name.length > 0);
+
+      if (!fallbackList.length) {
+        console.warn('Import parsing failed:', err);
+        setErrorMsg(reason);
+        setLoading(false);
+        return;
+      }
       setParsedPlayers(fallbackList);
+      setErrorMsg(
+        `${reason} These ${fallbackList.length} row(s) were read from the file text `
+        + `in your browser, not by the server -- check each one and tick those to import.`
+      );
       setStep('preview');
     } finally {
       setLoading(false);
