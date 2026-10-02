@@ -30,6 +30,7 @@ from app.services.scoring_engine import calculate_points_table  # noqa: E402
 from app.services.scheduling_engine import (                    # noqa: E402
     generate_conflict_free_schedule,
 )
+from app.routers.standings import compute_standings              # noqa: E402
 
 RESULTS = {}
 MATCH_ID = "22222222-2222-2222-2222-222222222222"
@@ -251,13 +252,108 @@ def test_knockout_is_not_scheduled_during_the_league():
           first["scheduledTime"].startswith("9:00"), first["scheduledTime"])
 
 
+def test_the_table_counts_everyone_who_played():
+    """An entry list that disagrees with the fixtures must not delete results.
+
+    Seen in production on a 20-entrant round robin with 169 confirmed
+    results: the standings returned participantCount 1 and a single row
+    reading "played 0, points 0", because one approved registration was all
+    that remained. The pool came from registrations still 'approved', and
+    calculate_points_table drops any match whose two sides are not both in
+    the pool -- so each missing entrant took their opponents' matches with
+    them. The fallback existed for exactly this but only fired on an EMPTY
+    pool, and one surviving row kept it quiet.
+    """
+    names = ["Player %d" % i for i in range(1, 21)]
+    matches, n = [], 0
+    for i in range(20):
+        for j in range(i + 1, 20):
+            n += 1
+            matches.append({
+                "id": "m%d" % n, "tournament_id": "T", "stage": "league",
+                "type": "singles", "match_number": n,
+                "player1_id": "p%d" % i, "player2_id": "p%d" % j,
+                "player1_name": names[i], "player2_name": names[j],
+                "player1_board_wins": 2, "player2_board_wins": 1,
+                "player1_total_points": 20, "player2_total_points": 10,
+                "winner_id": "p%d" % i, "result_confirmed": True,
+                "status": "completed",
+            })
+
+    class Q:
+        def __init__(self, rows):
+            self.rows, self.f = rows, {}
+
+        def select(self, *a, **k):
+            return self
+
+        def eq(self, c, v):
+            self.f[c] = v
+            return self
+
+        def order(self, *a, **k):
+            return self
+
+        def range(self, *a, **k):
+            return self
+
+        def limit(self, *a, **k):
+            return self
+
+        def execute(self):
+            rows = [r for r in self.rows
+                    if all(r.get(k) == v for k, v in self.f.items())]
+            return type("R", (), {"data": rows})()
+
+    class DB:
+        def __init__(self, regs):
+            self.regs = regs
+
+        def table(self, name):
+            if name == "registrations":
+                return Q(self.regs)
+            if name == "matches":
+                return Q(matches)
+            if name == "tournaments":
+                return Q([{"id": "T", "format": "round_robin",
+                           "category": "singles",
+                           "rules": {"pointsForWin": 2, "pointsForDraw": 1,
+                                     "pointsForLoss": 0}}])
+            return Q([])
+
+    one_left = [{"id": "r0", "tournament_id": "T", "status": "approved",
+                 "type": "singles", "player": {"id": "p0", "name": names[0]}}]
+    rows = compute_standings(DB(one_left), "T")["categories"][0]["standings"]
+    check("everyone in the fixtures appears in the table", len(rows) == 20,
+          len(rows))
+    check("their results are counted, not discarded",
+          sum(r["played"] for r in rows) == 380,
+          sum(r["played"] for r in rows))
+    top = rows[0]
+    check("the leader's record survives a broken entry list",
+          (top["played"], top["points"]) == (19, 38),
+          (top["played"], top["points"]))
+
+    # A healthy entry list must behave identically -- the restore is a repair,
+    # not a second source of entrants that could double-count anybody.
+    whole = [{"id": "r%d" % i, "tournament_id": "T", "status": "approved",
+              "type": "singles", "player": {"id": "p%d" % i, "name": names[i]}}
+             for i in range(20)]
+    healthy = compute_standings(DB(whole), "T")["categories"][0]["standings"]
+    check("a complete entry list gives exactly the same table",
+          len(healthy) == 20
+          and sum(r["played"] for r in healthy) == 380,
+          (len(healthy), sum(r["played"] for r in healthy)))
+
+
 def main():
     for fn in (test_walkover_completes_the_league,
                test_walkover_awards_the_match_but_not_the_boards,
                test_deleting_a_player_cannot_rewrite_other_peoples_results,
                test_a_closed_tournament_is_not_playable,
                test_entry_type_must_match_the_tournament,
-               test_knockout_is_not_scheduled_during_the_league):
+               test_knockout_is_not_scheduled_during_the_league,
+               test_the_table_counts_everyone_who_played):
         fn()
 
     total = sum(v[1] for v in RESULTS.values())

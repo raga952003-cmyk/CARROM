@@ -146,8 +146,44 @@ def compute_standings(supabase, tournament_id: str) -> Dict[str, Any]:
         cat_matches = [m for m in matches if (m.get("type") or "singles") == category]
         if not cat_matches and not pool:
             continue
+        # Anybody who actually played belongs in the table.
+        #
+        # The pool came from registrations still 'approved', and matches carry
+        # no foreign key to registrations -- so an entry list that no longer
+        # matches the fixtures silently deleted results.
+        # calculate_points_table drops any match whose two sides are not both
+        # in the pool, so each missing entrant took their OPPONENTS' matches
+        # with them.
+        #
+        # Seen in production: a 20-entrant round robin with 169 confirmed
+        # results returned participantCount 1 and a single row reading
+        # "played 0, points 0" -- because one approved registration was all
+        # that remained. The fallback below existed for exactly this, but only
+        # fired when the pool was EMPTY, and one surviving row was enough to
+        # keep it quiet.
+        #
+        # A match is the record of what was played; the entry list is the
+        # record of who was entered. When they disagree the match is the
+        # better evidence, so missing players are added back from the
+        # fixtures rather than their results being discarded. Removing an
+        # entrant who has results is refused elsewhere
+        # (services/entry_integrity.py), so this only ever restores someone
+        # the table should not have lost.
         if not pool:
             pool = _fallback_participants(cat_matches)
+        else:
+            known = {p["id"] for p in pool}
+            missing = [p for p in _fallback_participants(cat_matches)
+                       if p["id"] not in known]
+            if missing:
+                logger.warning(
+                    "Tournament %s %s: %d participant(s) appear in the fixtures "
+                    "but not in the approved entry list; counting them from the "
+                    "matches so their opponents' results are not lost. %s",
+                    tournament_id, category, len(missing),
+                    ", ".join(p["name"] for p in missing[:10]),
+                )
+                pool = pool + missing
 
         labels = sorted({g for g in (group_of(m) for m in cat_matches) if g})
 
