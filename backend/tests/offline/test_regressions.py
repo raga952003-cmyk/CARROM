@@ -27,6 +27,9 @@ sys.path.insert(0, HERE)
 from harness import Harness                                     # noqa: E402
 from app.services.qualification import league_is_complete       # noqa: E402
 from app.services.scoring_engine import calculate_points_table  # noqa: E402
+from app.services.scheduling_engine import (                    # noqa: E402
+    generate_conflict_free_schedule,
+)
 
 RESULTS = {}
 MATCH_ID = "22222222-2222-2222-2222-222222222222"
@@ -204,12 +207,57 @@ def test_entry_type_must_match_the_tournament():
                   "%s %s" % (r.status_code, detail(r)))
 
 
+def test_knockout_is_not_scheduled_during_the_league():
+    """A seat the league has not filled yet cannot be played during it.
+
+    Every constraint in the scheduler is per-participant or per-feeder, and a
+    bracket drawn onto a league has neither: its entrants are rank labels, and
+    its feeder is the league table rather than another match. So the
+    quarter-final was scheduled for 9:00 AM on an idle board -- before a
+    single league match had been played -- and validated as conflict-free,
+    because at that point it had no participants to collide with anybody.
+    """
+    league = [{"id": "L%d" % i, "stage": "league", "roundIndex": 0,
+               "player1Id": "p%d" % (i % 4 + 1),
+               "player2Id": "p%d" % ((i + 1) % 4 + 1)} for i in range(1, 7)]
+    knockout = [{"id": "K1", "stage": "knockout", "roundIndex": 1,
+                 "player1Id": None, "player2Id": None}]
+
+    out = {m["id"]: m for m in generate_conflict_free_schedule(
+        league + knockout, number_of_boards=3, start_date="2026-10-05",
+        match_duration_minutes=30, rest_time_minutes=10)}
+
+    def minute(m):
+        hhmm, ampm = m["scheduledTime"].rsplit(" ", 1)
+        hh, mm = (int(x) for x in hhmm.split(":"))
+        if ampm == "PM" and hh != 12:
+            hh += 12
+        if ampm == "AM" and hh == 12:
+            hh = 0
+        return hh * 60 + mm
+
+    last_league = max(minute(out["L%d" % i]) for i in range(1, 7))
+    check("a knockout seat is not scheduled before the league ends",
+          minute(out["K1"]) >= last_league + 30,
+          "knockout at %s, last league at %s"
+          % (out["K1"]["scheduledTime"], last_league))
+
+    # A pure knockout has no league to wait for and must not be pushed out.
+    only_ko = [{"id": "A", "stage": "knockout", "roundIndex": 0,
+                "player1Id": "x", "player2Id": "y"}]
+    first = generate_conflict_free_schedule(
+        only_ko, number_of_boards=2, start_date="2026-10-05")[0]
+    check("a knockout with no league still starts at the beginning",
+          first["scheduledTime"].startswith("9:00"), first["scheduledTime"])
+
+
 def main():
     for fn in (test_walkover_completes_the_league,
                test_walkover_awards_the_match_but_not_the_boards,
                test_deleting_a_player_cannot_rewrite_other_peoples_results,
                test_a_closed_tournament_is_not_playable,
-               test_entry_type_must_match_the_tournament):
+               test_entry_type_must_match_the_tournament,
+               test_knockout_is_not_scheduled_during_the_league):
         fn()
 
     total = sum(v[1] for v in RESULTS.values())

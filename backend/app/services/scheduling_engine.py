@@ -53,6 +53,8 @@ def generate_conflict_free_schedule(
             parents_by_next.setdefault(str(item["nextMatchId"]), []).append(str(item["id"]))
     scheduled_finish: Dict[str, int] = {}
     sorted_matches: List[Dict[str, Any]] = []
+    # When the league finishes. A knockout match cannot start before it.
+    league_finish = 0
 
     while remaining:
         ready = next((item for item in remaining
@@ -78,6 +80,22 @@ def generate_conflict_free_schedule(
             [0] + feeder_finish + [participant_next_available.get(pid, 0) for pid in people]
         )
 
+        # A knockout seat the league has not filled yet still cannot be played
+        # during the league.
+        #
+        # The three constraints above are all per-PARTICIPANT or per-FEEDER,
+        # and a bracket drawn onto a league has neither: its entrants are rank
+        # labels ("League Rank #1"), so `people` is empty, and its feeders are
+        # the league table rather than other matches, so `feeder_finish` is
+        # empty too. match_earliest came out 0 and the quarter-final was
+        # scheduled for minute zero on whichever board was idle -- in parallel
+        # with the league that decides who plays in it. The schedule validated
+        # as conflict-free, because at that point the match had no participants
+        # to collide with anybody; it only became a double-booking later, when
+        # promotion wrote the real names in.
+        if match.get("stage") != "league" and league_finish:
+            match_earliest = max(match_earliest, league_finish + rest_time_minutes)
+
         # Find a board that is free at or before match_earliest, or find the board that frees up earliest
         chosen_board = 1
         min_board_free_time = float("inf")
@@ -93,6 +111,8 @@ def generate_conflict_free_schedule(
 
         actual_start_time = max(match_earliest, min_board_free_time)
         finish_time = actual_start_time + match_duration_minutes
+        if match.get("stage") == "league":
+            league_finish = max(league_finish, finish_time)
         next_available_time_for_players = finish_time + rest_time_minutes
         next_available_time_for_board = finish_time + 5  # 5 min buffer to prep board
 
