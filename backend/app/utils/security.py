@@ -39,6 +39,89 @@ class _TokenUser:
         self.role = claims.get("role")
 
 
+# Supabase's published signing keys, so an ES256/RS256 project is verified in
+# this process instead of over the network.
+#
+# A Supabase project now signs access tokens with an asymmetric key by
+# default. This module could only check HS256 against SUPABASE_JWT_SECRET, so
+# on such a project every authenticated request fell through to
+# client.auth.get_user() -- a real round trip to Supabase, measured at 916 ms
+# against a 242 ms baseline, on EVERY request. Five of those for one tap of
+# the match timer.
+#
+# The public keys are public: the endpoint needs no credentials. Cached, so the
+# cost is one fetch per worker per TTL and nothing per request.
+_JWKS: dict = {"keys": None, "at": 0.0}
+_JWKS_TTL = 600.0          # a successful fetch is good for ten minutes
+_JWKS_FAIL_TTL = 30.0      # a failed one is retried sooner, but not per request
+
+# Which key material is allowed to verify which algorithm.
+#
+# This binding is the whole defence against algorithm confusion. The header is
+# attacker-controlled, so if a public key from the JWKS could verify an HS256
+# token, anyone could take the published key, HMAC a token of their choosing
+# with it, and be believed. An HS* token is therefore only ever checked against
+# the shared secret, and an asymmetric token only ever against a published
+# public key. Neither can stand in for the other.
+_SYMMETRIC = ("HS256", "HS384", "HS512")
+_ASYMMETRIC = ("RS256", "RS384", "RS512", "ES256", "ES384", "ES512",
+               "PS256", "PS384", "PS512")
+
+
+def _fetch_jwks():
+    """The project's JWKS, cached. [] means "asked and could not get them"."""
+    import time
+    now = time.monotonic()
+    cached, at = _JWKS["keys"], _JWKS["at"]
+    ttl = _JWKS_TTL if cached else _JWKS_FAIL_TTL
+    if cached is not None and (now - at) < ttl:
+        return cached
+
+    base = (settings.SUPABASE_URL or "").strip().rstrip("/")
+    if not base:
+        _JWKS.update({"keys": [], "at": now})
+        return []
+    try:
+        import httpx
+        # Short timeout on purpose: this sits in front of a request, and
+        # falling back to the network check is better than hanging.
+        res = httpx.get(f"{base}/auth/v1/.well-known/jwks.json", timeout=3.0)
+        res.raise_for_status()
+        keys = (res.json() or {}).get("keys") or []
+    except Exception as e:                                    # noqa: BLE001
+        logger.info("Could not fetch JWKS from %s (%s); will verify remotely.",
+                    base, e)
+        _JWKS.update({"keys": [], "at": now})
+        return []
+    _JWKS.update({"keys": keys, "at": now})
+    return keys
+
+
+def _signing_key(header: dict):
+    """(key, algorithm) this process may use for that header, or (None, None)."""
+    alg = str(header.get("alg") or "").upper()
+
+    if alg in _SYMMETRIC:
+        secret = settings.SUPABASE_JWT_SECRET
+        return (secret, alg) if secret else (None, None)
+
+    if alg in _ASYMMETRIC:
+        kid = header.get("kid")
+        if not kid:
+            return (None, None)
+        keys = _fetch_jwks()
+        match = next((k for k in keys if k.get("kid") == kid), None)
+        if match is None and keys:
+            # Keys rotate. One forced refresh before giving up, rather than
+            # failing every request until the TTL expires.
+            _JWKS.update({"keys": None, "at": 0.0})
+            match = next((k for k in _fetch_jwks() if k.get("kid") == kid), None)
+        return (match, alg) if match else (None, None)
+
+    # "none", or something this does not know: not verifiable here.
+    return (None, None)
+
+
 def _verify_locally(token: str):
     """
     Verify the access token's signature with the project's JWT secret.
@@ -60,10 +143,6 @@ def _verify_locally(token: str):
     is the token's remaining lifetime -- an hour at the default. Sign-out clears
     the token on the device; it does not need the server to agree.
     """
-    secret = settings.SUPABASE_JWT_SECRET
-    if not secret:
-        return None
-
     try:
         from jose import jwt as jose_jwt
         from jose.exceptions import JWTError
@@ -71,10 +150,21 @@ def _verify_locally(token: str):
         return None
 
     try:
+        header = jose_jwt.get_unverified_header(token)
+    except Exception:
+        return None
+
+    # The key is chosen by the token's algorithm, from the one source allowed
+    # to verify that algorithm. See _signing_key for why that binding matters.
+    key, algorithm = _signing_key(header)
+    if not key:
+        return None
+
+    try:
         claims = jose_jwt.decode(
             token,
-            secret,
-            algorithms=["HS256"],
+            key,
+            algorithms=[algorithm],
             # Supabase stamps every user token with this audience.
             audience="authenticated",
             options={"verify_aud": True, "verify_exp": True, "verify_signature": True},

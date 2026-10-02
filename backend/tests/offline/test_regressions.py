@@ -531,6 +531,82 @@ def test_an_unverifiable_token_asks_supabase_instead_of_signing_you_out():
     finally:
         security.settings.SUPABASE_JWT_SECRET = previous
 
+def test_asymmetric_tokens_verify_locally_without_a_round_trip():
+    """An ES256 project must not pay a Supabase call on every request.
+
+    Supabase now signs access tokens with an asymmetric key by default. This
+    module could only check HS256 against SUPABASE_JWT_SECRET, so every
+    authenticated request on such a project fell through to
+    client.auth.get_user() -- measured at 916 ms against a 242 ms baseline, on
+    EVERY request, five of them for one tap of the match timer.
+
+    The security property is the point of the key/algorithm binding and is
+    asserted here too: the JWKS holds PUBLIC keys, so if one could verify an
+    HS256 token then anyone could HMAC a token with the published key and be
+    believed. HS* is only ever checked against the secret, asymmetric only
+    ever against a published public key.
+    """
+    import json
+    import time
+    from fastapi import HTTPException
+    from jose import jwk
+    from jose import jwt as jose_jwt
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from app.utils import security
+
+    private = ec.generate_private_key(ec.SECP256R1())
+    pem = private.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode()
+    public_pem = private.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+
+    pub = jwk.construct(public_pem, algorithm="ES256").to_dict()
+    pub = {k: (v.decode() if isinstance(v, bytes) else v) for k, v in pub.items()}
+    pub["kid"] = "key-1"
+
+    claims = {"sub": "user-123", "aud": "authenticated",
+              "exp": int(time.time()) + 3600}
+
+    previous_secret = security.settings.SUPABASE_JWT_SECRET
+    previous_jwks = dict(security._JWKS)
+    security.settings.SUPABASE_JWT_SECRET = "the-hs256-secret"
+    # Seeded, so nothing here touches the network.
+    security._JWKS.update({"keys": [pub], "at": time.monotonic()})
+    try:
+        def verdict(token):
+            try:
+                return "local" if security._verify_locally(token) else "fallback"
+            except HTTPException as exc:
+                return "401:%s" % exc.detail
+
+        es = jose_jwt.encode(claims, pem, algorithm="ES256",
+                             headers={"kid": "key-1"})
+        check("an ES256 token verifies locally, with no round trip",
+              verdict(es) == "local", verdict(es))
+
+        hs = jose_jwt.encode(claims, "the-hs256-secret", algorithm="HS256")
+        check("an HS256 token with the configured secret still verifies locally",
+              verdict(hs) == "local", verdict(hs))
+
+        # The attack: HMAC a token using the PUBLIC key as the shared secret.
+        forged = jose_jwt.encode(dict(claims, sub="attacker"), json.dumps(pub),
+                                 algorithm="HS256", headers={"kid": "key-1"})
+        check("a public key is never accepted as an HS256 secret",
+              verdict(forged) != "local", verdict(forged))
+
+        check("an ES256 token with an unknown kid is not accepted locally",
+              verdict(jose_jwt.encode(claims, pem, algorithm="ES256",
+                                      headers={"kid": "unknown"})) != "local",
+              "accepted")
+    finally:
+        security.settings.SUPABASE_JWT_SECRET = previous_secret
+        security._JWKS.clear()
+        security._JWKS.update(previous_jwks)
+
 def main():
     for fn in (test_walkover_completes_the_league,
                test_walkover_awards_the_match_but_not_the_boards,
@@ -542,7 +618,8 @@ def main():
                test_confirm_keeps_the_winner_the_engine_decided,
                test_a_ruling_cannot_take_a_decided_match_off_its_winner,
                test_money_collected_outside_razorpay_can_be_refunded,
-               test_an_unverifiable_token_asks_supabase_instead_of_signing_you_out):
+               test_an_unverifiable_token_asks_supabase_instead_of_signing_you_out,
+               test_asymmetric_tokens_verify_locally_without_a_round_trip):
         fn()
 
     total = sum(v[1] for v in RESULTS.values())
