@@ -1301,14 +1301,30 @@ async def confirm_match(
             _assert_league_standings_mutable(admin_db, m)
 
         confirm_rules = (confirm_tournament or {}).get("rules") or {}
-        if not m.get("winner_id") and confirm_rules.get("setWinnerRule") == "target_points":
+        # A match played in SETS is won on sets, not on a flat sum of boards.
+        #
+        # submit_board routes on `total_sets > 1 or official_game` (:1194) and
+        # wins the match on sets. This branch asked only for the official
+        # target_points game, so a best-of-three with setWinnerRule
+        # 'total_points' or 'board_wins' -- both offered in
+        # ScoringRulesSettings -- fell through to the aggregate over every
+        # board of every set. Taking 2 sets to 1 while losing the raw total
+        # then lost the match on confirm, and the wrong player was advanced
+        # into the next round. Reopen clears winner_id, so any
+        # reopen-then-reconfirm landed here.
+        confirm_sets, _ = set_layout(m, confirm_rules)
+        confirm_official = confirm_rules.get("setWinnerRule") == "target_points"
+        if not m.get("winner_id") and (confirm_sets > 1 or confirm_official):
             game_boards = admin_db.table("boards").select("*").eq(
                 "match_id", id).execute().data or []
             decided = apply_set_results(m, game_boards, confirm_rules)
             if not decided.get("winnerId"):
                 raise HTTPException(status_code=409, detail=(
                     "Complete enough games to win the match. A game ends at 25 points "
-                    "or after eight boards; a tied game needs a deciding board."))
+                    "or after eight boards; a tied game needs a deciding board."
+                ) if confirm_official else (
+                    "Complete enough sets to win the match: %d set(s) are played "
+                    "and neither side leads on sets yet." % confirm_sets))
             settled = {
                 "status": "completed", "winner_id": decided["winnerId"],
                 "winner_name": decided["winnerName"],
@@ -1356,7 +1372,26 @@ async def confirm_match(
 
             is_league = str(m.get("stage") or "") == "league"
 
-            if lead == 0 and not is_league:
+            # The engine already decided this match; do not re-decide it.
+            #
+            # recalculate_match_scores settles a level remaining_coins match on
+            # board wins when rules.tieBreak == 'most_board_wins' and returns a
+            # real winnerId (scoring_engine.py:105-107). That verdict was
+            # thrown away here in favour of a one-dimensional `lead`, which for
+            # equal points is 0 -- so a match the engine had DECIDED read as
+            # level. In a league it was then written as a draw, handing the
+            # loser a point they did not earn and feeding the wrong table to
+            # promotion; in a knockout it 409'd and could not be confirmed from
+            # the screen at all. /reopen clears winner_id, so the next confirm
+            # always took this path.
+            #
+            # The lead is still the fallback, because the engine only returns a
+            # winner once every board is complete and this route allows
+            # confirming earlier than that.
+            engine_winner = recomputed.get("winnerId")
+            engine_winner_name = recomputed.get("winnerName")
+
+            if not engine_winner and lead == 0 and not is_league:
                 # A knockout cannot be left level: nothing advances out of it
                 # and the bracket stops there. That needs a human either way.
                 rule = m.get("tie_break_rule") or (rules.get("tieBreak") or "organizer_decision")
@@ -1386,14 +1421,14 @@ async def confirm_match(
             # Probed: two players level after 1-1 boards, confirm answered 409
             # and result_confirmed stayed false with no way forward but to
             # award the match to somebody who did not win it.
-            drawn = lead == 0
+            drawn = not engine_winner and lead == 0
             winner_is_p1 = lead > 0
             settled = {
                 "status": "completed",
-                "winner_id": None if drawn else (
-                    m.get("player1_id") if winner_is_p1 else m.get("player2_id")),
-                "winner_name": None if drawn else (
-                    m.get("player1_name") if winner_is_p1 else m.get("player2_name")),
+                "winner_id": engine_winner or (None if drawn else (
+                    m.get("player1_id") if winner_is_p1 else m.get("player2_id"))),
+                "winner_name": engine_winner_name or (None if drawn else (
+                    m.get("player1_name") if winner_is_p1 else m.get("player2_name"))),
                 "player1_board_wins": p1_wins,
                 "player2_board_wins": p2_wins,
                 "player1_total_points": p1_points,
@@ -1760,6 +1795,30 @@ async def resolve_tie_break(id: str, data: TieBreakSchema, admin = Depends(verif
                 detail=(
                     f"This match is not level -- {ahead} is ahead, so there is nothing "
                     "to rule on. Confirm the result, or reopen it if the boards are wrong."
+                ),
+            )
+
+        # A match with a winner on the row is not waiting on a ruling.
+        #
+        # The lead above is the same one-dimensional comparison /confirm used,
+        # so a match the ENGINE decided on board wins (points level, tieBreak
+        # 'most_board_wins') read as level here and the ruling was accepted for
+        # either player -- including the one who lost it. And a walkover never
+        # resets tie_break_required, so a match already awarded off the board
+        # could be handed to the opponent, leaving walkover=True and a
+        # walkover_reason naming the other player on the same row.
+        #
+        # Asked of the engine and of the row, the way the set-level ruling at
+        # :2418 already asks before accepting one.
+        already = match.get("winner_id") or tb_recomputed.get("winnerId")
+        if already:
+            held_by = (match.get("winner_name")
+                       or tb_recomputed.get("winnerName") or "a player")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This match already has a winner ({held_by}), so there is nothing "
+                    "to rule on. Reopen the result first if it needs to change."
                 ),
             )
 

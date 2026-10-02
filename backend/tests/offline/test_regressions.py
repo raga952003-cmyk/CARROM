@@ -346,6 +346,83 @@ def test_the_table_counts_everyone_who_played():
           (len(healthy), sum(r["played"] for r in healthy)))
 
 
+_MID = "22222222-2222-2222-2222-222222222222"
+_COINS = {"scoringMode": "remaining_coins", "tieBreak": "most_board_wins",
+          "queenPoints": 3, "coinsPerSide": 9, "numberOfSets": 1,
+          "setWinnerRule": "total_points", "pointsForWin": 2,
+          "pointsForDraw": 1, "pointsForLoss": 0, "maxBoardsPerMatch": 3}
+
+
+def _scored(stage, spec, tiebreak="most_board_wins"):
+    """A match with `spec` boards submitted through the real route."""
+    h = Harness()
+    admin = h.make_user("Org", role="admin")
+    a, b = h.make_user("Anita"), h.make_user("Bala")
+    rules = dict(_COINS, tieBreak=tiebreak)
+    tid = _tid(h.seed_tournament(admin, status="in_progress", rules=rules))
+    h.seed_match(tid, a, b, boards=len(spec), stage=stage, status="live",
+                 match_number=1)
+    for n, (s1, s2, w) in enumerate(spec, start=1):
+        h.post("/api/matches/%s/boards/%d/submit" % (_MID, n),
+               json={"p1Score": s1, "p2Score": s2, "boardWinner": w},
+               user_id=admin)
+    return h, admin, a, b
+
+
+# Level on POINTS, 2-1 on BOARDS: with tieBreak 'most_board_wins' the engine
+# decides this for player 1. The old /confirm threw that verdict away and
+# re-derived a one-dimensional points lead, which reads 0.
+_BOARD_DECIDED = [(3, 0, "player1"), (3, 0, "player1"), (0, 6, "player2")]
+
+
+def test_confirm_keeps_the_winner_the_engine_decided():
+    """Confirm must not re-decide a match the engine already settled.
+
+    The REOPEN is what makes this bite, and the first version of this test
+    left it out and passed against the broken code. submit_board writes the
+    engine's winner onto the row, and confirm preserves what is already
+    there; /reopen clears winner_id (matches.py:1508), so only the SECOND
+    confirm takes the branch that re-derived the result from a
+    one-dimensional points lead -- 0 here, because these boards are level on
+    points and decided on board wins.
+    """
+    def confirm_after_reopen(stage):
+        h, admin, a, _b = _scored(stage, _BOARD_DECIDED)
+        h.post("/api/matches/%s/confirm" % _MID, json={}, user_id=admin)
+        h.post("/api/matches/%s/reopen" % _MID,
+               json={"reason": "checking the sheet"}, user_id=admin)
+        r = h.post("/api/matches/%s/confirm" % _MID, json={}, user_id=admin)
+        body = r.json() if r.status_code == 200 else {}
+        won = (body or {}).get("winnerId") or (body or {}).get("winner_id")
+        row = h.db.table("matches").select("*").eq("id", _MID).execute().data[0]
+        return r, won or row.get("winner_id"), row
+
+    r, won, row = confirm_after_reopen("league")
+    check("a league match decided on board wins is not re-confirmed as a draw",
+          r.status_code == 200 and won, "%s winner=%r drawn_row=%r"
+          % (r.status_code, won, row.get("winner_id")))
+
+    r, won, _row = confirm_after_reopen("knockout")
+    check("the same knockout match can still be confirmed after a reopen",
+          r.status_code == 200 and won,
+          "%s %s" % (r.status_code, detail(r)))
+
+
+def test_a_ruling_cannot_take_a_decided_match_off_its_winner():
+    h, admin, _a, b = _scored("league", _BOARD_DECIDED)
+    r = h.post("/api/matches/%s/tie-break" % _MID,
+               json={"winnerId": b, "reason": "organiser ruling"}, user_id=admin)
+    check("a ruling is refused on a match that already has a winner",
+          r.status_code == 409, "%s %s" % (r.status_code, detail(r)))
+
+    # Over-correction guard: a GENUINELY level match must still accept one.
+    h, admin, a, _b = _scored("league", [(4, 0, "player1"), (0, 4, "player2")],
+                              tiebreak="additional_board")
+    r = h.post("/api/matches/%s/tie-break" % _MID,
+               json={"winnerId": a, "reason": "organiser ruling"}, user_id=admin)
+    check("a genuinely level match still accepts a ruling",
+          r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
+
 def main():
     for fn in (test_walkover_completes_the_league,
                test_walkover_awards_the_match_but_not_the_boards,
@@ -353,7 +430,9 @@ def main():
                test_a_closed_tournament_is_not_playable,
                test_entry_type_must_match_the_tournament,
                test_knockout_is_not_scheduled_during_the_league,
-               test_the_table_counts_everyone_who_played):
+               test_the_table_counts_everyone_who_played,
+               test_confirm_keeps_the_winner_the_engine_decided,
+               test_a_ruling_cannot_take_a_decided_match_off_its_winner):
         fn()
 
     total = sum(v[1] for v in RESULTS.values())
