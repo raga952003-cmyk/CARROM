@@ -200,7 +200,21 @@ async def _sanitise_database_errors(request: Request, exc: StarletteHTTPExceptio
     if code == _PG_INVALID_TEXT:
         status, message = 404, "Not found."
     else:
-        status, message = exc.status_code, "The database rejected this request."
+        # The SQLSTATE goes out with it, the message does not.
+        #
+        # "The database rejected this request." on its own told the organiser
+        # nothing and told whoever they reported it to even less -- a report of
+        # "unable to create a tournament" could not be distinguished from a
+        # missing column, a duplicate key or a failed constraint without access
+        # to the deployment's logs. A SQLSTATE is a five-character standard
+        # error CLASS: 42703 is undefined_column, 23505 unique_violation,
+        # 23503 foreign_key_violation. It names no table, no column, no value
+        # and no query, so it leaks nothing a caller could use, while making a
+        # bug report answerable in one line.
+        status = exc.status_code
+        message = "The database rejected this request."
+        if code and code != "None":
+            message += " (code %s)" % code
 
     return await http_exception_handler(
         request, StarletteHTTPException(status_code=status, detail=message),
