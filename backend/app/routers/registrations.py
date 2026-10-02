@@ -85,14 +85,18 @@ def _require_settleable_entry(db, registration: Dict[str, Any]) -> None:
         raise HTTPException(status_code=409, detail="This tournament no longer accepts entry payments.")
 
 
-def _require_no_pending_payment_proof(db, registration_id: str) -> None:
-    """A claimed GPay transfer must be reviewed before desk settlement or waiver."""
+def _require_no_pending_payment_proof(db, registration_id: str,
+                                      detail: Optional[str] = None) -> None:
+    """A claimed GPay transfer must be reviewed before the entry moves on."""
     proof = db.table("payment_proofs").select("id").eq(
         "registration_id", registration_id).eq("status", "pending").limit(1).execute().data or []
     if proof:
         raise HTTPException(
             status_code=409,
-            detail="A GPay proof is awaiting review. Verify or reject it before recording another payment or waiving the fee.",
+            detail=detail or (
+                "A GPay proof is awaiting review. Verify or reject it before "
+                "recording another payment or waiving the fee."
+            ),
         )
 
 
@@ -231,6 +235,33 @@ async def reject_registration(id: str, admin = Depends(verify_admin)):
     try:
         _authorise_registration(admin_db, id, admin)
         _refuse_reject_with_confirmed_results(admin_db, id)
+        # Settle the money question BEFORE closing the entry.
+        #
+        # This guard already existed and was already applied to waive-fee
+        # (:170). It was missing here, and rejecting an entry is the one move
+        # that cannot be undone: the refund branch below only fires for
+        # payment_status == 'paid', and a receipt still awaiting review leaves
+        # the entry 'pending'. So a player who really had transferred the fee
+        # was rejected with no ledger row and no refund-owed record, and then
+        # every settlement route refused the entry for good -- approve,
+        # manual-payment (cash and upi), waive-fee, and approving the receipt
+        # itself all answer 409, there is no DELETE for a registration, and
+        # record-manual-refund needs a payments row that was never written.
+        # Probed end to end: the money had left the player's account and the
+        # only trace left was the proof row.
+        #
+        # Refused rather than repaired, because the organiser has the better
+        # answer: review the receipt first. Rejecting the PROOF is always
+        # available, and once it is rejected the entry rejects cleanly.
+        _require_no_pending_payment_proof(
+            admin_db, id,
+            detail=(
+                "This entrant has a payment receipt awaiting review. Review it "
+                "first -- approve it if the money arrived, or reject the receipt "
+                "if it did not -- and then reject the entry. Rejecting now would "
+                "leave a paid entrant with no record of their payment."
+            ),
+        )
 
         registration = _set_status(id, "rejected", admin_db, actor=admin)
         if registration.get("payment_status") == "paid":

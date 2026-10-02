@@ -607,6 +607,64 @@ def test_asymmetric_tokens_verify_locally_without_a_round_trip():
         security._JWKS.clear()
         security._JWKS.update(previous_jwks)
 
+def test_an_entry_with_an_unreviewed_receipt_cannot_be_rejected():
+    """Settle the money question before closing the entry.
+
+    A player transfers the fee and uploads a receipt. Rejected before the
+    receipt is reviewed, the refund branch never fires -- it only looks at
+    payment_status == 'paid' and an unreviewed receipt leaves the entry
+    'pending' -- so no ledger row and no refund-owed record is written. Then
+    every settlement route refuses the entry for good: approve,
+    manual-payment (cash and upi), waive-fee, and approving the receipt
+    itself all answer 409; there is no DELETE for a registration; and
+    record-manual-refund needs a payments row that was never written. The
+    money had left the player's account.
+
+    The guard already existed (_require_no_pending_payment_proof) and was
+    already applied to waive-fee. It was missing from reject, which is the one
+    move that cannot be undone.
+    """
+    def setup():
+        h = Harness()
+        admin = h.make_user("Org", role="admin")
+        pat = h.make_user("Pat")
+        tid = _tid(h.seed_tournament(admin, status="registration_open",
+                                     entry_fee=500.0, gpay_upi_id="club@okbank"))
+        h.db.seed("registrations", [{
+            "id": "reg1", "tournament_id": tid, "player_id": pat,
+            "type": "singles", "status": "pending",
+            "payment_status": "pending", "fee_paise": 50000}])
+        return h, admin, tid
+
+    h, admin, tid = setup()
+    h.db.seed("payment_proofs", [{
+        "id": "pr1", "registration_id": "reg1", "tournament_id": tid,
+        "status": "pending", "amount_paise": 50000,
+        "reference": "ICICI0099887766"}])
+    r = h.post("/api/registrations/reg1/reject", json={}, user_id=admin)
+    check("rejecting an entry with an unreviewed receipt is refused",
+          r.status_code == 409, "%s %s" % (r.status_code, detail(r)))
+
+    # The escape hatch must stay open: deal with the receipt, then the entry.
+    h, admin, tid = setup()
+    h.db.seed("payment_proofs", [{
+        "id": "pr2", "registration_id": "reg1", "tournament_id": tid,
+        "status": "pending", "amount_paise": 50000,
+        "reference": "ICICI0099887767"}])
+    proof = h.post("/api/payment-proofs/pr2/review",
+                   json={"decision": "rejected", "note": "no credit found"},
+                   user_id=admin)
+    entry = h.post("/api/registrations/reg1/reject", json={}, user_id=admin)
+    check("rejecting the receipt first then the entry still works",
+          proof.status_code == 200 and entry.status_code == 200,
+          "receipt=%s entry=%s" % (proof.status_code, entry.status_code))
+
+    # And an entry with no receipt at all is unaffected.
+    h, admin, _tid2 = setup()
+    r = h.post("/api/registrations/reg1/reject", json={}, user_id=admin)
+    check("rejecting an entry with no receipt is unchanged",
+          r.status_code == 200, "%s %s" % (r.status_code, detail(r)))
+
 def main():
     for fn in (test_walkover_completes_the_league,
                test_walkover_awards_the_match_but_not_the_boards,
@@ -619,7 +677,8 @@ def main():
                test_a_ruling_cannot_take_a_decided_match_off_its_winner,
                test_money_collected_outside_razorpay_can_be_refunded,
                test_an_unverifiable_token_asks_supabase_instead_of_signing_you_out,
-               test_asymmetric_tokens_verify_locally_without_a_round_trip):
+               test_asymmetric_tokens_verify_locally_without_a_round_trip,
+               test_an_entry_with_an_unreviewed_receipt_cannot_be_rejected):
         fn()
 
     total = sum(v[1] for v in RESULTS.values())

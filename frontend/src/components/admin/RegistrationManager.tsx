@@ -780,7 +780,20 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
           + (rejectTarget?.paymentStatus === 'paid'
             ? ' The payment remains recorded. Rejecting does not issue a refund; review and record a refund decision separately.'
             : '')
-          + ' The entry can be approved again later if that changes.'
+          // Only promise re-approval where it is actually possible.
+          //
+          // This said "can be approved again later" for every entry, and for
+          // an UNPAID one that is false: approving needs a payment recorded or
+          // the fee waived, so it answers 409, and the player cannot simply
+          // re-register either because (tournament_id, player_id) is unique.
+          // It was the sentence that made rejecting feel reversible, which is
+          // exactly when an organiser stops hesitating over a fee they have
+          // not checked yet.
+          + (rejectTarget?.paymentStatus === 'paid' || rejectTarget?.paymentStatus === 'waived'
+            ? ' This entry can be approved again later, because its fee is already settled.'
+            : ' Rejecting is close to final while the fee is unsettled: approving'
+              + ' it again needs a payment recorded or the fee waived first, and'
+              + ' the player cannot re-register themselves.')
         }
         confirmLabel="Reject Entry"
         variant="danger"
@@ -809,7 +822,23 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
               ) : paymentAttempts.length === 0 ? (
                 <p className="text-xs text-gray-600">No payment attempts are recorded for this entry.</p>
               ) : paymentAttempts.map(payment => {
-                const manual = payment.razorpayOrderId.startsWith('manual-');
+                // Money collected outside Razorpay comes in two shapes.
+                //
+                // A desk payment is 'manual-<...>'; an approved UPI receipt is
+                // 'gpay-proof-<id>' with no razorpayPaymentId. Only the first
+                // was recognised, so a direct UPI payment was labelled
+                // "Razorpay" and then fell through BOTH button branches --
+                // not manual, and no payment id to reconcile -- so it had no
+                // refund control at all. The organiser handed the money back
+                // over GPay with no way to record it, and the modal pointed
+                // them at a Razorpay dashboard that has no such payment.
+                const orderId = payment.razorpayOrderId || '';
+                const isReceipt = orderId.startsWith('gpay-proof-');
+                const isDesk = orderId.startsWith('manual-');
+                const outsideRazorpay = isDesk || isReceipt;
+                const sourceLabel = isReceipt ? 'Direct UPI receipt'
+                  : isDesk ? 'Desk payment'
+                  : 'Razorpay';
                 const canCheckRefund = payment.status === 'paid' || payment.status === 'refund_due';
                 return (
                   <div key={payment.id} className="rounded-xl border border-gray-200 p-3 text-xs">
@@ -818,14 +847,16 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
                         <div className="font-bold text-gray-900">
                           ₹{payment.amount.toLocaleString('en-IN', { maximumFractionDigits: 2 })} · {payment.status.replace('_', ' ')}
                         </div>
-                        <div className="mt-1 text-gray-600">{manual ? 'Manual payment' : 'Razorpay'}{payment.method ? ` · ${payment.method}` : ''}</div>
+                        <div className="mt-1 text-gray-600">{sourceLabel}{payment.method ? ` · ${payment.method}` : ''}</div>
                         {payment.razorpayPaymentId && <div className="mt-1 break-all text-gray-500">Payment ID: {payment.razorpayPaymentId}</div>}
                         {payment.status === 'refund_due' && <div className="mt-1 font-bold text-red-700">Duplicate charge: refund required</div>}
                       </div>
-                      {canCheckRefund && (manual ? (
+                      {canCheckRefund && (outsideRazorpay ? (
                         <button type="button" onClick={() => recordManualRefund(payment.id)} disabled={!!paymentReviewBusy}
                           className="shrink-0 rounded-lg bg-amber-100 px-2.5 py-1.5 font-semibold text-amber-900 hover:bg-amber-200 disabled:opacity-50">
-                          {paymentReviewBusy === payment.id ? 'Recording…' : 'Record external refund'}
+                          {paymentReviewBusy === payment.id
+                            ? 'Recording…'
+                            : isReceipt ? 'Record UPI refund' : 'Record external refund'}
                         </button>
                       ) : payment.razorpayPaymentId ? (
                         <button type="button" onClick={() => reconcileRefund(payment.id)} disabled={!!paymentReviewBusy}
