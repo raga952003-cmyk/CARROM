@@ -50,6 +50,40 @@ def _assert_league_standings_mutable(admin_db, match: Dict[str, Any]) -> None:
             "knockout bracket with the wrong qualifiers."
         ))
 
+_CLOSED_TO_PLAY = ("cancelled", "completed")
+
+
+def _assert_tournament_accepts_play(tournament: Dict[str, Any]) -> None:
+    """A cancelled or completed tournament is not still being played.
+
+    Every one of these routes checked the MATCH -- its status, whether its
+    result was confirmed, whether its league had already seeded a bracket --
+    and none of them asked whether the TOURNAMENT was still running. So a
+    cancelled event stayed fully scorable: boards submitted, results
+    confirmed, the bracket advanced, and "Congratulations ... advancing to
+    the next knockout round" went out to every entrant of an event that had
+    just been called off.
+
+    The same gap let a decided tournament be rewritten. record_walkover
+    refuses when result_confirmed holds -- but a walkover never sets it, so a
+    final settled BY walkover could be walked over again after the tournament
+    closed, leaving the recorded champion disagreeing with the bracket with
+    no route back.
+
+    Reopening is deliberately not gated: reopen_match puts the tournament
+    back to in_progress (matches.py:1568), and it is the way a finished
+    tournament is legitimately opened up to correct something.
+    """
+    status = (tournament or {}).get("status")
+    if status not in _CLOSED_TO_PLAY:
+        return
+    raise HTTPException(status_code=409, detail=(
+        "This tournament was cancelled, so results can no longer be recorded."
+        if status == "cancelled" else
+        "This tournament is complete. Reopen the match you need to change "
+        "first; that reopens the tournament with it."
+    ))
+
 def tournament_rules(admin_db, tournament_id: str) -> dict:
     """The tournament's scoring rules, for the queen value."""
     if not tournament_id:
@@ -236,6 +270,7 @@ async def start_match(id: str, admin = Depends(verify_admin)):
     try:
         current, start_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.start")
+        _assert_tournament_accepts_play(start_tournament)
         # A cancelled event is not being played, and a completed one already
         # has been -- starting a match in either makes the tournament's own
         # record untrue. Checked on start rather than on every scoring call:
@@ -325,6 +360,7 @@ async def add_board(id: str, admin = Depends(verify_admin)):
     try:
         match, tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.add_board")
+        _assert_tournament_accepts_play(tournament)
         assert_tournament_not_terminal(tournament, "change its boards")
         if match.get("result_confirmed"):
             raise HTTPException(status_code=409, detail="Reopen this result before changing its boards.")
@@ -406,6 +442,7 @@ async def resize_match_boards(id: str, boards: int = Query(..., ge=1, le=31),
     try:
         match, tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.add_board")
+        _assert_tournament_accepts_play(tournament)
         assert_tournament_not_terminal(tournament, "resize its boards")
         if match.get("result_confirmed") or match.get("status") == "completed":
             raise HTTPException(status_code=409, detail=(
@@ -485,6 +522,7 @@ async def remove_unplayed_boards(id: str, admin = Depends(verify_admin)):
     try:
         match, tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.add_board")
+        _assert_tournament_accepts_play(tournament)
         assert_tournament_not_terminal(tournament, "remove its boards")
         if match.get("result_confirmed"):
             raise HTTPException(status_code=409, detail="Reopen this result before removing boards.")
@@ -609,6 +647,7 @@ async def update_board(
         # tournament, which is precisely what the ownership model exists to stop.
         match_data, tournament_row = _authorise_match_with_tournament(
             admin_db, id, admin, "match.score")
+        _assert_tournament_accepts_play(tournament_row)
         _assert_league_standings_mutable(admin_db, match_data)
 
         if match_data.get("result_confirmed"):
@@ -960,6 +999,7 @@ async def submit_board(
     try:
         match_data, tournament_row = _authorise_match_with_tournament(
             admin_db, id, admin, "match.score")
+        _assert_tournament_accepts_play(tournament_row)
         _assert_league_standings_mutable(admin_db, match_data)
         assert_match_scorable(match_data)
         if match_data.get("status") == "completed":
@@ -1256,6 +1296,7 @@ async def confirm_match(
     try:
         m, confirm_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.confirm")
+        _assert_tournament_accepts_play(confirm_tournament)
         if not m.get("result_confirmed"):
             _assert_league_standings_mutable(admin_db, m)
 
@@ -1675,6 +1716,7 @@ async def resolve_tie_break(id: str, data: TieBreakSchema, admin = Depends(verif
     try:
         match, tb_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.confirm")
+        _assert_tournament_accepts_play(tb_tournament)
         _assert_league_standings_mutable(admin_db, match)
 
         if match.get("result_confirmed"):
@@ -1783,6 +1825,7 @@ async def record_walkover(id: str, data: WalkoverSchema, admin = Depends(verify_
     try:
         match, walkover_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.walkover")
+        _assert_tournament_accepts_play(walkover_tournament)
         _assert_league_standings_mutable(admin_db, match)
 
         if match.get("result_confirmed"):
@@ -2391,6 +2434,7 @@ async def resolve_set_tie_break(
     try:
         match, tb_tournament = _authorise_match_with_tournament(
             admin_db, id, admin, "match.confirm")
+        _assert_tournament_accepts_play(tb_tournament)
 
         if match.get("result_confirmed"):
             raise HTTPException(
