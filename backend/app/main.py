@@ -265,10 +265,11 @@ _COLUMN_PROBES = (
     ("012_lifecycle", "tournaments", "champion_id"),
     ("015_payments", "payments", "razorpay_order_id"),
     ("020_gpay_payment_proofs", "payment_proofs", "transaction_reference"),
-    # 029 adds two board columns and one match column. Probed on the board
-    # side: it is the one a scorer hits on every single submission, so if
-    # only half the migration landed this is the half worth knowing about.
+    # 029 adds two board columns and one match column. Check each one: a
+    # partial migration can otherwise leave health green while scoring fails.
     ("029_official_score_finishes_and_set_ties", "boards", "finish_type"),
+    ("029_official_score_finishes_and_set_ties", "boards", "special_finish_extra_point"),
+    ("029_official_score_finishes_and_set_ties", "matches", "set_tie_breaks"),
 )
 
 # Migrations that leave nothing PostgREST can see. Reporting one of these as
@@ -471,7 +472,7 @@ async def health():
     # green while quietly not recording tosses or board detail.
     # Cached, because a schema does not change without a deployment.
     #
-    # These probes are ten sequential Supabase round trips, and from a
+    # These probes are sequential Supabase round trips, and from a
     # serverless function each costs a couple of hundred milliseconds: /health
     # was measured at 2.2 seconds to return about nothing. Anything polling it
     # paid that every time. A positive result is kept for the life of the
@@ -503,7 +504,8 @@ async def health():
             try:
                 supabase_admin.table(table).select(column).limit(1).execute()
             except Exception:
-                pending.append(migration)
+                if migration not in pending:
+                    pending.append(migration)
 
         # 007 replaces a function rather than adding a column, so it is probed
         # by argument list: the old six-argument version cannot take a set.
@@ -599,6 +601,17 @@ async def health():
                 pending.append("028_receipt_payee_review_guard")
         except Exception:
             pending.append("028_receipt_payee_review_guard")
+
+        # 030 checks that the official scoring wrapper and the per-game tie
+        # ruling RPC are installed. The helper reads function metadata only.
+        try:
+            ready = supabase_admin.rpc(
+                "official_score_atomic_ready", {}
+            ).execute().data
+            if ready is not True:
+                pending.append("030_official_score_atomicity")
+        except Exception:
+            pending.append("030_official_score_atomicity")
 
     _pending_cache = pending
     _pending_checked_at = time.monotonic()

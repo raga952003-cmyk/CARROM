@@ -1,52 +1,11 @@
 import React from 'react';
 import { Check, Circle, Trophy } from 'lucide-react';
-import { Match, BoardScore, MatchSet } from '../../types/tournament';
-
-/**
- * Per-set totals, derived from the boards the client already holds.
- *
- * Mirrors `summarise_sets()` on the server so the umpire sees the set standing
- * without a round trip after every board. The server recomputes it and stays
- * authoritative — this is a view, never the stored value.
- */
-export function summariseSets(match: Match, boardsPerSet: number): MatchSet[] {
-  const totalSets = Math.max(1, match.numberOfSets || 1);
-  const grouped = new Map<number, BoardScore[]>();
-  for (const b of match.boards || []) {
-    const n = b.setNumber || 1;
-    if (!grouped.has(n)) grouped.set(n, []);
-    grouped.get(n)!.push(b);
-  }
-
-  const out: MatchSet[] = [];
-  for (let setNumber = 1; setNumber <= totalSets; setNumber++) {
-    const members = grouped.get(setNumber) || [];
-    let p1 = 0, p2 = 0, done = 0;
-    for (const b of members) {
-      if (b.status !== 'completed') continue;
-      done += 1;
-      p1 += b.player1Score || 0;
-      p2 += b.player2Score || 0;
-    }
-    const expected = members.length || boardsPerSet;
-    const complete = done > 0 && done >= expected;
-    out.push({
-      setNumber,
-      status: complete ? 'completed' : done ? 'in_progress' : 'pending',
-      boardsCompleted: done,
-      boardsExpected: expected,
-      player1Points: p1,
-      player2Points: p2,
-      winnerId: complete ? (p1 > p2 ? match.player1Id : p2 > p1 ? match.player2Id : null) : null,
-      winnerName: complete ? (p1 > p2 ? match.player1Name : p2 > p1 ? match.player2Name : null) : null,
-    });
-  }
-  return out;
-}
+import { Match, TournamentRules } from '../../types/tournament';
+import { summariseMatchSets } from '../../utils/setScoring';
 
 interface SetScoreboardProps {
   match: Match;
-  boardsPerSet: number;
+  rules: Partial<TournamentRules>;
   activeSet: number;
   onSelectSet: (n: number) => void;
 }
@@ -59,9 +18,9 @@ interface SetScoreboardProps {
  * point total on its own can say the opposite of who is actually ahead.
  */
 export const SetScoreboard: React.FC<SetScoreboardProps> = ({
-  match, boardsPerSet, activeSet, onSelectSet,
+  match, rules, activeSet, onSelectSet,
 }) => {
-  const sets = summariseSets(match, boardsPerSet);
+  const sets = summariseMatchSets(match, rules);
   if (sets.length <= 1) return null;
 
   const p1Sets = sets.filter(s => s.winnerId && s.winnerId === match.player1Id).length;
@@ -107,7 +66,9 @@ export const SetScoreboard: React.FC<SetScoreboardProps> = ({
               <div className="text-[10px] text-gray-500">
                 {s.status === 'completed'
                   ? (s.winnerName ? `${s.winnerName.split(' ')[0]} won` : 'drawn')
-                  : `${s.boardsCompleted}/${s.boardsExpected} boards`}
+                  : s.needsSetTieBreak ? 'Sudden death needed'
+                    : s.needsExtraBoard ? 'Deciding board needed'
+                      : `${s.boardsCompleted}/${s.boardsExpected} boards`}
               </div>
               {(wonBy1 || wonBy2) && (
                 <Trophy className="w-3 h-3 text-[#D4A72C] mt-0.5" />
@@ -140,7 +101,9 @@ export const SetScoreboard: React.FC<SetScoreboardProps> = ({
                     s.winnerId === match.player2Id ? 'text-[#0B5D3B]' : 'text-gray-700'
                   }`}>{s.player2Points}</td>
                   <td className="py-1 pl-2 text-gray-600 truncate">
-                    {s.status === 'completed' ? (s.winnerName || 'Drawn') : '—'}
+                    {s.status === 'completed'
+                      ? `${s.winnerName || 'Drawn'}${s.tieBreakResult ? ' (sudden death)' : ''}`
+                      : s.needsSetTieBreak ? 'Sudden death needed' : '—'}
                   </td>
                 </tr>
               ))}

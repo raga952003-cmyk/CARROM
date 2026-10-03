@@ -27,6 +27,15 @@ def _looks_like_missing_function(error: Exception) -> bool:
     return any(marker.lower() in message for marker in _MISSING_FUNCTION_MARKERS)
 
 
+def _looks_like_missing_official_board_rpc(error: Exception) -> bool:
+    """Recognise an absent RPC without masking unrelated missing columns."""
+    message = str(error).lower()
+    return ("pgrst202" in message
+            or "could not find the function" in message
+            or ("apply_official_board_result" in message
+                and "does not exist" in message))
+
+
 def transactional_rpc_available() -> Optional[bool]:
     """True/False once probed, None before the first attempt."""
     return _rpc_available
@@ -103,6 +112,31 @@ def apply_board_result(
         "p_next_board_number": next_board_number,
         "p_set_number": set_number or 1,
     }
+    if "finish_type" in board_patch:
+        # The older board RPCs use explicit UPDATE column lists and do not
+        # persist the Law 107 finish fields. A fallback to either RPC would
+        # store the score but lose the ruling that produced it.
+        official_params = {**params, "p_next_set_number": next_set_number}
+        try:
+            result = _with_retry(lambda: admin_db.rpc(
+                "apply_official_board_result", official_params).execute())
+        except Exception as exc:
+            if _looks_like_missing_official_board_rpc(exc):
+                raise HTTPException(status_code=503, detail=(
+                    "Official board scoring needs migration 030. "
+                    "Ask the organiser to finish database setup."
+                )) from exc
+            if any(marker in str(exc).lower() for marker in (
+                "game ruling changed", "corrected game ruling",
+                "correct later games",
+            )):
+                raise HTTPException(status_code=409, detail=(
+                    "The game changed while this score was saved. Reload the match "
+                    "and review its ruling before trying again."
+                )) from exc
+            raise
+        _mark(True)
+        return result.data or {}
     if next_set_number is not None:
         # The last scored board of a game must open the following game's first
         # board in the same transaction. A separate update can leave an

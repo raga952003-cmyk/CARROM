@@ -18,6 +18,7 @@ import { findMyMatches, opponentOf } from '../../src/utils/myMatches';
 import { groupMatches, isLive, isFinished, finishedIsProvisional, resultSummary, outcomeFor }
   from '../../src/utils/matchGroups';
 import { resourcesToRefresh, Resource } from '../../src/utils/refreshScope';
+import { pendingOfficialSetTieBreak, setTieBreakPath, summariseMatchSets } from '../../src/utils/setScoring';
 
 type Slot = { failed: number; ran: number; examples: string[] };
 const RESULTS = new Map<string, Slot>();
@@ -624,6 +625,83 @@ function suiteCoinRange() {
   }
 }
 
+function suiteOfficialSetTieBreak() {
+  const rules = {
+    scoringMode: 'official_icf', setWinnerRule: 'target_points',
+    targetScore: 21, boardsPerSet: 6, numberOfSets: 3,
+  } as any;
+  const boards = [1, 2, 3, 4, 5, 6].map(n => ({
+    setNumber: 1, boardNumber: n, status: 'completed',
+    player1Score: n % 2 ? 1 : 0, player2Score: n % 2 ? 0 : 1,
+  }));
+  const pending = [1, 2, 3].flatMap(setNumber => [1, 2, 3, 4, 5, 6].map(boardNumber => ({
+    setNumber, boardNumber, status: 'pending', player1Score: 0, player2Score: 0,
+  })));
+  const match = {
+    id: 'match-1', player1Id: 'one', player2Id: 'two',
+    player1Name: 'One', player2Name: 'Two', numberOfSets: 3, maxBoards: 6,
+    targetPoints: 21, tieBreakRequired: true, tieBreakRule: 'sudden_death',
+    boards: [...boards, ...pending.filter(b => b.setNumber !== 1)],
+  } as any;
+
+  const waiting = summariseMatchSets(match, rules)[0];
+  check('a tied sixth board waits for a game ruling rather than showing a draw',
+        waiting.status === 'in_progress' && waiting.needsSetTieBreak && !waiting.needsExtraBoard);
+  check('the 21/6 ruling targets the game-level API',
+        pendingOfficialSetTieBreak(match, rules)?.setNumber === 1
+        && setTieBreakPath(match.id, 1) === '/matches/match-1/sets/1/tie-break');
+
+  const decided = { ...match, tieBreakRequired: false, setTieBreaks: {
+    '1': { method: 'sudden_death', winnerId: 'two', reason: 'Umpire ruling' },
+  } };
+  const firstGame = summariseMatchSets(decided, rules)[0];
+  check('the recorded sudden-death winner appears despite equal points',
+        firstGame.status === 'completed' && firstGame.winnerId === 'two'
+        && firstGame.tieBreakResult?.reason === 'Umpire ruling');
+  check('a ruled game is no longer offered for another ruling',
+        pendingOfficialSetTieBreak(decided, rules) === null);
+
+  const corrected = { ...match, tieBreakRequired: false, setTieBreaks: {}, boards: [
+    ...boards.slice(0, 5), { ...boards[5], player1Score: 2, player2Score: 0 },
+    ...pending.filter(b => b.setNumber !== 1),
+  ] };
+  check('a corrected sixth board replaces the old ruling with the points winner',
+        summariseMatchSets(corrected, rules)[0].winnerId === 'one'
+        && pendingOfficialSetTieBreak(corrected, rules) === null);
+  const retied = { ...match, setTieBreaks: {} };
+  check('an invalidated ruling leaves a visible sudden-death prompt when retied',
+        summariseMatchSets(retied, rules)[0].needsSetTieBreak
+        && pendingOfficialSetTieBreak(retied, rules)?.setNumber === 1);
+
+  const game2Tie = { ...match, boards: [
+    ...boards.map(b => ({ ...b, player1Score: 2, player2Score: 0 })),
+    ...boards.map(b => ({ ...b, setNumber: 2 })),
+    ...pending.filter(b => b.setNumber === 3),
+  ] };
+  check('a later tied game is identified by its own set number',
+        pendingOfficialSetTieBreak(game2Tie, rules)?.setNumber === 2);
+
+  const fiveBoards = { ...match, boards: match.boards.map((b: any) =>
+    b.setNumber === 1 && b.boardNumber === 6 ? { ...b, status: 'pending' } : b) };
+  check('sudden death is unavailable before the sixth board is complete',
+        pendingOfficialSetTieBreak(fiveBoards, rules) === null);
+
+  const wrongWinner = { ...decided, tieBreakRequired: true, setTieBreaks: {
+    '1': { method: 'sudden_death', winnerId: 'stranger' },
+  } };
+  check('a ruling for a non-participant cannot settle the displayed game',
+        pendingOfficialSetTieBreak(wrongWinner, rules)?.setNumber === 1);
+
+  const senior = { ...match, maxBoards: 8, boards: [1, 2, 3, 4, 5, 6, 7, 8].map(n => ({
+    setNumber: 1, boardNumber: n, status: 'completed',
+    player1Score: n % 2 ? 1 : 0, player2Score: n % 2 ? 0 : 1,
+  })) };
+  const seniorRules = { ...rules, targetScore: 25, boardsPerSet: 8 };
+  check('a level 25/8 game still requests a deciding board',
+        summariseMatchSets(senior, seniorRules)[0].needsExtraBoard
+        && pendingOfficialSetTieBreak(senior, seniorRules) === null);
+}
+
 const SUITES: Array<[string, () => void]> = [
   ['refresh scope', suiteRefreshScope],
   ['preview/server parity', suiteParity],
@@ -632,6 +710,7 @@ const SUITES: Array<[string, () => void]> = [
   ['my matches', suiteMyMatches],
   ['match groups', suiteMatchGroups],
   ['coin range', suiteCoinRange],
+  ['official game sudden death', suiteOfficialSetTieBreak],
 ];
 
 function main() {

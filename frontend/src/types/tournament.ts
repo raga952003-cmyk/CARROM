@@ -87,6 +87,16 @@ export interface MatchSet {
   winnerName?: string | null;
 }
 
+export interface SetTieBreakDecision {
+  method: 'sudden_death';
+  winnerId: string;
+  winnerName?: string;
+  reason?: string;
+  decidedBy?: string;
+  decidedByName?: string;
+  decidedAt?: string;
+}
+
 export interface BoardScore {
   /** Board numbers restart in each set, so a board is (set, number). */
   setNumber?: number;
@@ -196,6 +206,8 @@ export interface Match {
   tieBreakRequired?: boolean;
   tieBreakRule?: string | null;
   tieBreakResult?: string | null;
+  /** Recorded sudden-death decisions, keyed by game number. */
+  setTieBreaks?: Record<string, SetTieBreakDecision>;
   /** True when the match was awarded without being played. */
   walkover?: boolean;
   /** Why it was awarded — required when recording one, so it is always present. */

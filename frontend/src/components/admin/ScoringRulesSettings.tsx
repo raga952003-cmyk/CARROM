@@ -47,6 +47,7 @@ interface ScoringRulesSettingsProps {
 export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ value, onChange }) => {
   const set = (patch: Partial<ScoringRules>) => onChange({ ...value, ...patch });
   const official = value.scoringMode === 'official_icf';
+  const official21Six = official && value.boardsPerSet === 6;
   const remaining = value.scoringMode === 'remaining_coins' || official;
 
   // A worked board: the winner pocketed everything, the loser has 4 left.
@@ -219,7 +220,7 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             {value.setWinnerRule === 'target_points' ? 'If a game is tied at its board limit' : 'If the match is tied after every board'}
           </label>
           <select
-            value={value.tieBreak}
+            value={official21Six ? 'sudden_death' : value.tieBreak}
             onChange={e => set({ tieBreak: e.target.value as ScoringRules['tieBreak'] })}
             disabled={official}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
@@ -239,7 +240,11 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             {value.numberOfSets > 1 && (
               <div className="mb-1.5 font-semibold">
                 Best of {value.numberOfSets} games, with up to {value.boardsPerSet} regular boards per game.
-                {value.setWinnerRule === 'target_points' && ' A game can finish earlier at the target score; a tied game gets a deciding board.'}
+                {value.setWinnerRule === 'target_points' && (
+                  official21Six
+                    ? ' A game can finish earlier at 21 points; a level sixth board is settled by recorded sudden death.'
+                    : ' A game can finish earlier at the target score; a tied game gets a deciding board.'
+                )}
               </div>
             )}
             {remaining ? (

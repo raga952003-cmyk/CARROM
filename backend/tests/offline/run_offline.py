@@ -41,6 +41,7 @@ NO_COVER = "--no-cover" in sys.argv
 # (module, label, traced)
 SUITES = [
     ("test_pure_logic", "unit          pure functions, exhaustive enumeration", False),
+    ("test_official_transaction", "unit          official score atomic write", False),
     ("test_scenarios", "scenario      900 whole tournaments", False),
     ("test_integration", "integration   real app + in-memory database", True),
     ("test_system", "system        whole app over HTTP, black box", True),

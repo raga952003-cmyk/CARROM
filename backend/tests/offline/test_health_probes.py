@@ -47,7 +47,8 @@ UNPROBEABLE = {"008_drop_city_default", "009_stop_timer_on_finish",
 RPC_PROBED = {"007_apply_board_result_sets", "022_auto_approve_settled_registrations",
               "023_atomic_manual_entry_payment", "024_payment_proof_image_analysis",
               "025_payment_proof_review_access", "026_payment_proof_reconsideration",
-              "027_registration_draw_atomicity", "028_receipt_payee_review_guard"}
+              "027_registration_draw_atomicity", "028_receipt_payee_review_guard",
+              "030_official_score_atomicity"}
 
 PAYLOAD_KEYS = {
     "status", "pending_migrations", "migrations", "env", "database_client",
@@ -168,7 +169,10 @@ def test_complete_schema_is_ok():
     for table, column in (("tournaments", "champion_id"),
                           ("public_profiles", "id"),
                           ("matches", "walkover_by"),
-                          ("idempotency_keys", "key")):
+                          ("idempotency_keys", "key"),
+                          ("boards", "finish_type"),
+                          ("boards", "special_finish_extra_point"),
+                          ("matches", "set_tie_breaks")):
         check("the probe selects %s.%s" % (table, column),
               (table, column) in probed, sorted(probed))
     check("the 007 probe calls apply_board_result by rpc",
@@ -182,6 +186,9 @@ def test_complete_schema_is_ok():
               for name, _ in h.db.rpc_calls), h.db.rpc_calls)
     check("the 028 probe checks the receipt approval trigger",
           any(name == "payment_proof_payee_guard_ready"
+              for name, _ in h.db.rpc_calls), h.db.rpc_calls)
+    check("the 030 probe checks atomic official score persistence",
+          any(name == "official_score_atomic_ready"
               for name, _ in h.db.rpc_calls), h.db.rpc_calls)
 
 
@@ -216,6 +223,29 @@ def test_missing_column_is_pending():
                                                 "012_lifecycle"], payload)
     check("a degraded payload has the same keys as a healthy one",
           set(payload.keys()) == PAYLOAD_KEYS, sorted(payload.keys()))
+
+
+def test_partial_official_score_schema_is_pending():
+    migration = "029_official_score_finishes_and_set_ties"
+    for table, column in (("boards", "finish_type"),
+                          ("boards", "special_finish_extra_point"),
+                          ("matches", "set_tie_breaks")):
+        h = Harness()
+        with_schema(h, missing={(table, column)})
+        payload = fresh_health(h)
+        check("each missing 029 column reports the migration once",
+              payload.get("pending_migrations") == [migration],
+              (table, column, payload))
+        check("each missing 029 column degrades health",
+              payload.get("status") == "degraded", (table, column, payload))
+
+    h = Harness()
+    with_schema(h, missing={("boards", "finish_type"),
+                            ("boards", "special_finish_extra_point"),
+                            ("matches", "set_tie_breaks")})
+    payload = fresh_health(h)
+    check("three missing 029 columns do not duplicate the pending migration",
+          payload.get("pending_migrations") == [migration], payload)
 
 
 def test_missing_auto_approval_trigger_is_pending():
@@ -314,6 +344,32 @@ def test_missing_receipt_payee_guard_is_pending():
           payload.get("pending_migrations") == ["028_receipt_payee_review_guard"], payload)
 
 
+def test_missing_official_score_atomicity_is_pending():
+    h = Harness()
+    with_schema(h)
+    original_rpc = h.db.rpc
+
+    def without_readiness(name, params=None):
+        if name == "official_score_atomic_ready":
+            raise PostgrestError("Could not find official_score_atomic_ready", "PGRST202")
+        return original_rpc(name, params)
+
+    h.db.rpc = without_readiness
+    payload = fresh_health(h)
+    check("missing atomic score RPC reports migration 030",
+          payload.get("pending_migrations") == ["030_official_score_atomicity"], payload)
+
+    def outdated_function(name, params=None):
+        if name == "official_score_atomic_ready":
+            return type("Result", (), {"data": False})()
+        return original_rpc(name, params)
+
+    h.db.rpc = outdated_function
+    payload = fresh_health(h)
+    check("outdated score RPC does not pass migration 030 probe",
+          payload.get("pending_migrations") == ["030_official_score_atomicity"], payload)
+
+
 # ---------------------------------------------------------------------------
 # What cannot be seen is never claimed
 # ---------------------------------------------------------------------------
@@ -355,8 +411,7 @@ def test_unprobeable_migrations_are_listed_not_claimed():
 # ---------------------------------------------------------------------------
 
 def test_cached_paths_carry_the_list():
-    # Positive result: kept for the life of the process, because a schema does
-    # not lose a column without a deployment.
+    # Positive result: reused during the probe's recheck window.
     h = Harness()
     seen = with_schema(h)
     first = fresh_health(h)
@@ -429,11 +484,13 @@ def test_every_migration_is_accounted_for():
 SUITES = [
     ("complete schema", test_complete_schema_is_ok),
     ("missing column", test_missing_column_is_pending),
+    ("partial official score schema", test_partial_official_score_schema_is_pending),
     ("missing approval trigger", test_missing_auto_approval_trigger_is_pending),
     ("missing proof review access RPC", test_missing_proof_review_access_rpc_is_pending),
     ("missing proof reconsideration RPC", test_missing_proof_reconsideration_rpc_is_pending),
     ("missing registration draw guard", test_missing_registration_draw_guard_is_pending),
     ("missing receipt payee guard", test_missing_receipt_payee_guard_is_pending),
+    ("missing atomic score RPC", test_missing_official_score_atomicity_is_pending),
     ("unprobeable migrations", test_unprobeable_migrations_are_listed_not_claimed),
     ("cached paths", test_cached_paths_carry_the_list),
     ("every migration accounted for", test_every_migration_is_accounted_for),

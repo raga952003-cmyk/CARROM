@@ -12,7 +12,8 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import { ReasonModal } from '../common/ReasonModal';
 import { MatchTimer } from './MatchTimer';
 import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from './BoardResultForm';
-import { SetScoreboard, summariseSets } from './SetScoreboard';
+import { SetScoreboard } from './SetScoreboard';
+import { pendingOfficialSetTieBreak, setTieBreakPath } from '../../utils/setScoring';
 
 interface LiveMatchControllerProps {
   /** Something the umpire needs to know that happened before this view opened. */
@@ -92,6 +93,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const rules = tournament.rules || ({} as any);
   const totalSets = Math.max(1, match.numberOfSets || rules.numberOfSets || 1);
   const boardsPerSet = rules.boardsPerSet || match.maxBoards || 8;
+  const pendingSetTie = pendingOfficialSetTieBreak(match, rules);
   // The set currently being scored. Board numbers restart each set, so every
   // board lookup has to be qualified by it.
   const [activeSet, setActiveSet] = useState<number>(1);
@@ -148,7 +150,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   const [isReopenModalOpen, setIsReopenModalOpen] = useState(false);
   // The side a level match is about to be awarded to; the ReasonModal is open
   // while this is set.
-  const [tieBreakTarget, setTieBreakTarget] = useState<{ id: string; name: string } | null>(null);
+  const [tieBreakTarget, setTieBreakTarget] = useState<{ id: string; name: string; setNumber?: number } | null>(null);
 
   // One write at a time. Every control on this screen changes the same match
   // and then reloads it, so a second click while the first is in flight either
@@ -182,7 +184,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   // Both reason modals show the error of their own last attempt, so opening
   // one starts clean rather than with a refusal from an earlier visit.
   const openReopen = () => { clearError('reopen'); setIsReopenModalOpen(true); };
-  const openTieBreak = (target: { id: string; name: string }) => {
+  const openTieBreak = (target: { id: string; name: string; setNumber?: number }) => {
     clearError('tieBreak');
     setTieBreakTarget(target);
   };
@@ -226,13 +228,18 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   // umpire was told to "finish the remaining boards" they had already finished.
   const decideTieBreak = async (reason: string) => {
     if (!tieBreakTarget) return;
-    const { id: winnerId, name: winnerName } = tieBreakTarget;
+    const { id: winnerId, name: winnerName, setNumber } = tieBreakTarget;
     const ok = await run('tieBreak', async () => {
-      await apiClient.post(`/matches/${match.id}/tie-break`, { winnerId, reason });
+      await apiClient.post(
+        setNumber ? setTieBreakPath(match.id, setNumber) : `/matches/${match.id}/tie-break`,
+        { winnerId, reason },
+      );
       await refreshTournaments();
     }, 'Could not record the ruling.');
     if (ok) {
-      notify.success(`Match awarded to ${winnerName}.`);
+      notify.success(setNumber
+        ? `Game ${setNumber} awarded to ${winnerName} after sudden death.`
+        : `Match awarded to ${winnerName}.`);
       setTieBreakTarget(null);
     }
   };
@@ -268,7 +275,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
     && setPoints.player1 === setPoints.player2;
   const canAddBoard = canScore && !match.resultConfirmed
     && (rules.setWinnerRule === 'target_points' || rules.scoringMode === 'official_icf'
-      ? needsDecidingBoard
+      ? needsDecidingBoard && !pendingSetTie
       : totalSets === 1);
 
   const removeUnplayedBoards = async () => {
@@ -286,7 +293,11 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   // boards than the maximum is deliberately NOT a reason: the organiser may
   // settle a match on what was played.
   const confirmBlocker = match.tieBreakRequired
-    ? 'The match is level. Award it, or add a deciding board and play it, before confirming.'
+    ? pendingSetTie
+      ? `Record the sudden-death winner of game ${pendingSetTie.setNumber} before confirming.`
+      : rules.setWinnerRule === 'target_points'
+        ? 'Add and play the deciding board before confirming.'
+        : 'The match is level. Award it, or add a deciding board and play it, before confirming.'
     : completedBoardCount === 0 && !match.walkover
       ? 'No board has been scored yet, so there is no result to confirm.'
       : '';
@@ -698,20 +709,22 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
           </div>
         )}
 
-        {/* A level match needs a human, and this is where they are asked. */}
+        {/* A level game needs its own sudden-death ruling; other ties follow the match rule. */}
         {match.tieBreakRequired && !match.resultConfirmed && canScore && (
           <div className="mx-4 mb-3 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
             <div className="flex items-start gap-2 mb-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
               <div>
-                <h4 className="text-sm font-bold text-amber-900">This match finished level</h4>
+                <h4 className="text-sm font-bold text-amber-900">
+                  {pendingSetTie ? `Game ${pendingSetTie.setNumber} finished level`
+                    : rules.setWinnerRule === 'target_points' ? 'This game finished level' : 'This match finished level'}
+                </h4>
                 <p className="text-xs text-amber-800 mt-0.5">
-                  Both players scored {match.player1TotalPoints} across all{' '}
-                  {(match.boards || []).length} boards.{' '}
-                  {match.tieBreakRule === 'additional_board'
-                    ? 'This tournament settles a level match with a deciding board — add one and play it. If that is not possible, award the match instead.'
-                    : 'The result is yours to decide.'}{' '}
-                  Whichever you choose is recorded with the match.
+                  {pendingSetTie
+                    ? `Both players scored ${pendingSetTie.player1Points} in six boards. Record the sudden-death winner of this game; the match then continues to the next game.`
+                    : rules.setWinnerRule === 'target_points'
+                      ? 'Add a deciding board to this game and play it.'
+                      : `Both players scored ${match.player1TotalPoints} across all ${(match.boards || []).length} boards. ${match.tieBreakRule === 'additional_board' ? 'Add a deciding board and play it, or record a ruling.' : 'Record the ruling.'}`}
                 </p>
               </div>
             </div>
@@ -727,21 +740,21 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 <span>Add a deciding board</span>
               </button>
             )}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {(pendingSetTie || rules.setWinnerRule !== 'target_points') && <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {[
                 { id: match.player1Id, name: match.player1Name },
                 { id: match.player2Id, name: match.player2Name },
               ].filter(p => p.id).map(p => (
                 <button
                   key={p.id}
-                  onClick={() => openTieBreak({ id: p.id!, name: p.name })}
+                  onClick={() => openTieBreak({ id: p.id!, name: p.name, setNumber: pendingSetTie?.setNumber })}
                   disabled={!!busy}
                   className="py-2.5 px-3 rounded-xl text-sm font-bold bg-white border-2 border-amber-300 text-gray-800 hover:border-[#0B5D3B] hover:text-[#0B5D3B] transition-colors disabled:opacity-40"
                 >
-                  Award to {p.name}
+                  {pendingSetTie ? `Sudden death: ${p.name}` : `Award to ${p.name}`}
                 </button>
               ))}
-            </div>
+            </div>}
             <InlineError message={errorFor('tieAddBoard', 'tieBreak')} className="mt-2" />
           </div>
         )}
@@ -864,7 +877,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
       {totalSets > 1 && (
         <SetScoreboard
           match={match}
-          boardsPerSet={boardsPerSet}
+          rules={rules}
           activeSet={activeSet}
           onSelectSet={chooseSet}
         />
@@ -1332,10 +1345,18 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         isOpen={!!tieBreakTarget}
         onClose={() => setTieBreakTarget(null)}
         onConfirm={decideTieBreak}
-        title={`Award this match to ${tieBreakTarget?.name || ''}?`}
-        description="The scores are level, so this is your ruling. Say why — it is recorded with the result."
-        placeholder="e.g. Organiser ruling — opponent conceded the deciding board"
-        confirmLabel={`Award to ${tieBreakTarget?.name || ''}`}
+        title={tieBreakTarget?.setNumber
+          ? `Record game ${tieBreakTarget.setNumber} sudden-death winner: ${tieBreakTarget.name}?`
+          : `Award this match to ${tieBreakTarget?.name || ''}?`}
+        description={tieBreakTarget?.setNumber
+          ? 'Record how sudden death was decided. This awards the game and lets the match continue.'
+          : 'The scores are level, so this is your ruling. Say why — it is recorded with the result.'}
+        placeholder={tieBreakTarget?.setNumber
+          ? 'e.g. Umpire recorded the sudden-death result'
+          : 'e.g. Organiser ruling — opponent conceded the deciding board'}
+        confirmLabel={tieBreakTarget?.setNumber
+          ? `Record ${tieBreakTarget.name} as game winner`
+          : `Award to ${tieBreakTarget?.name || ''}`}
         busy={busy === 'tieBreak'}
         error={errors.tieBreak}
         variant="warning"

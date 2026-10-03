@@ -9,6 +9,7 @@ import { ReasonModal } from '../common/ReasonModal';
 import { exitToApp } from '../../utils/useHashRoute';
 import { MatchTimer } from '../admin/MatchTimer';
 import { BoardResultForm, BoardObservation, emptyObservation, previewBoard } from '../admin/BoardResultForm';
+import { pendingOfficialSetTieBreak, setTieBreakPath } from '../../utils/setScoring';
 
 interface BoardModeProps {
   boardNumber: number;
@@ -76,7 +77,7 @@ const Stepper: React.FC<{
 export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId }) => {
   const {
     tournaments, currentTournament, startMatch, submitBoardScore,
-    confirmMatchResult, addBoardToMatch,
+    confirmMatchResult, addBoardToMatch, refreshTournaments,
   } = useTournament();
 
   const tournament: Tournament | undefined =
@@ -100,7 +101,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   const [obs, setObs] = useState<BoardObservation>(emptyObservation);
   // The side a level match is about to be awarded to; the ReasonModal is open
   // while this is set. Up here with the others for the same reason as `obs`.
-  const [tieBreakTarget, setTieBreakTarget] = useState<{ id: string; name: string } | null>(null);
+  const [tieBreakTarget, setTieBreakTarget] = useState<{ id: string; name: string; setNumber?: number } | null>(null);
 
   // Matches on this board that still need playing, in running order.
   const queue = useMemo(() => {
@@ -189,6 +190,7 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
   }
 
   const rules: any = tournament.rules || {};
+  const pendingSetTie = pendingOfficialSetTieBreak(match, rules);
   const usesRemainingCoins = rules.scoringMode === 'remaining_coins' || rules.scoringMode === 'official_icf';
   const usesOfficialRules = rules.scoringMode === 'official_icf';
   const priorGamePoints = { player1: 0, player2: 0 };
@@ -214,10 +216,16 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
 
   const awardTieBreak = async (reason: string) => {
     if (!tieBreakTarget) return;
-    const { id: winnerId, name } = tieBreakTarget;
+    const { id: winnerId, name, setNumber } = tieBreakTarget;
     const ok = await run(
-      () => apiClient.post(`/matches/${match.id}/tie-break`, { winnerId, reason }),
-      `Awarded to ${name}.`
+      async () => {
+        await apiClient.post(
+          setNumber ? setTieBreakPath(match.id, setNumber) : `/matches/${match.id}/tie-break`,
+          { winnerId, reason },
+        );
+        await refreshTournaments();
+      },
+      setNumber ? `Game ${setNumber} awarded to ${name} after sudden death.` : `Awarded to ${name}.`
     );
     if (ok) setTieBreakTarget(null);
   };
@@ -278,14 +286,16 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
         {!decided && !activeBoard && match.tieBreakRequired && (
           <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 space-y-3">
             <div>
-              <div className="text-sm font-black text-amber-900">{rules.setWinnerRule === 'target_points' ? 'This game finished level' : 'This match finished level'}</div>
+              <div className="text-sm font-black text-amber-900">
+                {pendingSetTie ? `Game ${pendingSetTie.setNumber} finished level`
+                  : rules.setWinnerRule === 'target_points' ? 'This game finished level' : 'This match finished level'}
+              </div>
               <div className="text-xs text-amber-800 mt-0.5">
-                {rules.setWinnerRule === 'target_points'
-                  ? 'Play an additional board in this game to decide it.'
-                  : `Both players scored ${match.player1TotalPoints} across all ${(match.boards || []).length} boards.`}
-                {match.tieBreakRule === 'additional_board'
-                  ? rules.setWinnerRule === 'target_points' ? '' : ' Add a deciding board and play it.'
-                  : rules.setWinnerRule === 'target_points' ? '' : ' Award it to one of them.'}
+                {pendingSetTie
+                  ? `Both players scored ${pendingSetTie.player1Points} in six boards. Record the sudden-death winner of this game before scoring the next game.`
+                  : rules.setWinnerRule === 'target_points'
+                    ? 'Play an additional board in this game to decide it.'
+                    : `Both players scored ${match.player1TotalPoints} across all ${(match.boards || []).length} boards. ${match.tieBreakRule === 'additional_board' ? 'Add a deciding board and play it.' : 'Award it to one of them.'}`}
               </div>
             </div>
             {match.tieBreakRule === 'additional_board' && (
@@ -297,18 +307,18 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
                 Add a deciding board
               </button>
             )}
-            {rules.setWinnerRule !== 'target_points' && <div className="grid grid-cols-2 gap-2">
+            {(pendingSetTie || rules.setWinnerRule !== 'target_points') && <div className="grid grid-cols-2 gap-2">
               {[
                 { id: match.player1Id, name: match.player1Name },
                 { id: match.player2Id, name: match.player2Name },
               ].filter(p => p.id).map(p => (
                 <button
                   key={p.id}
-                  onClick={() => { setError(''); setTieBreakTarget({ id: p.id!, name: p.name }); }}
+                  onClick={() => { setError(''); setTieBreakTarget({ id: p.id!, name: p.name, setNumber: pendingSetTie?.setNumber }); }}
                   disabled={busy}
                   className="py-3 rounded-2xl bg-white border-2 border-amber-300 text-gray-800 font-bold text-xs disabled:opacity-50"
                 >
-                  Award to {p.name}
+                  {pendingSetTie ? `Sudden death: ${p.name}` : `Award to ${p.name}`}
                 </button>
               ))}
             </div>}
@@ -468,10 +478,18 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
           isOpen={!!tieBreakTarget}
           onClose={() => setTieBreakTarget(null)}
           onConfirm={awardTieBreak}
-          title={`Award this match to ${tieBreakTarget?.name || ''}?`}
-          description="The scores are level, so this is the umpire's ruling. Say why — it is recorded with the result."
-          placeholder="e.g. Umpire ruling — opponent conceded the deciding board"
-          confirmLabel={`Award to ${tieBreakTarget?.name || ''}`}
+          title={tieBreakTarget?.setNumber
+            ? `Record game ${tieBreakTarget.setNumber} sudden-death winner: ${tieBreakTarget.name}?`
+            : `Award this match to ${tieBreakTarget?.name || ''}?`}
+          description={tieBreakTarget?.setNumber
+            ? 'Record how sudden death was decided. This awards the game and lets the match continue.'
+            : "The scores are level, so this is the umpire's ruling. Say why — it is recorded with the result."}
+          placeholder={tieBreakTarget?.setNumber
+            ? 'e.g. Umpire recorded the sudden-death result'
+            : 'e.g. Umpire ruling — opponent conceded the deciding board'}
+          confirmLabel={tieBreakTarget?.setNumber
+            ? `Record ${tieBreakTarget.name} as game winner`
+            : `Award to ${tieBreakTarget?.name || ''}`}
           busy={busy}
           error={tieBreakTarget ? error : ''}
           variant="warning"

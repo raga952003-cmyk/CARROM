@@ -190,6 +190,40 @@ def run():
     assert next_game["status"] == "in_progress"
     print("PASS level sixth board uses recorded sudden death, refuses board seven and opens game two")
 
+    # Editing the ruled game's last board invalidates the ruling. If a second
+    # edit makes it level again, the old winner must not silently return.
+    def correct_sixth(winner, loser):
+        return h.put(f"/api/matches/{match_id}/boards/6?override=true&reason=Score review", {
+            "boardNumber": 6, "setNumber": 1, "status": "completed",
+            "player1Score": 0, "player2Score": 0,
+            "boardWinner": winner, "coinsRemainingWith": loser,
+            "coinsRemaining": 1, "queenPocketedBy": "none",
+            "queenCoveredBy": "none",
+        }, user_id=owner)
+
+    corrected = correct_sixth("player1", "player2")
+    assert corrected.status_code == 200, corrected.text
+    current = next(m for m in h.db.rows("matches") if m["id"] == match_id)
+    assert not (current.get("set_tie_breaks") or {}).get("1")
+    assert current["player1_sets_won"] == 1
+    assert next_game["status"] == "in_progress"
+
+    retied = correct_sixth("player2", "player1")
+    assert retied.status_code == 200, retied.text
+    current = next(m for m in h.db.rows("matches") if m["id"] == match_id)
+    assert not (current.get("set_tie_breaks") or {}).get("1")
+    assert current["player1_sets_won"] == 0
+    assert current["tie_break_required"] is True
+    next_game = next(b for b in h.db.rows("boards") if b["match_id"] == match_id
+                     and b["set_number"] == 2 and b["board_number"] == 1)
+    assert next_game["status"] == "pending"
+    resolved = correct_sixth("player1", "player2")
+    assert resolved.status_code == 200, resolved.text
+    next_game = next(b for b in h.db.rows("boards") if b["match_id"] == match_id
+                     and b["set_number"] == 2 and b["board_number"] == 1)
+    assert next_game["status"] == "in_progress"
+    print("PASS corrections clear a sudden-death ruling and hold the next game until re-ruled")
+
     h = Harness()
     owner = h.make_user("ICF Organiser", role="admin")
     one, two = h.make_user("ICF One"), h.make_user("ICF Two")

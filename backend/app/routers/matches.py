@@ -694,6 +694,12 @@ async def update_board(
         # scoring, silently re-scored under the classic formula.
         corrected_rules = ((tournament_row or {}).get("rules") or {})
         corrected_mode = scoring_mode(corrected_rules)
+        if corrected_mode == "official_icf" and any(
+            (b.get("set_number") or 1) > (pb.get("set_number") or 1)
+            and b.get("status") == "completed" for b in boards
+        ):
+            raise HTTPException(status_code=409, detail=(
+                "Correct later games first before changing an earlier game."))
         if corrected_mode != "official_icf" and (
                 data.finish_type not in (None, "normal")
                 or data.special_finish_extra_point):
@@ -876,6 +882,7 @@ async def update_board(
                 "queen_awarded_to": "none", "base_points": 0,
                 "queen_bonus": 0, "p1_penalty": 0, "p2_penalty": 0,
                 "scoring_warnings": None, "locked": False,
+                "finish_type": "normal", "special_finish_extra_point": False,
                 "confirmed_by": None, "confirmed_at": None,
                 "completed_at": None,
             })
@@ -900,8 +907,31 @@ async def update_board(
         # deciding board away left status='completed' with winner_id NULL: a
         # finished match nobody won. Recomputing from 'live' makes the engine
         # earn 'completed' again. A paused match is left paused.
-        baseline = ({**match_data, "status": "live"}
-                    if match_data.get("status") == "completed" else match_data)
+        # A score correction invalidates any sudden-death ruling for this
+        # game. Otherwise a later correction that restores a tie would silently
+        # revive the old decision. Later games must first be rolled back.
+        existing_decisions = match_data.get("set_tie_breaks") or {}
+        if not isinstance(existing_decisions, dict):
+            existing_decisions = {}
+        corrected_set = pb.get("set_number") or 1
+        invalidating_ruling = (corrected_mode == "official_icf"
+                              and str(corrected_set) in existing_decisions)
+        decisions_after = existing_decisions
+        if invalidating_ruling:
+            if any((b.get("set_number") or 1) > corrected_set
+                   and b.get("status") == "completed" for b in boards):
+                raise HTTPException(status_code=409, detail=(
+                    "Correct later games first before changing a game with a sudden-death ruling."))
+            if any(int(key) > corrected_set for key in existing_decisions
+                   if str(key).isdigit()):
+                raise HTTPException(status_code=409, detail=(
+                    "Clear later game rulings before correcting this game."))
+            decisions_after = dict(existing_decisions)
+            decisions_after.pop(str(corrected_set))
+
+        baseline = {**match_data, "set_tie_breaks": decisions_after}
+        if match_data.get("status") == "completed":
+            baseline["status"] = "live"
         updated_match = (apply_set_results(baseline, projected, corrected_rules)
                          if total_sets > 1 or corrected_rules.get("setWinnerRule") == "target_points"
                          else recalculate_match_scores(baseline, projected, corrected_rules))
@@ -937,9 +967,24 @@ async def update_board(
                 # that silently reads as a draw.
                 match_patch["status"] = "live"
                 match_patch["match_completed_at"] = None
-        if total_sets > 1:
+        if total_sets > 1 or corrected_mode == "official_icf":
             match_patch["player1_sets_won"] = updated_match.get("player1SetsWon", 0)
             match_patch["player2_sets_won"] = updated_match.get("player2SetsWon", 0)
+        if corrected_mode == "official_icf":
+            match_patch["_expected_set_tie_breaks"] = existing_decisions
+            set_after = next((row for row in summarise_sets(
+                baseline, projected, corrected_rules)
+                if row["setNumber"] == corrected_set), None)
+            match_patch["_hold_next_set"] = bool(
+                set_after and set_after["status"] != "completed")
+            match_patch["_open_next_set"] = bool(
+                set_after and set_after["status"] == "completed"
+                and updated_match["status"] != "completed"
+                and any((b.get("set_number") or 1) == corrected_set + 1
+                        and b.get("board_number") == 1
+                        and b.get("status") == "pending" for b in boards))
+            if invalidating_ruling:
+                match_patch["set_tie_breaks"] = decisions_after
         if not detail_available:
             # Migration 005 carries the tie-break columns; without it the match
             # still reopens, it just cannot say a ruling is owed.
@@ -1123,8 +1168,6 @@ async def submit_board(
                 "coins_remaining": data.coins_remaining,
                 "queen_pocketed_by": data.queen_pocketed_by or data.queen_claimed_by,
                 "queen_covered_by": data.queen_covered_by,
-                "finish_type": data.finish_type,
-                "special_finish_extra_point": data.special_finish_extra_point,
                 "queen_status": outcome["queen_status"],
                 "queen_awarded_to": outcome["queen_awarded_to"],
                 "base_points": outcome["base_points"],
@@ -1143,6 +1186,11 @@ async def submit_board(
                 "confirmed_by": admin["id"],
                 "confirmed_at": datetime.now(timezone.utc).isoformat(),
             }
+            if mode == "official_icf":
+                # Only federation scoring uses the atomic finish write from
+                # migration 030. Custom remaining-coins keeps its existing RPC.
+                board_patch["finish_type"] = data.finish_type
+                board_patch["special_finish_extra_point"] = data.special_finish_extra_point
         else:
             # Scorers enter the coin count; the queen is added here from the
             # tournament's configured value, and only when it was covered.
@@ -1214,9 +1262,11 @@ async def submit_board(
             # and nothing to tell the organiser a decision was owed.
             match_patch["tie_break_required"] = updated_match.get("tieBreakRequired", False)
             match_patch["tie_break_rule"] = updated_match.get("tieBreakRule")
-        if total_sets > 1:
+        if total_sets > 1 or official_game:
             match_patch["player1_sets_won"] = updated_match.get("player1SetsWon", 0)
             match_patch["player2_sets_won"] = updated_match.get("player2SetsWon", 0)
+        if official_game:
+            match_patch["_expected_set_tie_breaks"] = match_data.get("set_tie_breaks") or {}
 
 
         degraded_note = ""
@@ -2507,10 +2557,10 @@ async def resolve_set_tie_break(
                 status_code=422,
                 detail="The winner must be one of the two players in this match.",
             )
-        if not (data.reason or "").strip():
+        if len((data.reason or "").strip()) < 5:
             raise HTTPException(
                 status_code=422,
-                detail=("A reason is required: a game decided without one cannot be "
+                detail=("A reason of at least five characters is required: a game decided without one cannot be "
                         "explained later."),
             )
 
@@ -2577,37 +2627,32 @@ async def resolve_set_tie_break(
             })
 
         try:
-            admin_db.table("matches").update(patch).eq("id", id).execute()
+            # The database locks the match and rechecks the six completed
+            # boards. The decision, next game and audit either all commit or
+            # none do, including when two umpires submit at once.
+            result = admin_db.rpc("record_set_tie_break", {
+                "p_match_id": id,
+                "p_set_number": set_number,
+                "p_winner_id": data.winner_id,
+                "p_reason": data.reason.strip(),
+                "p_match_patch": patch,
+                "p_actor_id": admin["id"],
+            }).execute()
         except Exception as e:
-            if not _missing_set_tie_breaks(e):
-                raise
-            raise HTTPException(
-                status_code=503,
-                detail=("matches.set_tie_breaks is missing. Apply "
-                        "db/migrations/029_official_score_finishes_and_set_ties.sql, "
-                        "then record the ruling again."),
-            )
+            message = str(e).lower()
+            if (_missing_set_tie_breaks(e) or "pgrst202" in message
+                    or "record_set_tie_break" in message and "not found" in message):
+                raise HTTPException(status_code=503, detail=(
+                    "Official sudden death needs database migrations 029 and 030. "
+                    "Ask the organiser to apply them before recording the ruling."
+                )) from e
+            logger.warning("Set tie-break changed during save for match %s: %s", id, e)
+            raise HTTPException(status_code=409, detail=(
+                "This game changed while the ruling was saved. Reload the match "
+                "and check the six-board score before trying again."
+            )) from e
 
-        # The match carries on: open the next game's first board. Guarded on
-        # 'pending' so a board already in play or already scored is untouched.
-        if set_number < total_sets and not updated.get("winnerId"):
-            admin_db.table("boards").update({"status": "in_progress"}).eq(
-                "match_id", id).eq("set_number", set_number + 1).eq(
-                "board_number", 1).eq("status", "pending").execute()
-
-        record_audit(
-            admin_db, actor=admin, action="match.set_tie_break",
-            entity_type="match", entity_id=id,
-            new_state={"setNumber": set_number,
-                       "winnerId": data.winner_id,
-                       "reason": data.reason.strip()},
-            request_context={"setsWon": [patch["player1_sets_won"],
-                                         patch["player2_sets_won"]]},
-        )
-
-        fresh = (admin_db.table("matches").select("*").eq(
-            "id", id).execute().data or [{**match, **patch}])[0]
-        return serialize_match(fresh)
+        return serialize_match(result.data or {**match, **patch})
     except HTTPException:
         raise
     except Exception as e:

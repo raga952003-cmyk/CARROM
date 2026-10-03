@@ -580,6 +580,12 @@ class _Rpc:
             return self._apply_board_result()
         if self.name == "apply_board_result_with_next_set":
             return self._apply_board_result_with_next_set()
+        if self.name == "apply_official_board_result":
+            return self._apply_official_board_result()
+        if self.name == "official_score_atomic_ready":
+            return Result(True)
+        if self.name == "record_set_tie_break":
+            return self._record_set_tie_break()
         if self.name == "delete_match_safely":
             return self._delete_match_safely()
         if self.name == "replace_tournament_fixtures":
@@ -1018,6 +1024,118 @@ class _Rpc:
         except Exception:
             self.db.tables = before
             raise
+
+    def _apply_official_board_result(self):
+        """Migration 030's one-call board, match, audit, and game transition."""
+        if "finish_type" not in (self.params.get("p_board_patch") or {}):
+            raise PostgrestError("Missing official finish type", "P0001")
+        match = next((m for m in self.db.tables.get("matches", [])
+                      if str(m.get("id")) == str(self.params.get("p_match_id"))), None)
+        if match is None:
+            raise PostgrestError("Match not found", "P0001")
+        patch = self.params.get("p_match_patch") or {}
+        if (match.get("set_tie_breaks") or {}) != patch.get("_expected_set_tie_breaks", {}):
+            raise PostgrestError("A game ruling changed; reload the match before scoring", "P0001")
+        set_number = self.params.get("p_set_number") or 1
+        if "set_tie_breaks" in patch:
+            expected_after = dict(match.get("set_tie_breaks") or {})
+            expected_after.pop(str(set_number), None)
+            if patch["set_tie_breaks"] != expected_after:
+                raise PostgrestError("Only the corrected game ruling may be cleared", "P0001")
+            if any(str(b.get("match_id")) == str(self.params.get("p_match_id"))
+                   and (b.get("set_number") or 1) > set_number
+                   and b.get("status") == "completed"
+                   for b in self.db.tables.get("boards", [])):
+                raise PostgrestError("Correct later games before clearing this ruling", "P0001")
+        original_patch = self.params["p_match_patch"]
+        self.params["p_match_patch"] = {
+            key: value for key, value in patch.items() if not key.startswith("_")
+        }
+        try:
+            if self.params.get("p_next_set_number") is not None:
+                result = self._apply_board_result_with_next_set()
+            else:
+                result = self._apply_board_result()
+        finally:
+            self.params["p_match_patch"] = original_patch
+        if patch.get("_hold_next_set"):
+            for b in self.db.tables.get("boards", []):
+                if (str(b.get("match_id")) == str(self.params.get("p_match_id"))
+                        and (b.get("set_number") or 1) == set_number + 1
+                        and b.get("board_number") == 1
+                        and b.get("status") == "in_progress"):
+                    b["status"] = "pending"
+        if patch.get("_open_next_set"):
+            for b in self.db.tables.get("boards", []):
+                if (str(b.get("match_id")) == str(self.params.get("p_match_id"))
+                        and (b.get("set_number") or 1) == set_number + 1
+                        and b.get("board_number") == 1
+                        and b.get("status") == "pending"):
+                    b["status"] = "in_progress"
+        return result
+
+    def _record_set_tie_break(self):
+        """Apply a 21/6 sudden-death decision as one database transaction."""
+        p = self.params
+        match_id = p.get("p_match_id")
+        set_number = p.get("p_set_number")
+        winner_id = p.get("p_winner_id")
+        reason = (p.get("p_reason") or "").strip()
+        match = next((m for m in self.db.tables.get("matches", [])
+                      if str(m.get("id")) == str(match_id)), None)
+        if match is None or match.get("result_confirmed") or match.get("status") not in ("live", "paused"):
+            raise PostgrestError("Match cannot accept a game ruling", "P0001")
+        if winner_id not in (match.get("player1_id"), match.get("player2_id")) or len(reason) < 5:
+            raise PostgrestError("Invalid game ruling", "P0001")
+        boards = [b for b in self.db.tables.get("boards", [])
+                  if str(b.get("match_id")) == str(match_id)
+                  and (b.get("set_number") or 1) == set_number]
+        if (len(boards) != 6 or any(b.get("status") != "completed" for b in boards)
+                or sum(b.get("player1_score") or 0 for b in boards)
+                != sum(b.get("player2_score") or 0 for b in boards)):
+            raise PostgrestError("Sudden death requires six completed tied boards", "P0001")
+        existing = (match.get("set_tie_breaks") or {}).get(str(set_number))
+        if existing:
+            if existing.get("winnerId") == winner_id and existing.get("method") == "sudden_death":
+                return Result(dict(match))
+            raise PostgrestError("This game already has a different ruling", "P0001")
+
+        patch = p.get("p_match_patch") or {}
+        decided = dict(match.get("set_tie_breaks") or {})
+        decided[str(set_number)] = {
+            "method": "sudden_death", "winnerId": winner_id,
+            "winnerName": (match.get("player1_name") if winner_id == match.get("player1_id")
+                           else match.get("player2_name")),
+            "reason": reason, "decidedBy": p.get("p_actor_id"),
+            "decidedAt": _now(),
+        }
+        next_board = None
+        if patch.get("status") != "completed":
+            next_board = next((b for b in self.db.tables.get("boards", [])
+                               if str(b.get("match_id")) == str(match_id)
+                               and (b.get("set_number") or 1) == set_number + 1
+                               and b.get("board_number") == 1
+                               and b.get("status") in ("pending", "in_progress")), None)
+            if next_board is None:
+                raise PostgrestError("The next game has no available first board", "P0001")
+
+        audit_row = {
+            "id": str(uuid.uuid4()), "user_id": p.get("p_actor_id"),
+            "action": "match.set_tie_break", "entity_type": "match",
+            "entity_id": str(match_id), "previous_state": dict(match),
+            "new_state": {"setNumber": set_number, "decision": decided[str(set_number)]},
+            "request_context": {"atomic": True}, "created_at": _now(),
+        }
+        merged = {**match, **patch, "set_tie_breaks": decided}
+        self.db.enforce_foreign_keys("matches", merged, changed=patch)
+        self.db.enforce_foreign_keys("audit_logs", audit_row)
+        match.update(patch)
+        match["set_tie_breaks"] = decided
+        match["tie_break_rule"] = "sudden_death"
+        if next_board is not None:
+            next_board["status"] = "in_progress"
+        self.db.tables.setdefault("audit_logs", []).append(audit_row)
+        return Result(dict(match))
 
     def _delete_match_safely(self):
         match_id = self.params.get("p_match_id")

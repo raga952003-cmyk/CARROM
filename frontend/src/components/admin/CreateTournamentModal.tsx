@@ -468,7 +468,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                     Standard senior · 3 × 8 · 25 pts
                   </button>
                   <button type="button" onClick={() => {
-                    setScoring({ ...defaultScoringRules, numberOfSets: 3, boardsPerSet: 6 });
+                    setScoring({ ...defaultScoringRules, numberOfSets: 3, boardsPerSet: 6, tieBreak: 'sudden_death' });
                     setTargetScore(21); setRulePreset('other_age');
                   }} className={`rounded-lg border px-3 py-1.5 font-semibold ${rulePreset === 'other_age' ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white' : 'border-emerald-200 bg-white text-emerald-900'}`}>
                     Federation 21/6 · 3 × 6 · 21 pts
