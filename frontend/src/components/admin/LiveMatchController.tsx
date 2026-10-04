@@ -1054,7 +1054,9 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                     {board.queenClaimedBy && board.queenClaimedBy !== 'none' && (
                       <div className="border-l border-gray-100 pl-3 flex items-center gap-1 text-xs text-amber-800 font-bold">
                         <Crown className="w-3 h-3 text-[#D4A72C]" />
-                        <span>Queen Covered (+3)</span>
+                        <span>Queen covered{board.queenBonus != null
+                          ? board.queenBonus > 0 ? ` (+${board.queenBonus})` : ' (no bonus)'
+                          : ''}</span>
                       </div>
                     )}
                   </div>

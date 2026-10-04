@@ -73,8 +73,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   const [groupCount, setGroupCount] = useState(1);
   const [qualifiersPerGroup, setQualifiersPerGroup] = useState(2);
   // How many league finishers reach the knockout in a league_knockout draw.
-  // Powers of two only: any other size gives the top seeds byes, so 10 would
-  // silently become 8. Offering the real sizes is clearer than rounding one.
+  // Any whole count is allowed; seeded byes preserve every qualifier.
   const [knockoutQualifiers, setKnockoutQualifiers] = useState(8);
   const [expectedEntrants, setExpectedEntrants] = useState(16);
   const [matchDuration, setMatchDuration] = useState(90);
@@ -93,7 +92,13 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
     if (saving) return;
     setSaveError('');
     if (!name.trim()) {
-      alert('Please enter a tournament name.');
+      setActiveTab('basic');
+      setSaveError('Enter a tournament name.');
+      return;
+    }
+    if (!venue.trim() || !city.trim()) {
+      setActiveTab('basic');
+      setSaveError(!venue.trim() ? 'Enter the venue name.' : 'Enter the city / location.');
       return;
     }
     if (!regStart || !regEnd || !tourStart || !tourEnd ||
@@ -300,7 +305,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">
-                    Venue Name
+                    Venue Name *
                   </label>
                   <div className="relative">
                     <MapPin className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -316,7 +321,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
 
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">
-                    City / Location
+                    City / Location *
                   </label>
                   <input
                     type="text"

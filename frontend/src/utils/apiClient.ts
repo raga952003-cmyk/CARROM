@@ -195,7 +195,13 @@ class ApiClient {
         // Read the body once, before branching: the API puts the useful
         // explanation in `detail` (e.g. which role the account actually has).
         const errorData = await response.json().catch(() => ({} as any));
-        const detail = typeof errorData?.detail === 'string' ? errorData.detail : '';
+        const detail = typeof errorData?.detail === 'string' ? errorData.detail
+          : Array.isArray(errorData?.detail) ? errorData.detail.map((issue: any) => {
+              const field = (issue.loc || []).filter((part: unknown) => part !== 'body').join(' / ');
+              const message = String(issue.msg || 'Invalid value').replace(/^Value error, /, '');
+              return field ? `${field}: ${message}` : message;
+            }).join('; ')
+          : '';
 
         if (response.status === 401) {
           // One renewal attempt, then replay the original request. Only give

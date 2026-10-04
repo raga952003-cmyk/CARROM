@@ -33,7 +33,7 @@ const Picker: React.FC<PickerProps> = ({
           // another selection — that coupling made real boards, where the loser
           // covers the queen, impossible to record.
           onClick={() => onChange(v)}
-          className={`py-1.5 px-1 rounded-lg text-center font-bold text-sm border transition-all truncate ${
+          className={`py-1.5 px-1 rounded-lg text-center font-bold text-sm border transition-all whitespace-normal break-words ${
             value === v
               ? (v === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
               : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'
@@ -119,7 +119,7 @@ const SimpleBoardForm: React.FC<BoardResultFormProps> = ({ match, rules, value, 
               key={side}
               type="button"
               onClick={() => setWinner(side)}
-              className={`py-3 px-2 rounded-xl text-center font-bold text-sm border-2 transition-all truncate ${
+              className={`py-3 px-2 rounded-xl text-center font-bold text-sm border-2 transition-all whitespace-normal break-words ${
                 value.winner === side
                   ? 'bg-[#0B5D3B] text-white border-[#0B5D3B]'
                   : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'
@@ -174,8 +174,8 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
     return <SimpleBoardForm match={match} rules={rules} value={value} onChange={onChange} />;
   }
 
-  const p1 = match.player1Name.split(' ')[0];
-  const p2 = match.player2Name.split(' ')[0];
+  const p1 = `1 · ${match.player1Name}`;
+  const p2 = `2 · ${match.player2Name}`;
   const coinsPerSide = rules.coinsPerSide ?? 9;
   // The picker offers exactly what the engine will accept, and nothing more.
   //
@@ -295,7 +295,7 @@ export const BoardResultForm: React.FC<BoardResultFormProps> = ({ match, rules, 
               key={v}
               type="button"
               onClick={() => set({ coinsRemainingWith: v, coinsRemaining: v === 'none' ? 0 : value.coinsRemaining })}
-              className={`py-1.5 px-1 rounded-lg text-center font-bold text-sm border transition-all truncate ${
+              className={`py-1.5 px-1 rounded-lg text-center font-bold text-sm border transition-all whitespace-normal break-words ${
                 value.coinsRemainingWith === v
                   ? (v === 'none' ? 'bg-gray-800 text-white border-gray-800' : 'bg-[#0B5D3B] text-white border-[#0B5D3B]')
                   : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300'

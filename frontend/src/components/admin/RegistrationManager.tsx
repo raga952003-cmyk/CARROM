@@ -27,6 +27,7 @@ import { ImportParticipantsModal } from './ImportParticipantsModal';
 import { tournamentService } from '../../services/tournamentService';
 import { paymentService, PaymentRecord } from '../../services/paymentService';
 import { PaymentProofReview } from './PaymentProofReview';
+import { PaymentActionForm } from './PaymentActionForm';
 import { isRegistrationDeadlinePassed } from '../../utils/registrationDeadline';
 
 interface RegistrationManagerProps {
@@ -94,6 +95,7 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const [paymentReviewLoading, setPaymentReviewLoading] = useState(false);
   const [paymentReviewBusy, setPaymentReviewBusy] = useState<string | null>(null);
   const [paymentReviewError, setPaymentReviewError] = useState('');
+  const [paymentAction, setPaymentAction] = useState<{ kind: 'payment' | 'waiver' | 'refund'; reg?: Registration; paymentId?: string } | null>(null);
   const [paymentReviewRefresh, setPaymentReviewRefresh] = useState(0);
   const [isClosing, setIsClosing] = useState(false);
   const [closeError, setCloseError] = useState('');
@@ -128,32 +130,8 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
     }
   };
 
-  const recordManualRefund = async (paymentId: string) => {
-    if (paymentReviewBusy) return;
-    const reference = window.prompt('Enter the external refund transaction or receipt reference (at least 3 characters)');
-    if (!reference) return;
-    if (reference.trim().length < 3 || reference.trim().length > 120) {
-      setPaymentReviewError('Enter a refund reference between 3 and 120 characters.');
-      return;
-    }
-    const reason = window.prompt('Enter the reason for this refund (at least 5 characters)');
-    if (!reason) return;
-    if (reason.trim().length < 5 || reason.trim().length > 500) {
-      setPaymentReviewError('Enter a refund reason between 5 and 500 characters.');
-      return;
-    }
-    if (!window.confirm('Confirm the money has already been returned outside this app. This action records the refund; it does not send money.')) return;
-    setPaymentReviewBusy(paymentId);
-    setPaymentReviewError('');
-    try {
-      await paymentService.recordManualRefund(paymentId, reference.trim(), reason.trim());
-      await refreshTournaments();
-      setPaymentReviewRefresh(value => value + 1);
-    } catch (error) {
-      setPaymentReviewError(error instanceof Error ? error.message : 'Could not record this refund.');
-    } finally {
-      setPaymentReviewBusy(null);
-    }
+  const recordManualRefund = (paymentId: string) => {
+    if (!paymentReviewBusy) setPaymentAction({ kind: 'refund', paymentId });
   };
 
   const [selectedPlayerId, setSelectedPlayerId] = useState<string>(allPlayers[0]?.id || '');
@@ -355,48 +333,8 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
   const approve = (reg: Registration) =>
     runRow(reg, 'approve', () => approveRegistration(tournament.id, reg.id), 'Could not approve this entry.');
 
-  const settleAtVenue = (reg: Registration) => {
-    const method = window.prompt('Payment method: cash, upi, or bank_transfer');
-    if (!method) return;
-    if (!['cash', 'upi', 'bank_transfer'].includes(method)) {
-      setRowErrors(prev => ({ ...prev, [reg.id]: 'Choose cash, upi, or bank_transfer.' }));
-      return;
-    }
-    const reference = window.prompt('Receipt or transaction reference (at least 3 characters)');
-    if (!reference) return;
-    if (reference.trim().length < 3 || reference.trim().length > 120) {
-      setRowErrors(prev => ({ ...prev, [reg.id]: 'Enter a payment reference between 3 and 120 characters.' }));
-      return;
-    }
-    if (method !== 'cash') {
-      const normalized = reference.replace(/[^A-Za-z0-9]/g, '');
-      if (normalized.length < 6 || normalized.length > 80) {
-        setRowErrors(prev => ({ ...prev, [reg.id]: 'Enter a bank or UPI transaction reference with 6 to 80 letters or digits.' }));
-        return;
-      }
-    }
-    const amount = registrationFee(reg);
-    if (!window.confirm(
-      `Confirm ₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} was received from ${entryName(reg)} by ${method.replace('_', ' ')} (reference: ${reference.trim()}). This will approve the entry immediately.`,
-    )) return;
-    runRow(reg, 'approve', async () => {
-      await tournamentService.recordManualPayment(reg.id, method as 'cash' | 'upi' | 'bank_transfer', reference.trim());
-      await refreshTournaments();
-    }, 'Could not record this payment and approve the entry.');
-  };
-
-  const waive = (reg: Registration) => {
-    const reason = window.prompt('Reason for waiving this entry fee (at least 5 characters)');
-    if (!reason) return;
-    if (reason.trim().length < 5 || reason.trim().length > 500) {
-      setRowErrors(prev => ({ ...prev, [reg.id]: 'Enter a waiver reason between 5 and 500 characters.' }));
-      return;
-    }
-    runRow(reg, 'approve', async () => {
-      await tournamentService.waiveRegistrationFee(reg.id, reason.trim());
-      await refreshTournaments();
-    }, 'Could not waive this fee and approve the entry.');
-  };
+  const settleAtVenue = (reg: Registration) => setPaymentAction({ kind: 'payment', reg });
+  const waive = (reg: Registration) => setPaymentAction({ kind: 'waiver', reg });
 
   const reject = () => {
     if (!rejectTarget) return;
@@ -1216,6 +1154,24 @@ export const RegistrationManager: React.FC<RegistrationManagerProps> = ({ tourna
           </div>
         </div>
       )}
+
+      {paymentAction && <PaymentActionForm
+        kind={paymentAction.kind}
+        participant={paymentAction.reg ? entryName(paymentAction.reg) : 'Refund review'}
+        amount={paymentAction.reg ? registrationFee(paymentAction.reg) : undefined}
+        onClose={() => setPaymentAction(null)}
+        onSubmit={async details => {
+          if (paymentAction.kind === 'refund') {
+            await paymentService.recordManualRefund(paymentAction.paymentId!, details.reference, details.reason);
+            setPaymentReviewRefresh(value => value + 1);
+          } else if (paymentAction.kind === 'waiver') {
+            await tournamentService.waiveRegistrationFee(paymentAction.reg!.id, details.reason);
+          } else {
+            await tournamentService.recordManualPayment(paymentAction.reg!.id, details.method, details.reference);
+          }
+          await refreshTournaments();
+        }}
+      />}
 
       {/* Import Participants Modal */}
       {isImportModalOpen && (
