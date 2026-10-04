@@ -663,13 +663,13 @@ def test_appending_a_bracket_is_guarded():
     seed_draw(h, tid, generate_round_robin_fixtures(tid, pool, 3))
     decide_league(h, tid, [p["id"] for p in pool])
 
-    # A bracket that is not a power of two would hand the top seeds byes.
-    r = h.post("/api/fixtures/%s/knockout?slots=6" % tid, user_id=admin)
-    check("a bracket size that would need byes is refused", r.status_code == 422,
-          "%s %s" % (r.status_code, detail(r)))
-
-    r = h.post("/api/fixtures/%s/knockout?slots=8" % tid, user_id=admin)
-    check("the first draw succeeds", r.status_code == 200, detail(r))
+    r = h.post("/api/fixtures/%s/knockout?slots=20" % tid, user_id=admin)
+    check("a manual top 20 draw succeeds", r.status_code == 200, detail(r))
+    rows = knockout_rows(h, tid, "singles")
+    check("the top 20 draw includes nineteen matches", len(rows) == 19, len(rows))
+    promoted_ids = [m.get(slot + "_id") for m in rows for slot in ("player1", "player2") if m.get(slot + "_id")]
+    check("promotion fills all twenty qualifiers including byes",
+          sorted(promoted_ids) == sorted(p["id"] for p in pool), promoted_ids)
     drawn = len(knockout_rows(h, tid, "singles"))
 
     # Asking twice must not silently stack a second bracket on the first.
@@ -796,25 +796,21 @@ def test_the_knockout_is_sized_by_the_rule():
               "%s -> %d league matches" % (value, len(league)))
 
 
-def test_an_odd_knockout_size_rounds_down_rather_than_giving_byes():
-    """
-    10 is not a bracket. Rounding DOWN to 8 is the honest answer.
-
-    Rounding up to 16 would seat six players who did not qualify, or six byes
-    that hand the top seeds a free round for no reason a spectator can see.
-    """
-    pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i} for i in range(20)]
-    for asked, got in ((3, 2), (6, 4), (10, 8), (12, 8), (31, 16)):
+def test_manual_knockout_counts_preserve_every_qualifier():
+    pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i} for i in range(40)]
+    for asked in (3, 6, 10, 12, 20, 31):
         ko = [m for m in generate_league_knockout_fixtures(
             "T", pool, 3, knockout_qualifiers=asked) if m["stage"] == "knockout"]
-        seats = len([s for m in ko for s in ("player1", "player2")
-                     if str(m[s + "Name"]).startswith("League Rank")])
-        check("asking for %d seats draws %d" % (asked, got), seats == got,
-              "asked %d, got %d" % (asked, seats))
-        check("no bracket drawn for %d carries a bye" % asked,
-              not any("TBD" in str(m["player1Name"]) and m["roundName"] == "Final"
-                      and len(ko) == 1 for m in ko),
-              [m["roundName"] for m in ko])
+        ranks = [int(m[slot + "Name"].split("#")[1]) for m in ko
+                 for slot in ("player1", "player2")
+                 if m[slot + "Name"].startswith("League Rank")]
+        check("manual count preserves every qualifier once", sorted(ranks) == list(range(1, asked + 1)), ranks)
+        check("manual count draws exactly n minus one matches", len(ko) == asked - 1, len(ko))
+        check("manual count leaves no fabricated player IDs",
+              all(m[slot + "Id"] is None for m in ko for slot in ("player1", "player2")), ranks)
+        if asked == 20:
+            check("top 20 has four preliminary matches", sum(m["roundName"] == "Round of 32" for m in ko) == 4, ko)
+            check("top 20 still reaches four quarterfinal matches", sum(m["roundName"] == "Quarter Final" for m in ko) == 4, ko)
 
 
 def test_a_bracket_cannot_be_bigger_than_the_field():
@@ -823,7 +819,7 @@ def test_a_bracket_cannot_be_bigger_than_the_field():
     leaves "League Rank #9" in a field of eight, and promotion can never
     resolve it -- the slot sits unfilled and the round cannot be played.
     """
-    for entrants, asked, seats in ((8, 16, 8), (5, 8, 4), (3, 8, 2), (2, 16, 2)):
+    for entrants, asked, seats in ((8, 16, 8), (5, 8, 5), (3, 8, 3), (2, 16, 2)):
         pool = [{"id": "p%d" % i, "name": "P%d" % i, "rating": 1500 + i}
                 for i in range(entrants)]
         ko = [m for m in generate_league_knockout_fixtures(
@@ -1176,7 +1172,7 @@ SUITES = [
     ("append guards", test_appending_a_bracket_is_guarded),
     ("append waits", test_bracket_waits_when_the_league_is_unfinished),
     ("knockout size is a rule", test_the_knockout_is_sized_by_the_rule),
-    ("odd sizes round down", test_an_odd_knockout_size_rounds_down_rather_than_giving_byes),
+    ("manual qualifier counts", test_manual_knockout_counts_preserve_every_qualifier),
     ("bracket fits the field", test_a_bracket_cannot_be_bigger_than_the_field),
     ("the rule reaches the draw", test_the_rule_reaches_the_draw_through_the_api),
     ("NSD tiebreaker order", test_nsd_is_the_default_first_tiebreaker_and_can_be_reordered),

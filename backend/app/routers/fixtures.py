@@ -148,7 +148,7 @@ def knockout_draw_lock(tournament_id: str):
 @router.post("/{tournament_id}/knockout")
 async def add_knockout_stage(
     tournament_id: str,
-    slots: int = Query(8, ge=2, le=32,
+    slots: int = Query(8, ge=2, le=1024,
                        description="How many league finishers the bracket takes."),
     replace: bool = Query(False,
                           description="Discard an existing, unplayed knockout stage and redraw it."),
@@ -167,8 +167,7 @@ async def add_knockout_stage(
     Slots start empty, labelled "League Rank #n", exactly as a league_knockout
     draw leaves them, so `POST /standings/{id}/promote` resolves them against
     the official standings and `qualifying_count` reads the seats back off the
-    bracket. `generate_league_knockout_fixtures` caps its bracket at four
-    qualifiers, which is why it cannot draw a quarter-final and is not used here.
+    bracket. Non-power-of-two counts preserve all qualifiers with seeded byes.
     """
     admin_db = get_admin_db()
 
@@ -234,14 +233,6 @@ async def add_knockout_stage(
                         status_code=422,
                         detail=f"Group {label} has only {len(group_entrants)} {category} entrants and cannot send {per_group} qualifiers.",
                     )
-    elif slots & (slots - 1):
-        # In an ordinary league, a non-power-of-two cut gives some finishers
-        # byes. Group stages may legitimately send, for example, six from
-        # three groups and the bracket engine handles those byes.
-        raise HTTPException(
-            status_code=422,
-            detail=(f"A league bracket needs 2, 4, 8, 16 or 32 slots; {slots} would give the top seeds byes."),
-        )
 
     for category in categories:
         ranked = len({

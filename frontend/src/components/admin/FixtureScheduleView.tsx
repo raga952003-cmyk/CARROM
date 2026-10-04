@@ -10,6 +10,7 @@ import { ConfirmationModal } from '../common/ConfirmationModal';
 import { MatchTimer } from './MatchTimer';
 import { AddMatchModal } from './AddMatchModal';
 import { EditMatchModal } from './EditMatchModal';
+import { QualifierCountInput, knockoutProgression } from './QualifierCountInput';
 
 interface FixtureScheduleViewProps {
   tournament: Tournament;
@@ -280,17 +281,17 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
         return groups.size && Array.from(groups.values()).every(ids => ids.size >= perGroup)
           ? groups.size * perGroup : 0;
       });
-      return totals.every(total => total === totals[0] && total >= 2 && total <= 32)
+      return totals.every(total => total === totals[0] && total >= 2 && total <= 1024)
         ? [totals[0]] : [];
     }
     const smallestField = Math.min(...categories.map(category => new Set(
       league.filter(m => m.type === category).flatMap(m => [m.player1Id, m.player2Id].filter(Boolean))
     ).size));
-    return [2, 4, 8, 16, 32].filter(size => size <= smallestField);
+    return Array.from({ length: Math.max(0, Math.min(smallestField, 1024) - 1) }, (_, i) => i + 2);
   }, [allMatches, tournament.rules.qualifiersPerGroup]);
   useEffect(() => {
     if (knockoutOptions.length && !knockoutOptions.includes(knockoutSlots)) {
-      setKnockoutSlots(knockoutOptions[Math.min(1, knockoutOptions.length - 1)]);
+      setKnockoutSlots(knockoutOptions[Math.min(6, knockoutOptions.length - 1)]);
     }
   }, [knockoutOptions, knockoutSlots]);
   const canDrawKnockout = leagueMatches.length > 0 && !hasKnockout && knockoutOptions.length > 0;
@@ -432,19 +433,16 @@ export const FixtureScheduleView: React.FC<FixtureScheduleViewProps> = ({
 
                   {canDrawKnockout && (
                     <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 rounded-xl pl-2.5 pr-1.5 py-1">
-                      <select
-                        value={knockoutSlots}
-                        onChange={e => setKnockoutSlots(parseInt(e.target.value))}
-                        disabled={!!busy}
-                        className="bg-transparent text-xs font-bold text-indigo-900 focus:outline-hidden disabled:opacity-50"
-                        title="How many league finishers go through"
-                      >
-                        {knockoutOptions.map(size => (
-                          <option key={size} value={size}>
-                            {groupedLeague ? `Top ${tournament.rules.qualifiersPerGroup || 2} per group (${size})` : `Top ${size}`}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="max-w-sm">
+                        {groupedLeague ? (
+                          <p className="text-xs">Top {tournament.rules.qualifiersPerGroup || 2} per group ({knockoutSlots} qualifiers)</p>
+                        ) : (
+                          <QualifierCountInput value={knockoutSlots} onChange={setKnockoutSlots}
+                            max={knockoutOptions[knockoutOptions.length - 1]}
+                            label="Number of knockout qualifiers" />
+                        )}
+                        <p className="text-[10px] text-gray-600 mt-1">{knockoutProgression(knockoutSlots)}</p>
+                      </div>
                       <button
                         id="draw-knockout-btn"
                         onClick={runDrawKnockout}

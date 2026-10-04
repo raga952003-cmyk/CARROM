@@ -144,7 +144,7 @@ def _round_title(round_index: int, total_rounds: int) -> str:
         return "Quarter Final"
     if rounds_from_final == 3:
         return "Round of 16"
-    return f"Round {round_index}"
+    return f"Round of {2 ** (rounds_from_final + 1)}"
 
 
 def generate_knockout_bracket(
@@ -309,14 +309,9 @@ def generate_league_knockout_fixtures(
         # eight, which promotion can never resolve.
         qualifier_count = max(2, min(int(knockout_qualifiers), len(participants)))
 
-    # Round down to a power of two so the bracket has no byes of its own.
-    bracket_slots = 2
-    while bracket_slots * 2 <= qualifier_count:
-        bracket_slots *= 2
-
     placeholders = [
         {"id": f"{QUALIFIER_PREFIX}{i}", "name": f"League Rank #{i}", "seed": i}
-        for i in range(1, bracket_slots + 1)
+        for i in range(1, qualifier_count + 1)
     ]
 
     knockout_matches = generate_knockout_bracket(
