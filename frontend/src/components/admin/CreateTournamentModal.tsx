@@ -17,7 +17,7 @@ import { TournamentFormat, MatchType, TournamentRules } from '../../types/tourna
 import { useTournament } from '../../context/TournamentContext';
 import { useNotify } from '../../context/NotificationContext';
 import { GroupStageSettings } from './GroupStageSettings';
-import { ScoringRulesSettings, ScoringRules, defaultScoringRules } from './ScoringRulesSettings';
+import { ScoringRulesSettings, ScoringRules, defaultScoringRules, federationScoringRules } from './ScoringRulesSettings';
 
 interface CreateTournamentModalProps {
   isOpen: boolean;
@@ -68,7 +68,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
   const [pointsForDraw, setPointsForDraw] = useState(1);
   const [pointsForLoss, setPointsForLoss] = useState(0);
   const [targetScore, setTargetScore] = useState(25);
-  const [rulePreset, setRulePreset] = useState<'senior' | 'other_age' | 'custom'>('senior');
+  const [rulePreset, setRulePreset] = useState<'senior' | 'other_age' | 'custom'>('custom');
   // 1 = a single league; anything higher splits the league phase into groups.
   const [groupCount, setGroupCount] = useState(1);
   const [qualifiersPerGroup, setQualifiersPerGroup] = useState(2);
@@ -197,7 +197,7 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
             </div>
             <div>
               <h2 className="font-serif font-bold text-lg">Create New Tournament</h2>
-              <p className="text-xs text-emerald-100">Configure parameters, boards, formats, and official scoring rules</p>
+              <p className="text-xs text-emerald-100">Configure parameters, boards, formats, and scoring rules</p>
             </div>
           </div>
           <button
@@ -467,13 +467,18 @@ export const CreateTournamentModal: React.FC<CreateTournamentModalProps> = ({
                 <p className="mt-1 text-emerald-800">Senior standard: best of 3 games, each to 25 points or 8 boards. Other age groups may use 21 points or 6 boards. Changes below are custom tournament rules.</p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button type="button" onClick={() => {
-                    setScoring({ ...defaultScoringRules, numberOfSets: 3, boardsPerSet: 8 });
+                    setScoring({ ...defaultScoringRules }); setRulePreset('custom');
+                  }} className={`rounded-lg border px-3 py-1.5 font-semibold ${scoring.scoringMode === 'remaining_coins' && scoring.boardEntryMode === 'simple' ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white' : 'border-emerald-200 bg-white text-emerald-900'}`}>
+                    Simple scoring · winner + coins left
+                  </button>
+                  <button type="button" onClick={() => {
+                    setScoring({ ...federationScoringRules });
                     setTargetScore(25); setRulePreset('senior');
                   }} className={`rounded-lg border px-3 py-1.5 font-semibold ${rulePreset === 'senior' ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white' : 'border-emerald-200 bg-white text-emerald-900'}`}>
                     Standard senior · 3 × 8 · 25 pts
                   </button>
                   <button type="button" onClick={() => {
-                    setScoring({ ...defaultScoringRules, numberOfSets: 3, boardsPerSet: 6, tieBreak: 'sudden_death' });
+                    setScoring({ ...federationScoringRules, boardsPerSet: 6, tieBreak: 'sudden_death' });
                     setTargetScore(21); setRulePreset('other_age');
                   }} className={`rounded-lg border px-3 py-1.5 font-semibold ${rulePreset === 'other_age' ? 'border-[#0B5D3B] bg-[#0B5D3B] text-white' : 'border-emerald-200 bg-white text-emerald-900'}`}>
                     Federation 21/6 · 3 × 6 · 21 pts

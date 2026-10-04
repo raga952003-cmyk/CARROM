@@ -18,6 +18,20 @@ export interface ScoringRules {
 }
 
 export const defaultScoringRules: ScoringRules = {
+  scoringMode: 'remaining_coins',
+  numberOfSets: 1,
+  boardsPerSet: 8,
+  coinValue: 1,
+  setWinnerRule: 'total_points',
+  boardEntryMode: 'simple',
+  coinsPerSide: 9,
+  queenPoints: 3,
+  queenMustBeCovered: true,
+  queenAwardTo: 'coverer',
+  tieBreak: 'additional_board',
+};
+
+export const federationScoringRules: ScoringRules = {
   scoringMode: 'official_icf',
   numberOfSets: 3,
   boardsPerSet: 8,
@@ -101,8 +115,10 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             onChange={e => {
               const scoringMode = e.target.value as ScoringRules['scoringMode'];
               set(scoringMode === 'official_icf'
-                ? { ...defaultScoringRules }
-                : { scoringMode });
+                ? { ...federationScoringRules }
+                : scoringMode === 'remaining_coins'
+                  ? { ...defaultScoringRules }
+                  : { scoringMode, setWinnerRule: 'total_points' });
             }}
             className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg bg-white"
           >
@@ -128,7 +144,9 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
             <option value="detailed">Also the queen and penalties</option>
           </select>
           <p className="text-[10px] text-gray-500 mt-1">
-            Federation scoring requires the detailed sheet so the queen and penalties are recorded.
+            {value.boardEntryMode === 'simple'
+              ? 'Select the winner and the opponent’s remaining coins. No queen bonus or penalties are added in this sheet.'
+              : 'The detailed sheet records the queen and penalties.'}
           </p>
         </div>
 
@@ -247,7 +265,11 @@ export const ScoringRulesSettings: React.FC<ScoringRulesSettingsProps> = ({ valu
                 )}
               </div>
             )}
-            {remaining ? (
+            {remaining && value.boardEntryMode === 'simple' ? (
+              <>If the opponent has <strong>4</strong> coins left, the board winner receives
+                <strong> {4 * value.coinValue}</strong> points and the opponent receives <strong>0</strong>.
+                The highest total after the scheduled boards wins when using the total-points rule.</>
+            ) : remaining ? (
               <>
                 A board where the winner clears their coins, the loser has <strong>4</strong> left and the
                 queen is covered scores <strong>{example.total}</strong> to the winner
