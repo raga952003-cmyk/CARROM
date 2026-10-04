@@ -4,7 +4,7 @@ import { posterDate, posterDefaults, scoringSummary } from '../../utils/posterFa
 
 const themes = { emerald_gold: ['#08472d', '#d4a72c'], royal_ebony: ['#181a1b', '#eac264'], heritage_wood: ['#422915', '#ebc98a'], championship_blue: ['#0f345a', '#8cd5ff'] };
 
-export const TournamentPoster: React.FC<{ tournament: Tournament; config?: PosterConfig; qr?: string }> = ({ tournament: t, config, qr }) => {
+export const TournamentPoster: React.FC<{ tournament: Tournament; config?: PosterConfig; qr?: string; qrIsLocal?: boolean }> = ({ tournament: t, config, qr, qrIsLocal = false }) => {
   const frame = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(600);
   useEffect(() => { if (!frame.current) return; const observer = new ResizeObserver(entries => setWidth(entries[0].contentRect.width)); observer.observe(frame.current); return () => observer.disconnect(); }, []);
@@ -35,8 +35,8 @@ export const TournamentPoster: React.FC<{ tournament: Tournament; config?: Poste
       {p.sponsorText && <div><strong>Supported by:</strong> {p.sponsorText}</div>}
     </div>
     <footer style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, borderTop: '1px solid #ffffff55', paddingTop: 8 }}>
-      <div style={{ fontSize: 11 }}><strong style={{ color: accent }}>{t.status === 'draft' ? 'DRAFT PREVIEW' : t.status === 'registration_open' ? 'SCAN FOR DETAILS & REGISTRATION' : 'SCAN FOR TOURNAMENT DETAILS'}</strong><div>Registration: {posterDate(t.registrationStartDate)} – {posterDate(t.registrationEndDate)}</div><div>Payment instructions are available in the app.</div></div>
-      {qr && <img src={qr} alt="Tournament details QR code" width={86} height={86} style={{ background: 'white', flexShrink: 0 }} />}
+      <div style={{ fontSize: 11 }}><strong style={{ color: accent }}>{qrIsLocal ? 'LOCAL TEST - THIS COMPUTER ONLY' : t.status === 'draft' ? 'DRAFT PREVIEW' : t.status === 'registration_open' ? 'SCAN FOR DETAILS & REGISTRATION' : 'SCAN FOR TOURNAMENT DETAILS'}</strong><div>Registration: {posterDate(t.registrationStartDate)} – {posterDate(t.registrationEndDate)}</div><div>Payment instructions are available in the app.</div></div>
+      {qr && <img src={qr} alt="Tournament details QR code" width={132} height={132} style={{ background: 'white', flexShrink: 0, imageRendering: 'pixelated', borderRadius: 0 }} />}
     </footer>
   </div></div>;
 };

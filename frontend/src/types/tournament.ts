@@ -297,6 +297,7 @@ export interface PosterConfig {
   sponsorText?: string;
   sourceFingerprint?: string;
   publishedAt?: string;
+  publicBaseUrl?: string;
 }
 
 export interface Tournament {
@@ -320,6 +321,7 @@ export interface Tournament {
   posterConfig: PosterConfig;
   createdAt: string;
   publishedAt?: string;
+  publicBaseUrl?: string;
 
   // How it ended. Written by POST /complete and POST /cancel; absent from the
   // wire on a database without migration 012, null before the tournament has

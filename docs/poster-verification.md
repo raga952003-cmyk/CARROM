@@ -14,7 +14,7 @@ Implemented real PNG exports, encoded QR links to a public poster page, awaited 
 
 ## Deployment and limits
 
-The QR uses the origin where the poster is generated. Localhost exports are for local testing; generate the shared poster on the deployed website. Draft links remain unavailable publicly until the tournament is opened. Registration links retain the tournament selection through sign-in and open the entry form for eligible players; completing a new player signup or real payment was not repeated during this banner test. AI copy generation was not called during verification. Downloaded files cannot change after sharing: the editor warns when tournament facts have changed, so download a new copy.
+QR correction: the default QR destination is the user-confirmed public website https://carrom-umber-six.vercel.app/, including when generated locally. Organisers can set a validated public HTTPS base address per poster. Local/private addresses are rejected. The code now renders at 132px in the base layout with a four-module white border and sharp black modules. Draft links remain unavailable publicly until the tournament is opened. Registration links retain the tournament selection through sign-in and open the entry form for eligible players; completing a new player signup or real payment was not repeated during this banner test. AI copy generation was not called during verification. Downloaded files cannot change after sharing: the editor warns when tournament facts have changed, so download a new copy.
 
 To verify an exported file:
 
@@ -23,3 +23,7 @@ To verify an exported file:
 To run the poster permission test:
 
     backend/.venv/Scripts/python.exe backend/tests/offline/test_poster.py
+
+## QR correction verified
+
+After the QR complaint, actual portrait, square and A4 exports were decoded again. All point to the public tournament URL on carrom-umber-six.vercel.app, and that public page was opened without sign-in. URL validation tests and the poster permission/persistence tests pass.

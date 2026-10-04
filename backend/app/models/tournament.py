@@ -2,7 +2,9 @@ from pydantic import BaseModel, Field, AliasGenerator, model_validator, field_va
 from pydantic.alias_generators import to_camel
 from typing import Optional, List, Any, Literal
 from datetime import date
+import ipaddress
 import re
+from urllib.parse import urlparse, urlunparse
 
 
 def _valid_gpay_destination(value: Optional[str]) -> Optional[str]:
@@ -99,6 +101,63 @@ class PosterConfigSchema(BaseCamelModel):
     sponsor_text: Optional[str] = Field(default="", max_length=100)
     source_fingerprint: Optional[str] = Field(default=None, max_length=8000)
     published_at: Optional[str] = None
+    public_base_url: Optional[str] = Field(default=None, max_length=300)
+
+    @field_validator("public_base_url", mode="before")
+    @classmethod
+    def valid_public_base_url(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Enter the full public website address, starting with https://.")
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        # Browsers interpret backslashes and some numeric hosts differently from
+        # urllib. Reject those spellings rather than publish a local QR link.
+        if any(char.isspace() or ord(char) < 32 for char in cleaned) or "\\" in cleaned:
+            raise ValueError("Use a public website address without spaces or backslashes.")
+        try:
+            parsed = urlparse(cleaned)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("Enter a valid public website address.") from exc
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("The poster website must use https://.")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Use a website address without login details.")
+        if "?" in cleaned or "#" in cleaned:
+            raise ValueError("Use the website base address without a query or # section.")
+        if ":" in host or not host or "." not in host:
+            raise ValueError("Use a public website hostname or public IPv4 address.")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            # Numeric final labels can trigger browser IPv4 canonicalization,
+            # including shortened, integer, octal and hexadecimal addresses.
+            final_label = host.rsplit(".", 1)[-1]
+            if final_label.isdigit() or re.fullmatch(r"0x[0-9a-f]+", final_label):
+                raise ValueError("Use a public website hostname or full public IPv4 address.")
+            try:
+                host = host.encode("idna").decode("ascii")
+            except UnicodeError as exc:
+                raise ValueError("Enter a valid public website hostname.") from exc
+            if any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                   for label in host.split(".")):
+                raise ValueError("Enter a valid public website hostname.")
+            if host.rsplit(".", 1)[-1] in {"localhost", "local", "test", "invalid", "internal", "lan"}:
+                raise ValueError("Local or private website addresses cannot be shared with players.")
+        else:
+            if not address.is_global or address.is_multicast or address.is_reserved or address.version != 4 \
+                    or address in ipaddress.ip_network("192.0.0.0/24") \
+                    or address in ipaddress.ip_network("192.88.99.0/24"):
+                raise ValueError("Local or reserved addresses cannot be shared with players.")
+        netloc = host if port in (None, 443) else f"{host}:{port}"
+        path = parsed.path.rstrip("/") + "/"
+        if parsed.params:
+            path = parsed.path + ";" + parsed.params.rstrip("/") + "/"
+        return urlunparse(("https", netloc, path, "", "", ""))
 
 class TournamentCreateSchema(BaseCamelModel):
     name: str

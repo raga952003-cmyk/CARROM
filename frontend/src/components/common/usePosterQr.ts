@@ -1,17 +1,19 @@
 import { useEffect, useState } from 'react';
-import { publicPosterUrl } from '../../utils/posterFacts';
+import { isLocalPosterUrl, publicPosterUrl } from '../../utils/posterFacts';
 
-export function usePosterQr(id: string) {
-  const [qr, setQr] = useState('');
-  const [error, setError] = useState('');
+export function usePosterQr(id: string, publicBaseUrl?: string) {
+  const [result, setResult] = useState({ qr: '', error: '', url: '', isLocal: false });
   useEffect(() => {
     let active = true;
-    setQr(''); setError('');
+    setResult({ qr: '', error: '', url: '', isLocal: false });
     if (!id) return;
-    import('qrcode').then(module => module.default.toDataURL(publicPosterUrl(id), { margin: 4, width: 256, errorCorrectionLevel: 'M' }))
-      .then(value => { if (active) setQr(value); })
-      .catch(() => { if (active) setError('Could not generate the QR code. Please reopen the poster.'); });
+    let url: string;
+    try { url = publicPosterUrl(id, publicBaseUrl); }
+    catch (e) { setResult({ qr: '', error: e instanceof Error ? e.message : 'Enter a valid public website address.', url: '', isLocal: false }); return; }
+    import('qrcode').then(module => module.default.toDataURL(url, { margin: 4, scale: 10, errorCorrectionLevel: 'M', color: { dark: '#000000ff', light: '#ffffffff' } }))
+      .then(qr => { if (active) setResult({ qr, error: '', url, isLocal: isLocalPosterUrl(url) }); })
+      .catch(() => { if (active) setResult({ qr: '', error: 'Could not generate the QR code. Please reopen the poster.', url, isLocal: false }); });
     return () => { active = false; };
-  }, [id]);
-  return { qr, error };
+  }, [id, publicBaseUrl]);
+  return result;
 }

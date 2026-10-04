@@ -67,7 +67,7 @@ export const PlayerDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'my_matches' | 'schedule' | 'standings' | 'knockout' | 'poster'>('my_matches');
 
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
-  const { qr: posterQr } = usePosterQr(currentTournament?.id || '');
+  const { qr: posterQr, isLocal: posterQrIsLocal } = usePosterQr(currentTournament?.id || '', currentTournament?.posterConfig?.publicBaseUrl);
   const receivingUpi = validTournamentUpiDestination(currentTournament?.gpayUpiId);
 
   // Check if current user is registered in current tournament
@@ -814,7 +814,7 @@ export const PlayerDashboard: React.FC = () => {
                 {activeTab === 'poster' && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
                     
-                    <TournamentPoster tournament={currentTournament} qr={posterQr} />
+                    <TournamentPoster tournament={currentTournament} qr={posterQr} qrIsLocal={posterQrIsLocal} />
 
                     {/* Rules Overview */}
                     <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-xs space-y-3 text-xs">
