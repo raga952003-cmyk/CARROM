@@ -1,3 +1,4 @@
+import { canConfirmLeagueDraw } from '../../utils/leagueDraw';
 import React, { useEffect, useMemo, useState } from 'react';
 import { compareMatches } from '../../utils/matchOrder';
 import { ArrowLeft, Minus, Plus, Play, Check, Crown, Loader2 } from 'lucide-react';
@@ -212,7 +213,8 @@ export const BoardMode: React.FC<BoardModeProps> = ({ boardNumber, tournamentId 
         (obs.queenCoveredBy !== 'none' && obs.queenCoveredBy !== obs.queenPocketedBy))
   );
 
-  const decided = match.status === 'completed' || !!match.winnerId;
+  const leagueDrawAvailable = canConfirmLeagueDraw(match, rules);
+  const decided = match.status === 'completed' || !!match.winnerId || leagueDrawAvailable;
 
   const awardTieBreak = async (reason: string) => {
     if (!tieBreakTarget) return;

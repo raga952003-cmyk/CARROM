@@ -1,3 +1,4 @@
+import { canConfirmLeagueDraw } from '../../utils/leagueDraw';
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Pause, RotateCcw, CheckCircle2, Clock, Trophy, AlertCircle, AlertTriangle, ShieldAlert, Sparkles, History, Check, Edit3, X, ArrowLeft, Crown, Flame, Award, Plus, UserX, Trash2, Loader2 } from 'lucide-react';
 import { WalkoverModal } from './WalkoverModal';
@@ -292,7 +293,8 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
   // Why Confirm Final Result is greyed out, or empty when it is not. Fewer
   // boards than the maximum is deliberately NOT a reason: the organiser may
   // settle a match on what was played.
-  const confirmBlocker = match.tieBreakRequired
+  const leagueDrawAvailable = canConfirmLeagueDraw(match, rules);
+  const confirmBlocker = match.tieBreakRequired && !leagueDrawAvailable
     ? pendingSetTie
       ? `Record the sudden-death winner of game ${pendingSetTie.setNumber} before confirming.`
       : rules.setWinnerRule === 'target_points'
@@ -709,8 +711,13 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
           </div>
         )}
 
+        {leagueDrawAvailable && canScore && <div className="mx-4 mb-3 p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-sm">
+          League match drawn at {match.player1TotalPoints}–{match.player2TotalPoints}.
+          Confirm the result to award {rules.pointsForDraw ?? 1} league point(s) to each player.
+        </div>}
+
         {/* A level game needs its own sudden-death ruling; other ties follow the match rule. */}
-        {match.tieBreakRequired && !match.resultConfirmed && canScore && (
+        {match.tieBreakRequired && !leagueDrawAvailable && !match.resultConfirmed && canScore && (
           <div className="mx-4 mb-3 p-4 rounded-2xl bg-amber-50 border-2 border-amber-300">
             <div className="flex items-start gap-2 mb-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
@@ -847,7 +854,9 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
                 Official Result Confirmed
               </div>
               <div className="text-base font-bold">
-                {match.winnerName} wins {Math.max(match.player1BoardWins, match.player2BoardWins)} boards to {Math.min(match.player1BoardWins, match.player2BoardWins)}!
+                {match.winnerId
+                  ? `${match.winnerName} wins ${Math.max(match.player1BoardWins, match.player2BoardWins)} boards to ${Math.min(match.player1BoardWins, match.player2BoardWins)}!`
+                  : `League match drawn: ${match.player1TotalPoints}–${match.player2TotalPoints}.`}
               </div>
             </div>
           </div>
@@ -1319,6 +1328,7 @@ export const LiveMatchController: React.FC<LiveMatchControllerProps> = ({
         description={(() => {
           // Finishing a match is the organiser's call, so say plainly how much
           // was played rather than implying every board must be.
+          if (leagueDrawAvailable) return `Confirm this league match as a draw at ${match.player1TotalPoints}–${match.player2TotalPoints}? Each player receives ${rules.pointsForDraw ?? 1} league point(s). Neither player is recorded as the winner.`;
           const all = match.boards || [];
           const played = all.filter(b => b.status === 'completed').length;
           const remaining = all.length - played;
