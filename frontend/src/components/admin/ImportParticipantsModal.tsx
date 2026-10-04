@@ -246,15 +246,8 @@ export const ImportParticipantsModal: React.FC<ImportParticipantsModalProps> = (
         );
       }
 
-      // Close after delay
-      setTimeout(() => {
-        onClose();
-        setStep('input');
-        setRawText('');
-        setFileName('');
-        setFileObj(null);
-        setSuccessMsg('');
-      }, 3000);
+      // Keep skipped rows visible for review; a clean import closes immediately.
+      if (!response.skipped?.length) onClose();
 
     } catch (err: any) {
       setErrorMsg(err.message || 'Import failed.');

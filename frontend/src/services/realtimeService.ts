@@ -53,6 +53,9 @@ export interface RealtimeChange {
    * rather than a stale screen.
    */
   observedAt: number;
+  tournamentIds?: string[];
+  matchIds?: string[];
+  fullTournamentRefresh?: boolean;
 }
 
 interface SubscribeOptions {
@@ -73,7 +76,7 @@ interface SubscribeOptions {
 export function subscribeToTournamentData({
   onChange,
   onStatus,
-  debounceMs = 250,
+  debounceMs = 50,
 }: SubscribeOptions): RealtimeHandle {
   if (!isSupabaseConfigured || !supabase) {
     onStatus?.('disabled');
@@ -87,22 +90,40 @@ export function subscribeToTournamentData({
   // directory as well.
   let pendingTables = new Set<WatchedTable>();
   let pendingLatest = 0;
+  let tournamentIds = new Set<string>();
+  let matchIds = new Set<string>();
+  let fullTournamentRefresh = false;
 
   // Several rows change per score submission; coalesce them into one refresh.
-  const scheduleRefresh = (table: WatchedTable) => {
+  const scheduleRefresh = (table: WatchedTable, payload: { new: Record<string, unknown>; old: Record<string, unknown>; eventType: string }) => {
     if (closed) return;
     pendingTables.add(table);
+    const row = Object.keys(payload.new).length ? payload.new : payload.old;
+    if (table !== 'notifications') {
+      if (table === 'tournaments') {
+        // Inserts/deletes can change visibility and list membership.
+        if (payload.eventType !== 'UPDATE' || typeof row.id !== 'string') fullTournamentRefresh = true;
+        else tournamentIds.add(row.id);
+      } else if (typeof row.tournament_id === 'string') tournamentIds.add(row.tournament_id);
+      else if (table === 'boards' && typeof row.match_id === 'string') matchIds.add(row.match_id);
+      else fullTournamentRefresh = true;
+    }
     // Stamped by the LATEST change in the window. Only a read issued after
     // that instant can be said to have seen everything in it.
     pendingLatest = Date.now();
-    if (debounceTimer) clearTimeout(debounceTimer);
+    // A fixed window cannot be postponed indefinitely by a busy score stream.
+    if (debounceTimer) return;
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
       const tables = Array.from(pendingTables);
       const observedAt = pendingLatest;
+      const scope = { tournamentIds: [...tournamentIds], matchIds: [...matchIds], fullTournamentRefresh };
       pendingTables = new Set();
       pendingLatest = 0;
-      onChange({ tables, observedAt });
+      tournamentIds = new Set();
+      matchIds = new Set();
+      fullTournamentRefresh = false;
+      onChange({ tables, observedAt, ...scope });
     }, debounceMs);
   };
 
@@ -114,7 +135,7 @@ export function subscribeToTournamentData({
     channel.on(
       'postgres_changes',
       { event: '*', schema: 'public', table },
-      () => scheduleRefresh(table)
+      payload => scheduleRefresh(table, payload)
     );
   }
 

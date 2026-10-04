@@ -39,7 +39,6 @@ export const MatchTossControl: React.FC<MatchTossControlProps> = ({
   const { recordToss, startMatch, refreshTournaments } = useTournament();
 
   const [step, setStep] = useState<Step>('intro');
-  const [spinning, setSpinning] = useState(false);
   const [coin, setCoin] = useState<Coin | null>(null);
   const [winnerId, setWinnerId] = useState<string>('');
   const [choice, setChoice] = useState<Choice>('strike');
@@ -78,14 +77,9 @@ export const MatchTossControl: React.FC<MatchTossControlProps> = ({
   };
 
   const spin = () => {
-    setSpinning(true);
     setError('');
-    // Settle on a side after the animation, so the result and the coin agree.
-    setTimeout(() => {
-      setCoin(Math.random() < 0.5 ? 'black' : 'white');
-      setSpinning(false);
-      setStep('result');
-    }, 1400);
+    setCoin(Math.random() < 0.5 ? 'black' : 'white');
+    setStep('result');
   };
 
   const saveAndStart = async () => {
@@ -235,24 +229,20 @@ export const MatchTossControl: React.FC<MatchTossControlProps> = ({
             </div>
             <button
               onClick={spin}
-              disabled={spinning}
               aria-label="Spin the coin"
               className="mx-auto block rounded-full focus:outline-hidden focus:ring-4 focus:ring-emerald-200"
             >
               <div
-                className={`w-32 h-32 rounded-full border-4 border-gray-200 shadow-lg overflow-hidden ${
-                  spinning ? 'animate-spin' : ''
-                }`}
+                className="w-32 h-32 rounded-full border-4 border-gray-200 shadow-lg overflow-hidden"
                 style={{ background: 'linear-gradient(90deg, #202522 0 50%, #f5f5f4 50% 100%)' }}
               />
             </button>
-            <p className="text-[11px] text-gray-500">{spinning ? 'Spinning…' : 'Tap to spin'}</p>
+            <p className="text-[11px] text-gray-500">Tap to spin</p>
             <button
               onClick={spin}
-              disabled={spinning}
               className="px-5 py-2.5 rounded-xl bg-[#0B5D3B] hover:bg-[#08472d] text-white text-sm font-bold inline-flex items-center gap-2 disabled:opacity-60"
             >
-              {spinning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCw className="w-4 h-4" />}
+              <RotateCw className="w-4 h-4" />
               Spin Coin
             </button>
           </div>
