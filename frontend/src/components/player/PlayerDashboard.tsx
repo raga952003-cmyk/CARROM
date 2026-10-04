@@ -1,3 +1,7 @@
+import { useHashRoute } from '../../utils/useHashRoute';
+import { TournamentPoster } from '../common/TournamentPoster';
+import { usePosterQr } from '../common/usePosterQr';
+import { scoringSummary } from '../../utils/posterFacts';
 import React, { useState } from 'react';
 import { findMyMatches, opponentOf } from '../../utils/myMatches';
 import { groupMatches, resultSummary, outcomeFor, finishedIsProvisional, MatchGroupKey } from '../../utils/matchGroups';
@@ -63,6 +67,7 @@ export const PlayerDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'my_matches' | 'schedule' | 'standings' | 'knockout' | 'poster'>('my_matches');
 
   const currentTournament = tournaments.find(t => t.id === activeTournamentId) || tournaments[0];
+  const { qr: posterQr } = usePosterQr(currentTournament?.id || '');
   const receivingUpi = validTournamentUpiDestination(currentTournament?.gpayUpiId);
 
   // Check if current user is registered in current tournament
@@ -71,6 +76,18 @@ export const PlayerDashboard: React.FC = () => {
     (currentUser?.id && r.team?.player1?.id === currentUser.id) ||
     (currentUser?.id && r.team?.player2?.id === currentUser.id)
   );
+
+  const joinRoute = useHashRoute();
+  const openedJoin = React.useRef('');
+  React.useEffect(() => {
+    const id = joinRoute.view === 'join' ? joinRoute.segments[1] : '';
+    if (!id || id !== currentTournament?.id || openedJoin.current === id) return;
+    openedJoin.current = id;
+    if ((!userRegistration || userRegistration.status === 'rejected') && currentTournament.status === 'registration_open' && !isRegistrationDeadlinePassed(currentTournament.registrationEndDate)) {
+      setSelectedTournamentForReg(currentTournament);
+      setIsRegisterModalOpen(true);
+    }
+  }, [joinRoute.view, joinRoute.segments[1], currentTournament, userRegistration]);
 
   // Matches linked to this account or to a doubles team containing it.
   const myMatches = React.useMemo(
@@ -797,31 +814,7 @@ export const PlayerDashboard: React.FC = () => {
                 {activeTab === 'poster' && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
                     
-                    {/* Poster Card */}
-                    <div className="bg-[#0B5D3B] text-white p-6 rounded-3xl shadow-xl border-4 border-[#D4A72C]/40 space-y-4">
-                      <div className="inline-block px-3 py-1 rounded-full bg-[#D4A72C] text-[#202522] text-[10px] font-bold uppercase tracking-wider">
-                        {currentTournament.posterConfig?.badgeText || 'OFFICIAL 2026 CHAMPIONSHIP'}
-                      </div>
-
-                      <h3 className="font-serif font-bold text-2xl text-white">
-                        {currentTournament.name}
-                      </h3>
-
-                      <p className="text-xs italic text-amber-200">
-                        "{currentTournament.posterConfig?.tagline || 'Strike with Precision. Reign Supreme on the Board.'}"
-                      </p>
-
-                      <div className="bg-black/20 p-3.5 rounded-xl text-xs space-y-1.5 border border-white/10">
-                        <div><strong>Venue:</strong> {currentTournament.venue} ({currentTournament.city})</div>
-                        <div><strong>Dates:</strong> {currentTournament.tournamentStartDate} to {currentTournament.tournamentEndDate}</div>
-                        <div><strong>Prize Pool:</strong> <span className="text-[#D4A72C] font-bold">{currentTournament.prizePool}</span></div>
-                        <div><strong>Entry Fee:</strong> ₹{currentTournament.entryFee}</div>
-                      </div>
-
-                      <div className="text-[11px] text-emerald-200">
-                        Official Synco & Siscaa Boards · All-India Federation Standards
-                      </div>
-                    </div>
+                    <TournamentPoster tournament={currentTournament} qr={posterQr} />
 
                     {/* Rules Overview */}
                     <div className="bg-white p-6 rounded-3xl border border-gray-200 shadow-xs space-y-3 text-xs">
@@ -829,10 +822,10 @@ export const PlayerDashboard: React.FC = () => {
                         Tournament & Scoring Regulations
                       </h4>
                       <ul className="space-y-2 text-gray-600 list-disc list-inside">
-                        <li>Each match is conducted on official federation boards with a {currentTournament.rules.matchDurationMinutes}-minute timer limit.</li>
-                        <li>Queen must be covered by a carrom coin on the same or immediate consecutive turn (+{currentTournament.rules.queenPoints} pts).</li>
+                        <li>{scoringSummary(currentTournament)}. Match duration: {currentTournament.rules.matchDurationMinutes} minutes.</li>
+                        {currentTournament.rules.boardEntryMode === 'detailed' && <li>Queen cover and penalties are recorded using the published scoring rules.</li>}
                         <li>Win awards <strong>{currentTournament.rules.pointsForWin} points</strong>, Draw awards <strong>{currentTournament.rules.pointsForDraw} point</strong>, Loss awards <strong>{currentTournament.rules.pointsForLoss} points</strong>.</li>
-                        <li>Strict {currentTournament.rules.restTimeMinutes}-minute rest period is guaranteed between back-to-back player rounds.</li>
+                        <li>Scheduled rest between rounds: {currentTournament.rules.restTimeMinutes} minutes.</li>
                         <li>Final standings use the tournament's published tiebreaker order. The default is match points, then net score difference, then board difference, then head-to-head.</li>
                       </ul>
                     </div>

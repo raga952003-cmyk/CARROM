@@ -93,6 +93,12 @@ class PosterConfigSchema(BaseCamelModel):
     announcement: Optional[str] = ""
     badge_text: Optional[str] = ""
     custom_bg_url: Optional[str] = None
+    poster_size: Literal["portrait", "square", "a4"] = "portrait"
+    organizer_contact: Optional[str] = Field(default="", max_length=100)
+    eligibility: Optional[str] = Field(default="", max_length=100)
+    sponsor_text: Optional[str] = Field(default="", max_length=100)
+    source_fingerprint: Optional[str] = Field(default=None, max_length=8000)
+    published_at: Optional[str] = None
 
 class TournamentCreateSchema(BaseCamelModel):
     name: str

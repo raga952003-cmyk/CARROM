@@ -291,6 +291,12 @@ export interface PosterConfig {
   announcement: string;
   badgeText: string;
   customBgUrl?: string;
+  posterSize?: 'portrait' | 'square' | 'a4';
+  organizerContact?: string;
+  eligibility?: string;
+  sponsorText?: string;
+  sourceFingerprint?: string;
+  publishedAt?: string;
 }
 
 export interface Tournament {

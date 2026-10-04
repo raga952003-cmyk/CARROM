@@ -118,7 +118,7 @@ async def poster_copy(data: PosterRequest, admin = Depends(verify_admin)):
     """Marketing copy for the tournament poster."""
     prompt = (
         "You are a sports branding director specialising in carrom championships. "
-        "Write promotional copy for this tournament.\n"
+        "Write promotional copy for this tournament. Do not invent sponsors, equipment brands, federation accreditation, prizes, streaming, or payment claims.\n"
         f"Name: {data.tournamentName}\nVenue: {data.venue}\nCity: {data.city}\n"
         f"Category: {data.category}\nFormat: {data.format}\n"
         "Keep it dignified and federation-appropriate, not hyperbolic."

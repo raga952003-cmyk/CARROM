@@ -1,433 +1,71 @@
-import React, { useState, useRef } from 'react';
-import { 
-  X, 
-  Sparkles, 
-  Download, 
-  Check, 
-  Palette, 
-  RefreshCw, 
-  Share2, 
-  Trophy, 
-  Calendar, 
-  MapPin, 
-  DollarSign, 
-  ShieldCheck,
-  QrCode
-} from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { X } from 'lucide-react';
 import { Tournament, PosterConfig } from '../../types/tournament';
 import { useTournament } from '../../context/TournamentContext';
 import { tournamentService } from '../../services/tournamentService';
+import { TournamentPoster } from '../common/TournamentPoster';
+import { usePosterQr } from '../common/usePosterQr';
+import { posterDefaults, posterFingerprint, publicPosterUrl } from '../../utils/posterFacts';
 
-interface PosterGeneratorModalProps {
-  tournament: Tournament;
-  isOpen: boolean;
-  onClose: () => void;
-}
-
-export const PosterGeneratorModal: React.FC<PosterGeneratorModalProps> = ({
-  tournament,
-  isOpen,
-  onClose
-}) => {
-  const { updateTournament, addNotification } = useTournament();
-
-  const [themeStyle, setThemeStyle] = useState<PosterConfig['themeStyle']>(
-    tournament.posterConfig?.themeStyle || 'emerald_gold'
-  );
-  const [tagline, setTagline] = useState(
-    tournament.posterConfig?.tagline || 'Strike with Precision. Reign Supreme on the Board.'
-  );
-  const [highlights, setHighlights] = useState<string[]>(
-    tournament.posterConfig?.highlights || [
-      'Championship Grade Synco & Siscaa Boards',
-      'Official Carrom Federation Standard Rules',
-      'Live Digital Scoreboards & Stream Highlights'
-    ]
-  );
-  const [badgeText, setBadgeText] = useState(
-    tournament.posterConfig?.badgeText || 'OFFICIAL 2026 INVITATIONAL'
-  );
-  const [announcement, setAnnouncement] = useState(
-    tournament.posterConfig?.announcement || `Join top carrom masters at ${tournament.venue} for the ${tournament.name}!`
-  );
-
-  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
-  const [isExporting, setIsExporting] = useState(false);
-  const posterRef = useRef<HTMLDivElement>(null);
-
+export const PosterGeneratorModal: React.FC<{ tournament: Tournament; isOpen: boolean; onClose: () => void }> = ({ tournament: initialTournament, isOpen, onClose }) => {
+  const { updateTournament, tournaments } = useTournament();
+  const tournament = tournaments.find(t => t.id === initialTournament.id) || initialTournament;
+  const [config, setConfig] = useState<PosterConfig>(() => posterDefaults(tournament));
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [exportUrl, setExportUrl] = useState('');
+  const preview = useRef<HTMLDivElement>(null);
+  const { qr, error: qrError } = usePosterQr(tournament.id);
+  const change = (key: keyof PosterConfig, value: any) => setConfig(p => ({ ...p, [key]: value }));
+  const run = async (name: string, action: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(name); setError(''); setNotice('');
+    try { await action(); } catch (e) { setError(e instanceof Error ? e.message : 'Unable to complete this action.'); } finally { setBusy(''); }
+  };
   if (!isOpen) return null;
-
-  const handleGenerateAiConcept = async () => {
-    setIsGeneratingAi(true);
-    try {
-      // Generated server-side: the AI key must not reach the browser.
-      const copy = await tournamentService.generatePosterCopy({
-        tournamentName: tournament.name,
-        venue: tournament.venue,
-        city: tournament.city,
-        category: tournament.category,
-        format: tournament.format,
-      });
-
-      if (!copy.available) {
-        setTagline("Strike with Precision. Reign Supreme on the Board.");
-        setHighlights([
-          "Championship Grade Synco & Siscaa Boards",
-          "Official Carrom Federation Standard Rules",
-          "Live Digital Scoreboards & Stream Highlights"
-        ]);
-        setAnnouncement(`Join the elite carrom masters at ${tournament.venue || "City Sports Arena"} for the ${tournament.name || "Championship"}!`);
-        setBadgeText("PREMIER TOURNAMENT");
-        return;
-      }
-
-      setTagline(copy.tagline);
-      setHighlights(copy.highlights || []);
-      setAnnouncement(copy.announcement);
-      setBadgeText(copy.badgeText);
-    } catch (e) {
-      console.error('AI Poster generation failed', e);
-      // Fallback
-      setTagline("Precision. Focus. Grand Masters on the Board.");
-      setHighlights(["Standard Federation Boards", "Live Timers & Scoring", "Exciting Knockout Rounds"]);
-      setBadgeText("CHAMPIONSHIP SERIES");
-    } finally {
-      setIsGeneratingAi(false);
-    }
-  };
-
-  const handleSavePosterConfig = () => {
-    updateTournament(tournament.id, {
-      posterConfig: {
-        themeStyle,
-        tagline,
-        highlights,
-        announcement,
-        badgeText
-      }
-    });
-
-    addNotification(
-      'Poster Published!',
-      `Official poster artwork updated for "${tournament.name}".`,
-      'tournament_published',
-      tournament.id
-    );
-
-    onClose();
-  };
-
-  const getThemeBackground = () => {
-    switch (themeStyle) {
-      case 'royal_ebony':
-        return 'bg-gradient-to-b from-[#181a1b] via-[#202522] to-[#0f1211] text-amber-50 border-amber-500/40';
-      case 'heritage_wood':
-        return 'bg-gradient-to-b from-[#2e1c0c] via-[#422915] to-[#1c1107] text-amber-100 border-amber-600/40';
-      case 'championship_blue':
-        return 'bg-gradient-to-b from-[#09223b] via-[#0f345a] to-[#061626] text-blue-50 border-sky-400/40';
-      default: // emerald_gold
-        return 'bg-gradient-to-b from-[#0B5D3B] via-[#08472d] to-[#052b1b] text-emerald-50 border-[#D4A72C]/50';
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-xs flex items-start sm:items-center justify-center p-2 sm:p-4 animate-in fade-in duration-150">
-      <div className="relative bg-white rounded-2xl max-w-5xl w-full max-h-[90vh] flex flex-col shadow-2xl border border-gray-100 overflow-hidden">
-        
-        {/* Header */}
-        <div className="px-6 py-4 bg-[#0B5D3B] text-white flex items-center justify-between border-b border-emerald-800">
-          <div className="flex items-center space-x-2">
-            <div className="p-1.5 bg-[#D4A72C] rounded-lg text-[#202522]">
-              <Palette className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="font-serif font-bold text-lg">Tournament Poster Generator</h2>
-              <p className="text-xs text-emerald-100">AI Visual Design & Structured Federation Text Overlay</p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1 rounded-lg text-emerald-200 hover:text-white hover:bg-emerald-900 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Modal Body: Left Controls, Right Preview */}
-        <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 bg-gray-50">
-          
-          {/* Left Customization Column (5 cols) */}
-          <div className="lg:col-span-5 space-y-4 bg-white p-5 rounded-2xl border border-gray-200/80 shadow-xs">
-            
-            {/* AI Generator CTA */}
-            <div className="bg-gradient-to-r from-emerald-50 to-amber-50 p-3.5 rounded-xl border border-amber-200/60 flex items-center justify-between">
-              <div>
-                <h4 className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-[#D4A72C]" />
-                  AI Tagline & Concept Engine
-                </h4>
-                <p className="text-[11px] text-emerald-800 mt-0.5">
-                  Generate professional sports marketing slogans using Gemini.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={handleGenerateAiConcept}
-                disabled={isGeneratingAi}
-                className="px-3 py-1.5 bg-[#0B5D3B] hover:bg-[#08472d] text-white text-xs font-bold rounded-lg shadow-sm flex items-center gap-1.5 shrink-0 disabled:opacity-50"
-              >
-                {isGeneratingAi ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Sparkles className="w-3.5 h-3.5 text-[#D4A72C]" />
-                )}
-                <span>{isGeneratingAi ? 'Creating...' : 'Generate AI'}</span>
-              </button>
-            </div>
-
-            {/* Visual Theme Selector */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1.5">
-                Visual Art Theme
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  { id: 'emerald_gold', name: 'Emerald & Gold', color: 'bg-[#0B5D3B]' },
-                  { id: 'royal_ebony', name: 'Royal Ebony', color: 'bg-[#181a1b]' },
-                  { id: 'heritage_wood', name: 'Heritage Wood', color: 'bg-[#422915]' },
-                  { id: 'championship_blue', name: 'Arena Blue', color: 'bg-[#0f345a]' },
-                ].map(theme => (
-                  <button
-                    key={theme.id}
-                    type="button"
-                    onClick={() => setThemeStyle(theme.id as any)}
-                    className={`p-2.5 rounded-xl text-xs font-semibold flex items-center gap-2 border transition-all ${
-                      themeStyle === theme.id
-                        ? 'border-[#0B5D3B] ring-2 ring-[#0B5D3B]/20 bg-emerald-50/50'
-                        : 'border-gray-200 hover:border-gray-300 bg-white'
-                    }`}
-                  >
-                    <span className={`w-4 h-4 rounded-full ${theme.color} shrink-0`} />
-                    <span className="truncate">{theme.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Badge Text */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">
-                Top Badge Text
-              </label>
-              <input
-                type="text"
-                value={badgeText}
-                onChange={e => setBadgeText(e.target.value)}
-                className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#0B5D3B] focus:border-transparent"
-                placeholder="e.g. ALL-INDIA RANKING 2026"
-              />
-            </div>
-
-            {/* Tagline */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">
-                Headline Slogan / Tagline
-              </label>
-              <input
-                type="text"
-                value={tagline}
-                onChange={e => setTagline(e.target.value)}
-                className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#0B5D3B] focus:border-transparent"
-                placeholder="Tournament slogan"
-              />
-            </div>
-
-            {/* Highlights (3 points) */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">
-                Key Tournament Highlights (3 points)
-              </label>
-              <div className="space-y-1.5">
-                {highlights.map((h, i) => (
-                  <input
-                    key={i}
-                    type="text"
-                    value={h}
-                    onChange={e => {
-                      const next = [...highlights];
-                      next[i] = e.target.value;
-                      setHighlights(next);
-                    }}
-                    className="w-full text-xs px-3 py-1.5 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#0B5D3B]"
-                    placeholder={`Highlight #${i + 1}`}
-                  />
-                ))}
-              </div>
-            </div>
-
-            {/* Announcement text */}
-            <div>
-              <label className="block text-xs font-bold text-gray-700 mb-1">
-                Registration Announcement
-              </label>
-              <textarea
-                value={announcement}
-                onChange={e => setAnnouncement(e.target.value)}
-                rows={2}
-                className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-[#0B5D3B]"
-                placeholder="Invitation notes"
-              />
-            </div>
-
-          </div>
-
-          {/* Right Live Poster Preview (7 cols) */}
-          <div className="lg:col-span-7 flex flex-col items-center justify-center">
-            <div 
-              ref={posterRef}
-              id="tournament-poster-render"
-              className={`w-full max-w-[440px] aspect-[4/5] rounded-2xl shadow-2xl p-6 flex flex-col justify-between relative overflow-hidden border-4 ${getThemeBackground()}`}
-            >
-              {/* Decorative Carrom Board Geometric Watermark */}
-              <div className="absolute inset-0 pointer-events-none opacity-10 flex items-center justify-center">
-                <div className="w-[340px] h-[340px] border-8 border-current rounded-full flex items-center justify-center">
-                  <div className="w-[180px] h-[180px] border-4 border-current rounded-full flex items-center justify-center">
-                    <div className="w-[80px] h-[80px] border-2 border-current rounded-full" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Corner Carrom Pockets Motif */}
-              <div className="absolute top-2 left-2 w-5 h-5 rounded-full border-2 border-current opacity-40" />
-              <div className="absolute top-2 right-2 w-5 h-5 rounded-full border-2 border-current opacity-40" />
-              <div className="absolute bottom-2 left-2 w-5 h-5 rounded-full border-2 border-current opacity-40" />
-              <div className="absolute bottom-2 right-2 w-5 h-5 rounded-full border-2 border-current opacity-40" />
-
-              {/* Poster Top: Badge & Slogan */}
-              <div className="relative z-10 text-center">
-                <div className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-[#D4A72C] text-[#202522] font-black text-[10px] uppercase tracking-widest shadow-md">
-                  <ShieldCheck className="w-3 h-3" />
-                  {badgeText}
-                </div>
-
-                <h1 className="font-serif font-extrabold text-2xl sm:text-3xl text-white mt-3 leading-tight tracking-tight drop-shadow-sm">
-                  {tournament.name}
-                </h1>
-
-                <p className="text-xs italic text-amber-200 mt-1 font-medium px-4">
-                  "{tagline}"
-                </p>
-              </div>
-
-              {/* Poster Middle: Structured Data Cards */}
-              <div className="relative z-10 my-3 space-y-2 bg-black/30 backdrop-blur-xs p-3.5 rounded-xl border border-white/10">
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="flex items-center space-x-2 text-white">
-                    <Calendar className="w-4 h-4 text-[#D4A72C] shrink-0" />
-                    <div>
-                      <div className="text-[10px] text-gray-300">Tournament Dates</div>
-                      <div className="font-bold">{tournament.tournamentStartDate}</div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center space-x-2 text-white">
-                    <Trophy className="w-4 h-4 text-[#D4A72C] shrink-0" />
-                    <div>
-                      <div className="text-[10px] text-gray-300">Prize Pool</div>
-                      <div className="font-bold text-[#D4A72C]">{tournament.prizePool}</div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center space-x-2 text-white">
-                    <MapPin className="w-4 h-4 text-[#D4A72C] shrink-0" />
-                    <div>
-                      <div className="text-[10px] text-gray-300">Venue</div>
-                      <div className="font-bold truncate">{tournament.venue}</div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center space-x-2 text-white">
-                    <DollarSign className="w-4 h-4 text-[#D4A72C] shrink-0" />
-                    <div>
-                      <div className="text-[10px] text-gray-300">Entry Fee</div>
-                      <div className="font-bold">₹{tournament.entryFee} / entry</div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Highlights list */}
-                <div className="pt-2 border-t border-white/10 space-y-1">
-                  {highlights.slice(0, 3).map((h, i) => (
-                    <div key={i} className="flex items-center space-x-1.5 text-[11px] text-gray-200">
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#D4A72C]" />
-                      <span className="truncate">{h}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Poster Bottom: Deadline & CTA info */}
-              <div className="relative z-10 pt-2 border-t border-white/20 flex items-center justify-between">
-                <div>
-                  <div className="text-[10px] text-amber-300 font-semibold uppercase tracking-wider">
-                    Registration Deadline
-                  </div>
-                  <div className="text-xs font-bold text-white">
-                    {tournament.registrationEndDate}
-                  </div>
-                  <div className="text-[10px] text-gray-300">
-                    Format: {tournament.format.replace('_', ' ').toUpperCase()} ({tournament.category})
-                  </div>
-                </div>
-
-                <div className="w-12 h-12 rounded-lg bg-white p-1 flex items-center justify-center shadow-md">
-                  <QrCode className="w-10 h-10 text-[#202522]" />
-                </div>
-              </div>
-
-            </div>
-
-            <p className="text-[11px] text-gray-600 mt-3 text-center">
-              Text & dates are rendered directly from structured tournament data to guarantee 100% accuracy.
-            </p>
-          </div>
-
-        </div>
-
-        {/* Footer Actions */}
-        <div className="px-6 py-4 bg-white border-t border-gray-200 flex items-center justify-between">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 text-xs font-bold text-gray-700 hover:bg-gray-100 rounded-xl transition-colors"
-          >
-            Cancel
-          </button>
-
-          <div className="flex items-center space-x-3">
-            <button
-              type="button"
-              onClick={() => {
-                alert("Poster image ready for download!");
-              }}
-              className="px-4 py-2 text-xs font-bold text-[#0B5D3B] border border-[#0B5D3B] hover:bg-emerald-50 rounded-xl transition-all flex items-center gap-1.5"
-            >
-              <Download className="w-4 h-4" />
-              <span>Download Poster</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSavePosterConfig}
-              className="px-5 py-2 text-xs font-bold bg-[#0B5D3B] hover:bg-[#08472d] text-white rounded-xl shadow-md transition-all flex items-center gap-1.5"
-            >
-              <Check className="w-4 h-4 text-[#D4A72C]" />
-              <span>Publish Poster to Tournament</span>
-            </button>
-          </div>
-        </div>
-
+  const save = () => run('publish', async () => {
+    if (!config.badgeText.trim()) throw new Error('Enter a poster badge.');
+    await document.fonts.ready;
+    const content = preview.current?.querySelector('[data-testid="tournament-poster"]') as HTMLElement;
+    if (content && content.scrollHeight > content.clientHeight + 4) throw new Error('Text exceeds this format. Shorten the copy or choose A4.');
+    await updateTournament(tournament.id, { posterConfig: { ...config, sourceFingerprint: posterFingerprint(tournament) } });
+    setNotice('Poster saved. Players can now see this layout.');
+  });
+  const download = () => run('download', async () => {
+    setExportUrl('');
+    const node = preview.current?.firstElementChild as HTMLElement;
+    if (!node || !qr) throw new Error('Wait for the QR code to finish loading.');
+    await document.fonts.ready;
+    await Promise.all(Array.from(node.querySelectorAll('img')).map(img => img.decode()));
+    const content = node.querySelector('[data-testid="tournament-poster"]') as HTMLElement;
+    if (content && content.scrollHeight > content.clientHeight + 4) throw new Error('Text exceeds this format. Shorten the copy or choose A4.');
+    const { toPng } = await import('html-to-image');
+    const dimensions = config.posterSize === 'square' ? [1080, 1080] : config.posterSize === 'a4' ? [2480, 3508] : [1080, 1350];
+    const url = await toPng(node, { canvasWidth: dimensions[0], canvasHeight: dimensions[1], pixelRatio: 1, skipFonts: true });
+    const link = document.createElement('a'); link.href = url;
+    link.download = `${tournament.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80)}-${config.posterSize}.png`;
+    setExportUrl(url); link.click(); setNotice('PNG downloaded. Review it before sharing.');
+  });
+  return <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-3"><div className="bg-white rounded-2xl max-w-5xl w-full max-h-[95vh] overflow-auto p-5">
+    <div className="flex justify-between"><h2 className="text-xl font-bold">Tournament poster</h2><button aria-label="Close poster" onClick={onClose} disabled={!!busy}><X /></button></div>
+    <div className="grid md:grid-cols-2 gap-6 mt-4">
+      <fieldset disabled={!!busy} className="space-y-3">
+        <label className="block">Format<select className="block border rounded p-2 w-full" value={config.posterSize} onChange={e => change('posterSize', e.target.value)}><option value="portrait">Portrait · 1080 × 1350</option><option value="square">Square · 1080 × 1080</option><option value="a4">A4 · 2480 × 3508</option></select></label>
+        <label className="block">Theme<select className="block border rounded p-2 w-full" value={config.themeStyle} onChange={e => change('themeStyle', e.target.value)}>{['emerald_gold', 'royal_ebony', 'heritage_wood', 'championship_blue'].map(t => <option key={t} value={t}>{t.replaceAll('_', ' ')}</option>)}</select></label>
+        {([['badgeText', 'Badge', 60], ['tagline', 'Tagline', 100], ['announcement', 'Announcement', 180], ['organizerContact', 'Public organiser contact', 100], ['eligibility', 'Eligibility', 100], ['sponsorText', 'Sponsors (confirmed only)', 100]] as const).map(([key, label, length]) => <label className="block" key={key}>{label}<input className="block border rounded p-2 w-full" maxLength={length} value={config[key] || ''} onChange={e => change(key, e.target.value)} /></label>)}
+        <label className="block">Highlights (one per line, up to three)<textarea className="block border rounded p-2 w-full" maxLength={240} value={config.highlights.join('\n')} onChange={e => change('highlights', e.target.value.split('\n').slice(0, 3).map(s => s.slice(0, 80)))} /></label>
+        <button className="border rounded p-2" onClick={() => run('copy', async () => { const result = await tournamentService.generatePosterCopy({ tournamentName: tournament.name, venue: tournament.venue, city: tournament.city, category: tournament.category, format: tournament.format }); if (!result?.tagline) throw new Error('Copy generation unavailable. You can edit the fields manually.'); setConfig(p => ({ ...p, tagline: String(result.tagline).slice(0, 100), announcement: String(result.announcement || '').slice(0, 180) })); setNotice('Review the suggested copy before publishing.'); })}>Suggest promotional copy</button>
+      </fieldset>
+      <div><div ref={preview} style={{ maxWidth: 440 }}><TournamentPoster tournament={tournament} config={config} qr={qr} /></div><a className="text-sm underline" href={publicPosterUrl(tournament.id)} target="_blank" rel="noopener noreferrer">Open QR destination</a>
+        {tournament.status === 'draft' && <p className="text-sm mt-2">Draft: the public link becomes available when registration opens.</p>}
+        {['localhost', '127.0.0.1'].includes(window.location.hostname) && <p className="text-sm mt-2">This QR uses your local address. Download from the deployed website before sharing with players.</p>}
+        {tournament.posterConfig?.sourceFingerprint && tournament.posterConfig.sourceFingerprint !== posterFingerprint(tournament) && <p className="text-amber-700">Tournament details changed. Publish and download an updated poster.</p>}
+        {tournament.posterConfig?.publishedAt && <p className="text-sm">Last saved: {new Date(tournament.posterConfig.publishedAt).toLocaleString()}</p>}
       </div>
     </div>
-  );
+    {(error || qrError) && <p role="alert" className="text-red-700 mt-3">{error || qrError}</p>}{notice && <p role="status" className="text-green-800 mt-3">{notice}</p>}
+    {exportUrl && <a href={exportUrl} target="_blank" rel="noopener noreferrer" className="underline block mt-2">Open exported PNG</a>}
+    <div className="flex justify-end gap-3 mt-4"><button className="border rounded p-2" disabled={!!busy} onClick={onClose}>Close</button><button className="border rounded p-2" disabled={!!busy || !qr} onClick={download}>{busy === 'download' ? 'Preparing PNG…' : 'Download PNG'}</button><button className="bg-green-800 text-white rounded p-2" disabled={!!busy || !qr} onClick={save}>{busy === 'publish' ? 'Saving…' : 'Publish poster'}</button></div>
+  </div></div>;
 };

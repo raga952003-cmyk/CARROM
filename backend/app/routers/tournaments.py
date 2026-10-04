@@ -744,7 +744,8 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
     admin_db = get_admin_db()
     try:
         before = require_tournament_access(admin_db, id, admin, "tournament.update")
-        assert_tournament_not_terminal(before, "edit tournament settings")
+        if set(data.model_dump(exclude_unset=True)) != {"poster_config"}:
+            assert_tournament_not_terminal(before, "edit tournament settings")
 
         update_dict = {}
         # Iterate over non-None values to build patch
@@ -758,7 +759,10 @@ async def update_tournament(id: str, data: TournamentUpdateSchema, admin = Depen
             elif key == "entryFee": update_dict["entry_fee"] = val
             elif key == "gpayUpiId": update_dict["gpay_upi_id"] = str(val or "").strip() or None
             elif key == "prizePool": update_dict["prize_pool"] = val
-            elif key == "posterConfig": update_dict["poster_config"] = val
+            elif key == "posterConfig":
+                if val is None:
+                    raise HTTPException(status_code=422, detail="Poster settings cannot be null.")
+                update_dict["poster_config"] = {**val, "publishedAt": datetime.now(timezone.utc).isoformat()}
             elif key == "schedulePublished": update_dict["schedule_published"] = val
             elif key == "fixturesGenerated": update_dict["fixtures_generated"] = val
             else:

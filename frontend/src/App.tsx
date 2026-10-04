@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { TournamentProvider, useTournament } from './context/TournamentContext';
 import { useHashRoute } from './utils/useHashRoute';
 import { BoardMode } from './components/scorer/BoardMode';
+import { PublicPosterView } from './components/public/PublicPosterView';
 import { SpectatorView } from './components/public/SpectatorView';
 import { ResetPassword } from './components/common/ResetPassword';
 import { PrintSheets } from './components/print/PrintSheets';
@@ -17,8 +18,9 @@ const TournamentApp: React.FC = () => {
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
-  const { role, notifications, currentUser } = useTournament();
+  const { role, notifications, currentUser, setActiveTournamentId } = useTournament();
   const route = useHashRoute();
+  useEffect(() => { if (currentUser && route.view === 'join' && route.segments[1]) setActiveTournamentId(route.segments[1]); }, [currentUser?.id, route.view, route.segments[1], setActiveTournamentId]);
   const unreadCount = notifications.filter(n => !n.read).length;
 
   // Board mode and the print sheets are signed-in surfaces, but they replace
@@ -105,6 +107,7 @@ const AppWrapper: React.FC = () => {
 
   // Public board: rendered outside the provider so it never needs a session
   // and never triggers the authenticated refresh loop.
+  if (route.view === 'poster') return <PublicPosterView tournamentId={route.segments[1] || ''} />;
   if (route.view === 'live') {
     return <SpectatorView tournamentId={route.segments[1] || undefined} />;
   }
